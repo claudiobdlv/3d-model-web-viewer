@@ -7,6 +7,7 @@ Target:
 - Server path: `/home/Claudio/3d-model-web-viewer/apps/server`
 - Port: `3009`
 - Service name: `3d-model-web-viewer`
+- Node.js: `24.x` or newer is required for `node:sqlite`
 
 ## First Deploy Or Redeploy
 
@@ -51,6 +52,26 @@ The service should set:
 
 ```text
 PORT=3009
+```
+
+Example `systemd` unit:
+
+```ini
+[Unit]
+Description=3D Model Web Viewer
+After=network.target
+
+[Service]
+Type=simple
+User=Claudio
+WorkingDirectory=/home/Claudio/3d-model-web-viewer/apps/server
+Environment=PORT=3009
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 ## Validation
