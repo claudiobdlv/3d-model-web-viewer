@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3D Viewer MVP</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="header">
+        <div>
+          <h1>3D Viewer MVP</h1>
+          <p>Upload STEP, STP, GLB, or test GLTF files. GLB uploads are viewable immediately.</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Upload model</h2>
+        <form action="/api/models" method="post" enctype="multipart/form-data">
+          <input
+            type="file"
+            name="modelFile"
+            accept=".step,.stp,.glb,.gltf"
+            required
+          />
+          <button type="submit">Upload</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>Uploaded models</h2>
+          <button id="refreshButton" type="button">Refresh</button>
+        </div>
+        <div id="modelList" class="model-list">Loading...</div>
+      </section>
+    </main>
+
+    <script>
+      const modelList = document.querySelector("#modelList");
+      const refreshButton = document.querySelector("#refreshButton");
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#039;"
+        })[char]);
+      }
+
+      async function loadModels() {
+        modelList.textContent = "Loading...";
+        const response = await fetch("/api/models");
+        if (!response.ok) {
+          modelList.textContent = "Could not load uploaded models.";
+          return;
+        }
+
+        const models = await response.json();
+        if (models.length === 0) {
+          modelList.innerHTML = '<p class="empty">No models uploaded yet.</p>';
+          return;
+        }
+
+        modelList.innerHTML = `
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Slug</th>
+                <th>Source file</th>
+                <th>Status</th>
+                <th>Viewer</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${models.map((model) => `
+                <tr>
+                  <td>${escapeHtml(model.name)}</td>
+                  <td><code>${escapeHtml(model.slug)}</code></td>
+                  <td>${escapeHtml(model.source_filename)}</td>
+                  <td><span class="status">${escapeHtml(model.status)}</span></td>
+                  <td><a href="/3dviewer/${encodeURIComponent(model.slug)}">Open</a></td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `;
+      }
+
+      refreshButton.addEventListener("click", loadModels);
+      loadModels();
+    </script>
+  </body>
+</html>
