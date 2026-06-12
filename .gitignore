@@ -32,3 +32,4 @@ apps/server/storage/*.sqlite-shm
 apps/server/storage/*.sqlite-wal
 apps/server/storage/*.db-shm
 apps/server/storage/*.db-wal
+apps/worker/worker-output/

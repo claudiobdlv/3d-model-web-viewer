@@ -1,0 +1,174 @@
+import fs from "node:fs";
+import path from "node:path";
+import express from "express";
+import multer from "multer";
+import {
+  getJobForWorker,
+  getNextWorkerJob,
+  markJobFailed,
+  markJobProcessing,
+  markJobReady
+} from "../db.js";
+import { getModelDir, getUploadDir, isSafeSlug } from "../storage.js";
+
+const developmentWorkerToken = "dev-worker-token";
+const workerToken = process.env.WORKER_API_TOKEN || developmentWorkerToken;
+
+if (!process.env.WORKER_API_TOKEN) {
+  console.warn(
+    "WORKER_API_TOKEN is not set. Worker API is using the default development token; set WORKER_API_TOKEN for deployed environments."
+  );
+}
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 250 * 1024 * 1024
+  }
+});
+
+export const workerRouter = express.Router();
+
+workerRouter.use((req, res, next) => {
+  const expectedHeader = `Bearer ${workerToken}`;
+  if (req.header("authorization") !== expectedHeader) {
+    res.status(401).json({ error: "Worker API token is missing or invalid." });
+    return;
+  }
+
+  next();
+});
+
+workerRouter.get("/jobs/next", (_req, res) => {
+  const job = getNextWorkerJob();
+  if (!job) {
+    res.json({ job: null });
+    return;
+  }
+
+  res.json({
+    job: {
+      id: job.id,
+      modelSlug: job.model_slug,
+      sourceFilename: job.source_filename,
+      downloadUrl: `/api/worker/jobs/${job.id}/source`
+    }
+  });
+});
+
+workerRouter.post("/jobs/:jobId/start", (req, res) => {
+  const jobId = Number(req.params.jobId);
+  const job = getValidStepJob(jobId);
+  if (!job) {
+    res.status(404).json({ error: "Worker job not found." });
+    return;
+  }
+
+  markJobProcessing(job.id);
+  res.json({ ok: true });
+});
+
+workerRouter.get("/jobs/:jobId/source", (req, res) => {
+  const jobId = Number(req.params.jobId);
+  const job = getValidStepJob(jobId);
+  if (!job) {
+    res.status(404).json({ error: "Worker job not found." });
+    return;
+  }
+
+  const sourcePath = path.join(getUploadDir(job.model_slug), job.source_filename);
+  if (!fs.existsSync(sourcePath)) {
+    res.status(404).json({ error: "Source file not found." });
+    return;
+  }
+
+  res.download(sourcePath, job.source_filename);
+});
+
+workerRouter.post(
+  "/jobs/:jobId/complete",
+  upload.fields([
+    { name: "display.glb", maxCount: 1 },
+    { name: "displayGlb", maxCount: 1 },
+    { name: "manifest.json", maxCount: 1 },
+    { name: "manifest", maxCount: 1 },
+    { name: "stats.json", maxCount: 1 },
+    { name: "stats", maxCount: 1 }
+  ]),
+  (req, res) => {
+    const jobId = Number(req.params.jobId);
+    const job = getValidStepJob(jobId);
+    if (!job) {
+      res.status(404).json({ error: "Worker job not found." });
+      return;
+    }
+
+    const files = req.files as Record<string, Express.Multer.File[] | undefined>;
+    const displayGlb = firstFile(files, "display.glb", "displayGlb");
+    if (!displayGlb) {
+      res.status(400).json({ error: "display.glb upload is required." });
+      return;
+    }
+
+    const modelDir = getModelDir(job.model_slug);
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.writeFileSync(path.join(modelDir, "display.glb"), displayGlb.buffer);
+
+    const manifest = firstFile(files, "manifest.json", "manifest");
+    if (manifest) {
+      fs.writeFileSync(path.join(modelDir, "manifest.json"), manifest.buffer);
+    }
+
+    const stats = firstFile(files, "stats.json", "stats");
+    if (stats) {
+      fs.writeFileSync(path.join(modelDir, "stats.json"), stats.buffer);
+    }
+
+    markJobReady(job.id);
+    res.json({ ok: true, status: "ready" });
+  }
+);
+
+workerRouter.post("/jobs/:jobId/fail", (req, res) => {
+  const jobId = Number(req.params.jobId);
+  const job = getValidStepJob(jobId);
+  if (!job) {
+    res.status(404).json({ error: "Worker job not found." });
+    return;
+  }
+
+  const message =
+    typeof req.body?.message === "string" && req.body.message.trim()
+      ? req.body.message.trim().slice(0, 2000)
+      : "Worker failed without an error message.";
+
+  markJobFailed(job.id, message);
+  res.json({ ok: true, status: "failed" });
+});
+
+function firstFile(
+  files: Record<string, Express.Multer.File[] | undefined>,
+  ...fieldNames: string[]
+): Express.Multer.File | undefined {
+  for (const fieldName of fieldNames) {
+    const file = files[fieldName]?.[0];
+    if (file) {
+      return file;
+    }
+  }
+
+  return undefined;
+}
+
+function getValidStepJob(jobId: number) {
+  if (!Number.isInteger(jobId) || jobId < 1) {
+    return undefined;
+  }
+
+  const job = getJobForWorker(jobId);
+  if (!job || !isSafeSlug(job.model_slug) || ![".step", ".stp"].includes(job.source_ext)) {
+    return undefined;
+  }
+
+  return job;
+}

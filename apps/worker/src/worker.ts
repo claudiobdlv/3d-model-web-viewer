@@ -1,0 +1,68 @@
+import path from "node:path";
+import { WorkerClient, type WorkerJob } from "./client.js";
+import { loadConfig } from "./config.js";
+import { fakeProcess } from "./fakeProcessor.js";
+
+const config = loadConfig();
+const client = new WorkerClient(config);
+
+console.log(`Fake worker starting against ${config.serverUrl}`);
+console.log(`Poll interval: ${config.pollIntervalMs / 1000}s`);
+console.log(`Output dir: ${config.outputDir}`);
+console.log(`Run once: ${config.runOnce}`);
+
+while (true) {
+  await pollOnce();
+  if (config.runOnce) {
+    break;
+  }
+
+  await sleep(config.pollIntervalMs);
+}
+
+async function pollOnce(): Promise<boolean> {
+  const job = await client.getNextJob();
+  if (!job) {
+    console.log("No pending worker job.");
+    return false;
+  }
+
+  await processJob(job);
+  return true;
+}
+
+async function processJob(job: WorkerJob): Promise<void> {
+  console.log(`Processing job ${job.id} for ${job.modelSlug}`);
+  try {
+    await client.startJob(job.id);
+
+    const jobDir = path.join(config.outputDir, job.modelSlug);
+    const sourcePath = path.join(jobDir, "source.step");
+    await client.downloadSource(job, sourcePath);
+    console.log(`Downloaded source for ${job.modelSlug}`);
+
+    const output = await fakeProcess({
+      slug: job.modelSlug,
+      sourcePath,
+      outputDir: config.outputDir,
+      placeholderGlb: config.placeholderGlb
+    });
+
+    await client.completeJob(job.id, output);
+    console.log(`Completed fake processing for ${job.modelSlug}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown worker error.";
+    console.error(`Job ${job.id} failed: ${message}`);
+
+    try {
+      await client.failJob(job.id, message);
+    } catch (failError) {
+      const failMessage = failError instanceof Error ? failError.message : "Unknown fail-reporting error.";
+      console.error(`Could not report failure for job ${job.id}: ${failMessage}`);
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

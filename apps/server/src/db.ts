@@ -24,6 +24,9 @@ export type JobRecord = {
   message: string | null;
   created_at: string;
   updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  failed_at: string | null;
 };
 
 const dbPath = path.join(storageRoot, "viewer.sqlite");
@@ -54,9 +57,23 @@ export function initDb(): void {
       message TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      started_at TEXT,
+      completed_at TEXT,
+      failed_at TEXT,
       FOREIGN KEY (model_id) REFERENCES models(id)
     );
   `);
+
+  ensureColumn("jobs", "started_at", "TEXT");
+  ensureColumn("jobs", "completed_at", "TEXT");
+  ensureColumn("jobs", "failed_at", "TEXT");
+}
+
+function ensureColumn(table: string, column: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((existing) => existing.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 export function listModels(): ModelRecord[] {
@@ -111,4 +128,93 @@ export function createJob(input: {
 
 export function listJobs(): JobRecord[] {
   return db.prepare("SELECT * FROM jobs ORDER BY created_at DESC, id DESC").all() as JobRecord[];
+}
+
+export type WorkerJobRecord = JobRecord & {
+  source_filename: string;
+  source_ext: string;
+};
+
+export function getNextWorkerJob(): WorkerJobRecord | undefined {
+  return db
+    .prepare(
+      `SELECT jobs.*, models.source_filename, models.source_ext
+       FROM jobs
+       JOIN models ON models.id = jobs.model_id
+       WHERE jobs.type = 'step-to-glb'
+         AND jobs.status IN ('uploaded', 'queued')
+         AND models.source_ext IN ('.step', '.stp')
+       ORDER BY jobs.created_at ASC, jobs.id ASC
+       LIMIT 1`
+    )
+    .get() as WorkerJobRecord | undefined;
+}
+
+export function getJobForWorker(jobId: number): WorkerJobRecord | undefined {
+  return db
+    .prepare(
+      `SELECT jobs.*, models.source_filename, models.source_ext
+       FROM jobs
+       JOIN models ON models.id = jobs.model_id
+       WHERE jobs.id = ?`
+    )
+    .get(jobId) as WorkerJobRecord | undefined;
+}
+
+export function markJobProcessing(jobId: number): void {
+  db.prepare(
+    `UPDATE jobs
+     SET status = 'processing',
+         message = 'Worker started processing.',
+         updated_at = CURRENT_TIMESTAMP,
+         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+         completed_at = NULL,
+         failed_at = NULL
+     WHERE id = ?`
+  ).run(jobId);
+
+  db.prepare(
+    `UPDATE models
+     SET status = 'processing',
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
+  ).run(jobId);
+}
+
+export function markJobReady(jobId: number, message = "Worker completed fake processing."): void {
+  db.prepare(
+    `UPDATE jobs
+     SET status = 'ready',
+         message = ?,
+         updated_at = CURRENT_TIMESTAMP,
+         completed_at = CURRENT_TIMESTAMP,
+         failed_at = NULL
+     WHERE id = ?`
+  ).run(message, jobId);
+
+  db.prepare(
+    `UPDATE models
+     SET status = 'ready',
+         has_display_glb = 1,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
+  ).run(jobId);
+}
+
+export function markJobFailed(jobId: number, message: string): void {
+  db.prepare(
+    `UPDATE jobs
+     SET status = 'failed',
+         message = ?,
+         updated_at = CURRENT_TIMESTAMP,
+         failed_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).run(message, jobId);
+
+  db.prepare(
+    `UPDATE models
+     SET status = 'failed',
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
+  ).run(jobId);
 }
