@@ -94,6 +94,8 @@ workerRouter.post(
     { name: "manifest", maxCount: 1 },
     { name: "stats.json", maxCount: 1 },
     { name: "stats", maxCount: 1 },
+    { name: "material-debug.json", maxCount: 1 },
+    { name: "materialDebug", maxCount: 1 },
     { name: "conversion.log", maxCount: 1 },
     { name: "conversionLog", maxCount: 1 }
   ]),
@@ -124,6 +126,11 @@ workerRouter.post(
     const stats = firstFile(files, "stats.json", "stats");
     if (stats) {
       fs.writeFileSync(path.join(modelDir, "stats.json"), stats.buffer);
+    }
+
+    const materialDebug = firstFile(files, "material-debug.json", "materialDebug");
+    if (materialDebug) {
+      fs.writeFileSync(path.join(modelDir, "material-debug.json"), materialDebug.buffer);
     }
 
     const conversionLog = firstFile(files, "conversion.log", "conversionLog");

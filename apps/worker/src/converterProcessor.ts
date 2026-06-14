@@ -14,6 +14,7 @@ export type ConverterProcessorOutput = {
   displayGlbPath: string;
   manifestPath: string;
   statsPath: string;
+  materialDebugPath: string;
   conversionLogPath: string;
 };
 
@@ -31,11 +32,13 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   const rawGlbPath = path.join(jobDir, "display.raw.glb");
   const displayGlbPath = path.join(jobDir, "display.glb");
   const statsPath = path.join(jobDir, "stats.json");
+  const materialDebugPath = path.join(jobDir, "material-debug.json");
   const conversionLogPath = path.join(jobDir, "conversion.log");
 
   await assertFile(rawGlbPath, "converter did not produce display.raw.glb");
   await fs.promises.copyFile(rawGlbPath, displayGlbPath);
   await assertFile(statsPath, "converter did not produce stats.json");
+  await assertFile(materialDebugPath, "converter did not produce material-debug.json");
   await assertFile(conversionLogPath, "converter did not produce conversion.log");
 
   const now = new Date().toISOString();
@@ -60,6 +63,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     displayGlbPath,
     manifestPath,
     statsPath,
+    materialDebugPath,
     conversionLogPath
   };
 }

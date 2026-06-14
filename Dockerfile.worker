@@ -10,6 +10,7 @@ RUN cd apps/worker && npm ci
 
 COPY apps/converter ./apps/converter
 COPY apps/worker ./apps/worker
+COPY config ./config
 
 WORKDIR /app/apps/worker
 
@@ -17,5 +18,7 @@ ENV SERVER_URL=http://server:3009
 ENV WORKER_OUTPUT_DIR=/app/worker-output
 ENV CONVERTER_CLI=/app/apps/converter/src/cli.js
 ENV CONVERTER_QUALITY=balanced
+ENV MATERIAL_RULES_MODE=fallback
+ENV MATERIAL_RULES_PATH=/app/config/material-rules.json
 
 CMD ["npm", "start"]

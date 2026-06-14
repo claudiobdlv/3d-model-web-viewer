@@ -1,0 +1,35 @@
+{
+  "rules": [
+    {
+      "name": "pipes-and-tubes-red",
+      "materialName": "Rule_pipe_red",
+      "color": "#c1121f",
+      "contains": ["pipe", "pipes", "tube", "tubes", "tubing", "line"]
+    },
+    {
+      "name": "valves-and-instruments-navy",
+      "materialName": "Rule_valve_instrument_navy",
+      "color": "#0b1f4d",
+      "contains": ["valve", "instrument", "gauge", "regulator", "sensor", "meter", "transmitter"],
+      "regex": ["\\b(psv|prv|pcv|fcv|lcv|tcv|pi|ti|fi|li|pt|tt|ft|lt)[-_ ]?\\d*\\b"]
+    },
+    {
+      "name": "fittings-and-connectors-grey",
+      "materialName": "Rule_fitting_connector_grey",
+      "color": "#8f98a3",
+      "contains": ["fitting", "connector", "union", "elbow", "tee", "nut", "adapter", "coupling", "flange", "reducer"]
+    },
+    {
+      "name": "supports-and-rails-green",
+      "materialName": "Rule_support_rail_green",
+      "color": "#238636",
+      "contains": ["clamp", "support", "rail", "bracket", "strut", "mount", "channel"]
+    },
+    {
+      "name": "panels-and-plates-light-grey",
+      "materialName": "Rule_panel_plate_light_grey",
+      "color": "#e8eaed",
+      "contains": ["panel", "plate", "backing", "backplate", "board", "enclosure"]
+    }
+  ]
+}

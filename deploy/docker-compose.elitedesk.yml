@@ -33,8 +33,11 @@ services:
       SERVER_URL: http://server:3009
       WORKER_OUTPUT_DIR: /app/worker-output
       CONVERTER_CLI: /app/apps/converter/src/cli.js
+      MATERIAL_RULES_MODE: ${MATERIAL_RULES_MODE:-fallback}
+      MATERIAL_RULES_PATH: /app/config/material-rules.json
     volumes:
       - ../data/worker-output:/app/worker-output
+      - ../config/material-rules.json:/app/config/material-rules.json:ro
     depends_on:
       server:
         condition: service_healthy

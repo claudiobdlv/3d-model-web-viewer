@@ -131,7 +131,27 @@ button:hover {
 table {
   width: 100%;
   border-collapse: collapse;
-  overflow-wrap: anywhere;
+  table-layout: fixed;
+}
+
+.col-date {
+  width: 150px;
+}
+
+.col-name {
+  width: auto;
+}
+
+.col-status {
+  width: 110px;
+}
+
+.col-action {
+  width: 94px;
+}
+
+.col-delete {
+  width: 100px;
 }
 
 th,
@@ -140,6 +160,8 @@ td {
   border-bottom: 1px solid #e8edf5;
   text-align: left;
   vertical-align: top;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 th {
@@ -152,6 +174,93 @@ code,
   border-radius: 5px;
   background: #eef3f9;
   padding: 3px 6px;
+}
+
+code {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  color: #59657a;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.date-cell {
+  width: 142px;
+  color: #59657a;
+  font-size: 13px;
+}
+
+.name-cell {
+  width: auto;
+}
+
+.name-cell strong,
+.name-cell span {
+  display: block;
+}
+
+.name-cell span {
+  margin-top: 3px;
+  color: #59657a;
+  font-size: 13px;
+}
+
+.name-cell code {
+  margin-top: 6px;
+}
+
+.status-cell {
+  width: 104px;
+}
+
+.action-cell {
+  width: 92px;
+}
+
+.delete-cell {
+  width: 96px;
+  text-align: right;
+}
+
+.action-stack {
+  display: table-cell;
+}
+
+.table-button {
+  display: inline-flex;
+  min-height: 34px;
+  min-width: 74px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: #172033;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.table-button.secondary {
+  background: #eef3f9;
+  color: #172033;
+}
+
+.muted {
+  color: #7a8496;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.text-link {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .empty {
@@ -234,5 +343,18 @@ code,
   td {
     border: 0;
     padding: 5px 0;
+  }
+
+  .date-cell,
+  .name-cell,
+  .status-cell,
+  .action-cell,
+  .delete-cell {
+    width: auto;
+    text-align: left;
+  }
+
+  .action-stack {
+    display: block;
   }
 }

@@ -3,103 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>3D Viewer MVP</title>
+    <title>3D Viewer</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="page">
+    <main class="page landing-page">
       <section class="header">
         <div>
-          <h1>3D Viewer MVP</h1>
-          <p>Public model list and read-only viewer pages.</p>
+          <h1>3D Viewer</h1>
+          <p>Open a shared model link to view it, or sign in to manage uploads.</p>
         </div>
-        <a class="button-link" href="/admin">Admin upload</a>
-      </section>
-
-      <section class="panel">
-        <div class="section-title">
-          <h2>Uploaded models</h2>
-          <button id="refreshButton" type="button">Refresh</button>
-        </div>
-        <div id="modelList" class="model-list">Loading...</div>
+        <a class="button-link" href="/admin">Admin</a>
       </section>
     </main>
-
-    <script>
-      const modelList = document.querySelector("#modelList");
-      const refreshButton = document.querySelector("#refreshButton");
-
-      function escapeHtml(value) {
-        return String(value).replace(/[&<>"']/g, (char) => ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#039;"
-        })[char]);
-      }
-
-      function formatDate(value) {
-        const date = new Date(value);
-        if (Number.isNaN(date.getTime())) return "";
-        return date.toLocaleString(undefined, {
-          year: "numeric",
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit"
-        });
-      }
-
-      async function loadModels() {
-        modelList.textContent = "Loading...";
-        const response = await fetch("/api/models");
-        if (!response.ok) {
-          modelList.textContent = "Could not load uploaded models.";
-          return;
-        }
-
-        const models = await response.json();
-        if (models.length === 0) {
-          modelList.innerHTML = '<p class="empty">No models uploaded yet.</p>';
-          return;
-        }
-
-        modelList.innerHTML = `
-          <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Name</th>
-                <th>Slug</th>
-                <th>Source file</th>
-                <th>Status</th>
-                <th>Viewer</th>
-                <th>Downloads</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${models.map((model) => `
-                <tr>
-                  <td>${escapeHtml(formatDate(model.created_at))}</td>
-                  <td>${escapeHtml(model.name)}</td>
-                  <td><code>${escapeHtml(model.slug)}</code></td>
-                  <td>${escapeHtml(model.source_filename)}</td>
-                  <td><span class="status">${escapeHtml(model.status)}</span></td>
-                  <td><a href="/3dviewer/${encodeURIComponent(model.slug)}">Open</a></td>
-                  <td>
-                    <a href="/downloads/${encodeURIComponent(model.slug)}/original">Original</a>
-                    ${model.has_display_glb ? ` | <a href="/downloads/${encodeURIComponent(model.slug)}/display.glb">GLB</a>` : ""}
-                  </td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        `;
-      }
-
-      refreshButton.addEventListener("click", loadModels);
-      loadModels();
-    </script>
   </body>
 </html>

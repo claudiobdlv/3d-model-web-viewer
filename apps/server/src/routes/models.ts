@@ -111,7 +111,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
       : "Uploaded source model is queued for conversion."
   });
 
-  res.redirect(303, "/");
+  res.redirect(303, "/admin");
 });
 
 modelsRouter.delete("/:slug", async (req, res, next) => {

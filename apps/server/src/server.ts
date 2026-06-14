@@ -21,7 +21,7 @@ ensureStorage();
 initDb();
 
 app.use(express.json());
-app.use(express.static(publicRoot, { index: "index.html" }));
+app.use(express.static(publicRoot, { index: false }));
 
 if (!process.env.ADMIN_PASSWORD) {
   console.warn("ADMIN_PASSWORD is not set. Admin upload routes are unprotected in this local/development process.");
@@ -62,6 +62,11 @@ app.get("/admin", requireAdmin, (_req, res) => {
   res.sendFile(path.join(publicRoot, "admin.html"));
 });
 
+app.get("/", (_req, res) => {
+  res.redirect(302, "/admin");
+});
+
+app.get("/api/models", requireAdmin);
 app.post("/api/models", requireAdmin);
 app.delete("/api/models/:slug", requireAdmin);
 app.use("/api/models", modelsRouter);
@@ -150,6 +155,22 @@ app.get("/admin/logs/:slug/conversion.log", requireAdmin, (req, res) => {
   }
 
   res.type("text/plain").sendFile(filePath);
+});
+
+app.get("/admin/models/:slug/material-debug.json", requireAdmin, (req, res) => {
+  const slug = String(req.params.slug);
+  if (!isSafeSlug(slug)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  const filePath = path.join(getModelDir(slug), "material-debug.json");
+  if (!fs.existsSync(filePath)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  res.type("application/json").sendFile(filePath);
 });
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

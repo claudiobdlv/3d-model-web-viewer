@@ -18,6 +18,7 @@ data/db/app.sqlite
 data/uploads/<model-id>/original.step
 data/models/<model-id>/display.glb
 data/models/<model-id>/stats.json
+data/models/<model-id>/material-debug.json
 data/logs/<model-id>/conversion.log
 ```
 
@@ -46,7 +47,30 @@ POLL_INTERVAL_SECONDS=15
 WORKER_OUTPUT_DIR=/app/worker-output
 CONVERTER_CLI=/app/apps/converter/src/cli.js
 CONVERTER_QUALITY=high
+MATERIAL_RULES_MODE=fallback
+MATERIAL_RULES_PATH=/app/config/material-rules.json
 ```
+
+Converter quality presets:
+
+- `fast`: quicker, rougher tessellation for checks.
+- `balanced`: default middle ground.
+- `high`: smoother curved fittings and round parts while preserving hard CAD
+  face boundaries; recommended for the current MVP.
+- `detailed`: alias of the high-quality settings for now.
+
+Material rule modes:
+
+- `off`: use only colours exposed by the STEP import.
+- `fallback`: keep STEP face, mesh, and inherited colours when present; use
+  editable rules only for otherwise uncoloured meshes.
+- `override`: use matching rules before STEP colours. Use this when Rhino shows
+  a consistent assembly/layer/block colour scheme but the web conversion only
+  preserves it on some repeated parts.
+
+The default rules file is `config/material-rules.json`. It is mounted into the
+worker at `/app/config/material-rules.json`, so rule changes can be made without
+editing converter code.
 
 Start only this project:
 
@@ -63,11 +87,14 @@ Invoke-WebRequest http://192.168.1.200:3009/health
 
 Open:
 
-- Public model list: `http://192.168.1.200:3009/`
 - Protected admin/upload: `http://192.168.1.200:3009/admin`
+- Shared read-only viewer link: `http://192.168.1.200:3009/3dviewer/<slug>`
 
 The admin page uses HTTP Basic Auth. The username can be anything; the password
 must match `ADMIN_PASSWORD`.
+
+The app no longer exposes a public list of uploaded models. `/` redirects to
+`/admin`; public users should receive direct `/3dviewer/<slug>` links only.
 
 ## Day-2 Commands
 
@@ -162,10 +189,19 @@ curl -I https://viewer.parametricstandards.com
 ## MVP Limitations
 
 - STEP color accuracy depends on what `occt-import-js` exposes and may not
-  perfectly match the original CAD source.
+  perfectly match the original CAD source. Rhino may preserve STEP
+  layer/block/instance colours that `occt-import-js` does not expose through
+  its mesh/face result, so material rules are the MVP workaround for a stable
+  visual scheme.
+- Each conversion writes `material-debug.json` beside `stats.json`. Inspect it
+  to see mesh names, hierarchy paths, source colour presence, final material
+  colours, and whether a rule matched. Tune `config/material-rules.json`, then
+  reconvert the model to apply new rules.
 - `CONVERTER_QUALITY=high` improves curved fittings and round parts at the
-  cost of longer conversion time and larger GLBs. Use `balanced` if mobile load
-  time or conversion time becomes more important than edge smoothness.
+  cost of longer conversion time and larger GLBs. It still keeps planar CAD
+  panels flat and avoids smoothing across hard CAD face edges. Use `balanced`
+  if mobile load time or conversion time becomes more important than edge
+  smoothness.
 - Some STEP files may fail conversion. Failed jobs are marked `failed`, and the
   admin page links to conversion logs when available.
 - Large files can take minutes and significant CPU/RAM during `OCCT ReadStepFile`.
