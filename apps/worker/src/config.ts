@@ -8,6 +8,7 @@ export type WorkerConfig = {
   converterCli: string;
   quality: string;
   runOnce: boolean;
+  keepWorkerOutput: boolean;
 };
 
 export function loadConfig(argv = process.argv): WorkerConfig {
@@ -25,7 +26,8 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     outputDir: path.resolve(process.env.WORKER_OUTPUT_DIR || "./worker-output"),
     converterCli: path.resolve(process.env.CONVERTER_CLI || "../converter/src/cli.js"),
     quality: process.env.CONVERTER_QUALITY || "balanced",
-    runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once")
+    runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once"),
+    keepWorkerOutput: process.env.KEEP_WORKER_OUTPUT !== "false"
   };
 }
 

@@ -31,6 +31,7 @@ services:
     environment:
       SERVER_URL: http://server:3009
       WORKER_OUTPUT_DIR: /app/worker-output
+      KEEP_WORKER_OUTPUT: ${KEEP_WORKER_OUTPUT:-true}
       CONVERTER_CLI: /app/apps/converter/src/cli.js
     volumes:
       - ../data/worker-output:/app/worker-output

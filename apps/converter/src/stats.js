@@ -19,7 +19,9 @@ class StatsRecorder {
       meshCount: 0,
       objectCount: 0,
       validation: null,
-      importOptionsUsed: null
+      importOptionsUsed: null,
+      materialStats: null,
+      normalStats: null
     };
     this.startTime = null;
   }
@@ -70,6 +72,14 @@ class StatsRecorder {
       this.stats.nodeCount = validation.nodeCount || 0;
       this.stats.objectCount = validation.nodeCount || 0;
     }
+  }
+
+  recordMaterialStats(materialStats) {
+    this.stats.materialStats = materialStats;
+  }
+
+  recordNormalStats(normalStats) {
+    this.stats.normalStats = normalStats;
   }
 
   setSuccess(isSuccess) {

@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import { WorkerClient, type WorkerJob } from "./client.js";
 import { loadConfig } from "./config.js";
 import { convertStepJob } from "./converterProcessor.js";
@@ -11,6 +12,7 @@ console.log(`Poll interval: ${config.pollIntervalMs / 1000}s`);
 console.log(`Output dir: ${config.outputDir}`);
 console.log(`Converter CLI: ${config.converterCli}`);
 console.log(`Converter quality: ${config.quality}`);
+console.log(`Keep worker output: ${config.keepWorkerOutput}`);
 console.log(`Run once: ${config.runOnce}`);
 
 while (true) {
@@ -53,6 +55,11 @@ async function processJob(job: WorkerJob): Promise<void> {
 
     await client.completeJob(job.id, output);
     console.log(`Completed conversion for ${job.modelSlug}`);
+
+    if (!config.keepWorkerOutput) {
+      await fs.promises.rm(jobDir, { recursive: true, force: true });
+      console.log(`Cleaned worker output for ${job.modelSlug}`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown worker error.";
     console.error(`Job ${job.id} failed: ${message}`);

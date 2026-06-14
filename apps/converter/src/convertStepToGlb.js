@@ -29,16 +29,24 @@ function getQualityOptions(preset) {
   };
 }
 
-function generateNormals(positions, indices) {
-  const normals = new Float32Array(positions.length);
-  for (let i = 0; i < indices.length; i += 3) {
-    const idx1 = indices[i] * 3;
-    const idx2 = indices[i + 1] * 3;
-    const idx3 = indices[i + 2] * 3;
+const DEFAULT_COLOR = [0.72, 0.72, 0.72, 1.0];
 
-    const v1 = [positions[idx1], positions[idx1 + 1], positions[idx1 + 2]];
-    const v2 = [positions[idx2], positions[idx2 + 1], positions[idx2 + 2]];
-    const v3 = [positions[idx3], positions[idx3 + 1], positions[idx3 + 2]];
+function generateFlatGeometry(positions, indices) {
+  const flatPositions = new Float32Array(indices.length * 3);
+  const flatNormals = new Float32Array(indices.length * 3);
+  const flatIndices = new Uint32Array(indices.length);
+
+  for (let i = 0; i < indices.length; i += 3) {
+    const source1 = indices[i] * 3;
+    const source2 = indices[i + 1] * 3;
+    const source3 = indices[i + 2] * 3;
+    const target1 = i * 3;
+    const target2 = (i + 1) * 3;
+    const target3 = (i + 2) * 3;
+
+    const v1 = [positions[source1], positions[source1 + 1], positions[source1 + 2]];
+    const v2 = [positions[source2], positions[source2 + 1], positions[source2 + 2]];
+    const v3 = [positions[source3], positions[source3 + 1], positions[source3 + 2]];
 
     const ax = v2[0] - v1[0];
     const ay = v2[1] - v1[1];
@@ -48,25 +56,146 @@ function generateNormals(positions, indices) {
     const by = v3[1] - v1[1];
     const bz = v3[2] - v1[2];
 
-    const nx = ay * bz - az * by;
-    const ny = az * bx - ax * bz;
-    const nz = ax * by - ay * bx;
-
-    normals[idx1] += nx; normals[idx1 + 1] += ny; normals[idx1 + 2] += nz;
-    normals[idx2] += nx; normals[idx2 + 1] += ny; normals[idx2 + 2] += nz;
-    normals[idx3] += nx; normals[idx3 + 1] += ny; normals[idx3 + 2] += nz;
-  }
-
-  for (let i = 0; i < normals.length; i += 3) {
-    const nx = normals[i], ny = normals[i + 1], nz = normals[i + 2];
+    let nx = ay * bz - az * by;
+    let ny = az * bx - ax * bz;
+    let nz = ax * by - ay * bx;
     const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
     if (len > 0) {
-      normals[i] /= len;
-      normals[i + 1] /= len;
-      normals[i + 2] /= len;
+      nx /= len;
+      ny /= len;
+      nz /= len;
+    }
+
+    flatPositions.set(v1, target1);
+    flatPositions.set(v2, target2);
+    flatPositions.set(v3, target3);
+    flatNormals.set([nx, ny, nz], target1);
+    flatNormals.set([nx, ny, nz], target2);
+    flatNormals.set([nx, ny, nz], target3);
+    flatIndices[i] = i;
+    flatIndices[i + 1] = i + 1;
+    flatIndices[i + 2] = i + 2;
+  }
+
+  return {
+    positions: flatPositions,
+    normals: flatNormals,
+    indices: flatIndices,
+    source: 'generated_flat_triangle_normals'
+  };
+}
+
+function triangleNormalFromPositions(positions, i1, i2, i3) {
+  const idx1 = i1 * 3;
+  const idx2 = i2 * 3;
+  const idx3 = i3 * 3;
+
+  const ax = positions[idx2] - positions[idx1];
+  const ay = positions[idx2 + 1] - positions[idx1 + 1];
+  const az = positions[idx2 + 2] - positions[idx1 + 2];
+
+  const bx = positions[idx3] - positions[idx1];
+  const by = positions[idx3 + 1] - positions[idx1 + 1];
+  const bz = positions[idx3 + 2] - positions[idx1 + 2];
+
+  const nx = ay * bz - az * by;
+  const ny = az * bx - ax * bz;
+  const nz = ax * by - ay * bx;
+  const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+
+  if (len === 0) {
+    return [0, 0, 0];
+  }
+
+  return [nx / len, ny / len, nz / len];
+}
+
+function dot(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function getPlanarFaceNormal(positions, indices, firstTriangle, lastTriangle) {
+  const normals = [];
+  let sum = [0, 0, 0];
+
+  for (let triangleIndex = firstTriangle; triangleIndex <= lastTriangle; triangleIndex++) {
+    const offset = triangleIndex * 3;
+    const normal = triangleNormalFromPositions(positions, indices[offset], indices[offset + 1], indices[offset + 2]);
+    if (normal[0] === 0 && normal[1] === 0 && normal[2] === 0) continue;
+    normals.push(normal);
+    sum = [sum[0] + normal[0], sum[1] + normal[1], sum[2] + normal[2]];
+  }
+
+  const len = Math.sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]);
+  if (len === 0 || normals.length === 0) return null;
+
+  const average = [sum[0] / len, sum[1] / len, sum[2] / len];
+  const cosTolerance = Math.cos(2.5 * Math.PI / 180);
+  return normals.every((normal) => dot(normal, average) >= cosTolerance) ? average : null;
+}
+
+function buildCadFaceGeometry(positions, indices, normals, brepFaces) {
+  const triangleTotal = Math.floor(indices.length / 3);
+  const flatPositions = new Float32Array(indices.length * 3);
+  const flatNormals = new Float32Array(indices.length * 3);
+  const flatIndices = new Uint32Array(indices.length);
+  const faceByTriangle = new Map();
+  let planarFaceCount = 0;
+  let curvedFaceCount = 0;
+
+  for (const face of brepFaces) {
+    const first = Math.max(0, face.first);
+    const last = Math.min(face.last, triangleTotal - 1);
+    if (first > last) continue;
+    const planarNormal = getPlanarFaceNormal(positions, indices, first, last);
+    if (planarNormal) {
+      planarFaceCount++;
+    } else {
+      curvedFaceCount++;
+    }
+    for (let triangleIndex = first; triangleIndex <= last; triangleIndex++) {
+      faceByTriangle.set(triangleIndex, planarNormal);
     }
   }
-  return normals;
+
+  for (let i = 0; i < indices.length; i += 3) {
+    const triangleIndex = i / 3;
+    const planarNormal = faceByTriangle.get(triangleIndex);
+    const triangleNormal = planarNormal || triangleNormalFromPositions(positions, indices[i], indices[i + 1], indices[i + 2]);
+
+    for (let vertexOffset = 0; vertexOffset < 3; vertexOffset++) {
+      const sourceVertex = indices[i + vertexOffset];
+      const sourcePositionOffset = sourceVertex * 3;
+      const targetOffset = (i + vertexOffset) * 3;
+      flatPositions[targetOffset] = positions[sourcePositionOffset];
+      flatPositions[targetOffset + 1] = positions[sourcePositionOffset + 1];
+      flatPositions[targetOffset + 2] = positions[sourcePositionOffset + 2];
+
+      if (planarNormal || !normals || normals.length !== positions.length) {
+        flatNormals[targetOffset] = triangleNormal[0];
+        flatNormals[targetOffset + 1] = triangleNormal[1];
+        flatNormals[targetOffset + 2] = triangleNormal[2];
+      } else {
+        const sourceNormalOffset = sourceVertex * 3;
+        flatNormals[targetOffset] = normals[sourceNormalOffset];
+        flatNormals[targetOffset + 1] = normals[sourceNormalOffset + 1];
+        flatNormals[targetOffset + 2] = normals[sourceNormalOffset + 2];
+      }
+
+      flatIndices[i + vertexOffset] = i + vertexOffset;
+    }
+  }
+
+  return {
+    positions: flatPositions,
+    normals: flatNormals,
+    indices: flatIndices,
+    planarFaceCount,
+    curvedFaceCount,
+    source: normals && normals.length === positions.length
+      ? 'cad_face_planar_normals_with_occt_curves'
+      : 'cad_face_planar_normals_with_generated_curves'
+  };
 }
 
 function isArrayLike(value) {
@@ -97,6 +226,33 @@ function hasFiniteNumbers(value) {
     if (!Number.isFinite(item)) return false;
   }
   return true;
+}
+
+function isValidColor(value) {
+  return isArrayLike(value)
+    && value.length >= 3
+    && Number.isFinite(value[0])
+    && Number.isFinite(value[1])
+    && Number.isFinite(value[2]);
+}
+
+function normalizeColor(value) {
+  if (!isValidColor(value)) return null;
+  return [
+    Math.min(1, Math.max(0, Number(value[0]))),
+    Math.min(1, Math.max(0, Number(value[1]))),
+    Math.min(1, Math.max(0, Number(value[2]))),
+    value.length >= 4 && Number.isFinite(value[3]) ? Math.min(1, Math.max(0, Number(value[3]))) : 1.0
+  ];
+}
+
+function colorKey(color) {
+  return color.map((value) => Number(value).toFixed(6)).join(',');
+}
+
+function materialNameFromColor(color, source) {
+  const rgb = color.slice(0, 3).map((value) => Math.round(value * 255).toString(16).padStart(2, '0')).join('');
+  return `CAD_${source}_${rgb}`;
 }
 
 function getNormalizedMeshGeometry(occtMesh) {
@@ -202,6 +358,8 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
 
   const options = getQualityOptions(quality);
   statsRecorder.setQuality(quality, options);
+  logger.warn(`[tessellation] quality=${quality} linearUnit=${options.linearUnit} linearDeflectionType=${options.linearDeflectionType} linearDeflection=${options.linearDeflection} angularDeflection=${options.angularDeflection}`);
+  logger.warn('[normals] using BREP face ranges to keep planar CAD faces flat; preserving OCCT normals for curved/non-planar faces where available.');
 
   let result;
   try {
@@ -267,32 +425,166 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
 
   let triangleCount = 0;
   let totalNodeCount = 0;
+  const materialStats = {
+    totalMeshes: result.meshes.length,
+    referencedMeshes: referencedMeshIndices.size,
+    meshesWithExplicitColor: 0,
+    meshesUsingDefaultMaterial: 0,
+    meshesWithFaceColors: 0,
+    uniqueMaterialCount: 0,
+    uniqueColors: [],
+    materialSources: {
+      face: 0,
+      mesh: 0,
+      default: 0
+    },
+    meshDetails: []
+  };
+  const normalStats = {
+    mode: 'cad_face_planar_normals_with_occt_curves',
+    meshesUsingOcctNormals: 0,
+    meshesUsingGeneratedFlatNormals: 0,
+    meshesUsingCadFaceNormals: 0,
+    planarBrepFaces: 0,
+    curvedOrNonPlanarBrepFaces: 0,
+    expandedVertexMeshes: 0
+  };
 
   // Cache glTF meshes to avoid duplicating
   const gltfMeshes = new Map();
   const materialCache = new Map();
   const normalizedGeometry = new Map();
 
-  function getOrCreateMaterial(colorArray) {
-    let colorKey = 'default';
-    let baseColor = [0.8, 0.8, 0.8, 1.0];
-    if (colorArray && colorArray.length >= 3) {
-      baseColor = [colorArray[0], colorArray[1], colorArray[2], 1.0];
-      colorKey = baseColor.join(',');
-    }
+  function getOrCreateMaterial(color, source) {
+    const baseColor = color || DEFAULT_COLOR;
+    const key = `${source}:${colorKey(baseColor)}`;
 
-    if (materialCache.has(colorKey)) {
-      return materialCache.get(colorKey);
+    if (materialCache.has(key)) {
+      return materialCache.get(key);
     }
 
     const material = document.createMaterial()
       .setBaseColorFactor(baseColor)
-      .setRoughnessFactor(0.5)
-      .setMetallicFactor(0.1)
-      .setName(`Material_${colorKey}`);
+      .setRoughnessFactor(0.78)
+      .setMetallicFactor(0)
+      .setDoubleSided(true)
+      .setName(materialNameFromColor(baseColor, source));
 
-    materialCache.set(colorKey, material);
+    materialCache.set(key, material);
     return material;
+  }
+
+  function getMaterialRuns(occtMesh, triangleTotal) {
+    const meshColor = normalizeColor(occtMesh.color);
+    const faces = Array.isArray(occtMesh.brep_faces)
+      ? occtMesh.brep_faces
+        .filter((face) => Number.isInteger(face.first) && Number.isInteger(face.last) && face.first <= face.last)
+        .sort((a, b) => a.first - b.first)
+      : [];
+    const runs = [];
+    let triangleIndex = 0;
+    let explicitFaceColorCount = 0;
+
+    for (const face of faces) {
+      if (triangleIndex < face.first) {
+        runs.push({
+          firstTriangle: triangleIndex,
+          lastTriangle: Math.min(face.first - 1, triangleTotal - 1),
+          color: meshColor || DEFAULT_COLOR,
+          source: meshColor ? 'mesh' : 'default'
+        });
+      }
+
+      const faceColor = normalizeColor(face.color);
+      if (faceColor) explicitFaceColorCount++;
+      runs.push({
+        firstTriangle: Math.max(0, face.first),
+        lastTriangle: Math.min(face.last, triangleTotal - 1),
+        color: faceColor || meshColor || DEFAULT_COLOR,
+        source: faceColor ? 'face' : meshColor ? 'mesh' : 'default'
+      });
+      triangleIndex = Math.min(face.last + 1, triangleTotal);
+    }
+
+    if (triangleIndex < triangleTotal) {
+      runs.push({
+        firstTriangle: triangleIndex,
+        lastTriangle: triangleTotal - 1,
+        color: meshColor || DEFAULT_COLOR,
+        source: meshColor ? 'mesh' : 'default'
+      });
+    }
+
+    if (runs.length === 0 && triangleTotal > 0) {
+      runs.push({
+        firstTriangle: 0,
+        lastTriangle: triangleTotal - 1,
+        color: meshColor || DEFAULT_COLOR,
+        source: meshColor ? 'mesh' : 'default'
+      });
+    }
+
+    const mergedRuns = [];
+    for (const run of runs) {
+      if (run.firstTriangle > run.lastTriangle) continue;
+      const previous = mergedRuns.at(-1);
+      if (previous && previous.source === run.source && colorKey(previous.color) === colorKey(run.color) && previous.lastTriangle + 1 === run.firstTriangle) {
+        previous.lastTriangle = run.lastTriangle;
+      } else {
+        mergedRuns.push(run);
+      }
+    }
+
+    return {
+      runs: mergedRuns,
+      meshColor,
+      explicitFaceColorCount,
+      faceRangeCount: faces.length
+    };
+  }
+
+  function createGeometryAccessors(meshIndex, positions, indices, normals) {
+    const occtMesh = result.meshes[meshIndex];
+    const brepFaces = Array.isArray(occtMesh.brep_faces)
+      ? occtMesh.brep_faces.filter((face) => Number.isInteger(face.first) && Number.isInteger(face.last) && face.first <= face.last)
+      : [];
+
+    if (brepFaces.length > 0) {
+      const cadGeometry = buildCadFaceGeometry(positions, indices, normals, brepFaces);
+      normalStats.meshesUsingCadFaceNormals++;
+      normalStats.planarBrepFaces += cadGeometry.planarFaceCount;
+      normalStats.curvedOrNonPlanarBrepFaces += cadGeometry.curvedFaceCount;
+      normalStats.expandedVertexMeshes++;
+      if (normals && normals.length === positions.length) {
+        normalStats.meshesUsingOcctNormals++;
+      }
+      return {
+        positionsArray: cadGeometry.positions,
+        normalsArray: cadGeometry.normals,
+        indicesArray: cadGeometry.indices,
+        normalSource: cadGeometry.source
+      };
+    }
+
+    if (normals && normals.length === positions.length) {
+      normalStats.meshesUsingOcctNormals++;
+      return {
+        positionsArray: new Float32Array(positions),
+        normalsArray: new Float32Array(normals),
+        indicesArray: new Uint32Array(indices),
+        normalSource: 'occt'
+      };
+    }
+
+    statsRecorder.warn(`Generating flat normals for mesh index ${meshIndex}; OCCT normals were missing.`);
+    const flatGeometry = generateFlatGeometry(positions, indices);
+    normalStats.meshesUsingGeneratedFlatNormals++;
+    return {
+      positionsArray: flatGeometry.positions,
+      normalsArray: flatGeometry.normals,
+      indicesArray: flatGeometry.indices,
+      normalSource: flatGeometry.source
+    };
   }
 
   function getOrCreateMesh(meshIndex) {
@@ -310,41 +602,64 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
 
     const positions = geometry.positions;
     const indices = geometry.indices;
-    let normals = geometry.normals;
-
-    if (!normals || normals.length === 0) {
-      statsRecorder.warn(`Generating missing normals for mesh index ${meshIndex}`);
-      normals = generateNormals(positions, indices);
-    }
+    const { positionsArray, normalsArray, indicesArray, normalSource } = createGeometryAccessors(
+      meshIndex,
+      positions,
+      indices,
+      geometry.normals
+    );
 
     triangleCount += Math.floor(indices.length / 3);
+    const triangleTotal = Math.floor(indicesArray.length / 3);
+    const materialInfo = getMaterialRuns(occtMesh, triangleTotal);
+    const meshHasExplicitColor = Boolean(materialInfo.meshColor || materialInfo.explicitFaceColorCount > 0);
+    const meshUsesDefault = materialInfo.runs.some((run) => run.source === 'default');
+
+    if (meshHasExplicitColor) materialStats.meshesWithExplicitColor++;
+    if (meshUsesDefault) materialStats.meshesUsingDefaultMaterial++;
+    if (materialInfo.explicitFaceColorCount > 0) materialStats.meshesWithFaceColors++;
 
     const positionAccessor = document.createAccessor()
-      .setArray(new Float32Array(positions))
+      .setArray(positionsArray)
       .setType(Accessor.Type.VEC3)
       .setBuffer(buffer);
 
     const normalAccessor = document.createAccessor()
-      .setArray(new Float32Array(normals))
+      .setArray(normalsArray)
       .setType(Accessor.Type.VEC3)
       .setBuffer(buffer);
 
-    // Depending on max index, we can use Uint16 or Uint32. Let's use Uint32 for safety
-    const indexAccessor = document.createAccessor()
-      .setArray(new Uint32Array(indices))
-      .setType(Accessor.Type.SCALAR)
-      .setBuffer(buffer);
+    const gltfMesh = document.createMesh(occtMesh.name || `Mesh_${meshIndex}`);
 
-    const material = getOrCreateMaterial(occtMesh.color);
+    for (const run of materialInfo.runs) {
+      const runIndices = indicesArray.slice(run.firstTriangle * 3, (run.lastTriangle + 1) * 3);
+      const indexAccessor = document.createAccessor()
+        .setArray(runIndices)
+        .setType(Accessor.Type.SCALAR)
+        .setBuffer(buffer);
+      const material = getOrCreateMaterial(run.color, run.source);
 
-    const primitive = document.createPrimitive()
-      .setAttribute('POSITION', positionAccessor)
-      .setAttribute('NORMAL', normalAccessor)
-      .setIndices(indexAccessor)
-      .setMaterial(material);
+      gltfMesh.addPrimitive(
+        document.createPrimitive()
+          .setAttribute('POSITION', positionAccessor)
+          .setAttribute('NORMAL', normalAccessor)
+          .setIndices(indexAccessor)
+          .setMaterial(material)
+      );
 
-    const gltfMesh = document.createMesh(occtMesh.name || `Mesh_${meshIndex}`)
-      .addPrimitive(primitive);
+      materialStats.materialSources[run.source] += 1;
+    }
+
+    materialStats.meshDetails.push({
+      meshIndex,
+      name: occtMesh.name || `Mesh_${meshIndex}`,
+      meshColor: materialInfo.meshColor,
+      brepFaceRanges: materialInfo.faceRangeCount,
+      explicitFaceColors: materialInfo.explicitFaceColorCount,
+      materialRuns: materialInfo.runs.length,
+      usedDefaultMaterial: meshUsesDefault,
+      normalSource
+    });
 
     gltfMeshes.set(meshIndex, gltfMesh);
     return gltfMesh;
@@ -404,6 +719,13 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
     gltfMeshes.size,
     totalNodeCount // Treating nodes as objects
   );
+  materialStats.uniqueColors = Array.from(new Set(Array.from(materialCache.keys()).map((key) => key.split(':').slice(1).join(':'))));
+  materialStats.uniqueMaterialCount = materialCache.size;
+  statsRecorder.recordMaterialStats(materialStats);
+  statsRecorder.recordNormalStats(normalStats);
+  logger.warn(`[materials] totalMeshes=${materialStats.totalMeshes} referencedMeshes=${materialStats.referencedMeshes} explicitColorMeshes=${materialStats.meshesWithExplicitColor} defaultMaterialMeshes=${materialStats.meshesUsingDefaultMaterial} faceColorMeshes=${materialStats.meshesWithFaceColors} uniqueMaterials=${materialStats.uniqueMaterialCount}`);
+  logger.warn(`[materials] sources faceRuns=${materialStats.materialSources.face} meshRuns=${materialStats.materialSources.mesh} defaultRuns=${materialStats.materialSources.default}`);
+  logger.warn(`[normals] mode=${normalStats.mode} cadFaceMeshes=${normalStats.meshesUsingCadFaceNormals} occtMeshes=${normalStats.meshesUsingOcctNormals} generatedFlatMeshes=${normalStats.meshesUsingGeneratedFlatNormals} planarBrepFaces=${normalStats.planarBrepFaces} curvedOrNonPlanarBrepFaces=${normalStats.curvedOrNonPlanarBrepFaces}`);
 
   const io = new NodeIO();
 

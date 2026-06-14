@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "validate": "node src/cli.js validate",
-    "test": "node src/cli.js --input node_modules/occt-import-js/test/testfiles/cax-if/dm1-id-214.stp --outdir output/smoke"
+    "test": "node src/smokeTest.js"
   },
   "dependencies": {
     "@gltf-transform/core": "^4.1.0",
