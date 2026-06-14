@@ -9,7 +9,7 @@ import {
   markJobProcessing,
   markJobReady
 } from "../db.js";
-import { getModelDir, getUploadDir, isSafeSlug } from "../storage.js";
+import { getLogDir, getModelDir, getUploadDir, isSafeSlug } from "../storage.js";
 
 const developmentWorkerToken = "dev-worker-token";
 const workerToken = process.env.WORKER_API_TOKEN || developmentWorkerToken;
@@ -76,7 +76,7 @@ workerRouter.get("/jobs/:jobId/source", (req, res) => {
     return;
   }
 
-  const sourcePath = path.join(getUploadDir(job.model_slug), job.source_filename);
+  const sourcePath = path.join(getUploadDir(job.model_slug), `original${job.source_ext}`);
   if (!fs.existsSync(sourcePath)) {
     res.status(404).json({ error: "Source file not found." });
     return;
@@ -93,7 +93,9 @@ workerRouter.post(
     { name: "manifest.json", maxCount: 1 },
     { name: "manifest", maxCount: 1 },
     { name: "stats.json", maxCount: 1 },
-    { name: "stats", maxCount: 1 }
+    { name: "stats", maxCount: 1 },
+    { name: "conversion.log", maxCount: 1 },
+    { name: "conversionLog", maxCount: 1 }
   ]),
   (req, res) => {
     const jobId = Number(req.params.jobId);
@@ -124,7 +126,14 @@ workerRouter.post(
       fs.writeFileSync(path.join(modelDir, "stats.json"), stats.buffer);
     }
 
-    markJobReady(job.id);
+    const conversionLog = firstFile(files, "conversion.log", "conversionLog");
+    if (conversionLog) {
+      const logDir = getLogDir(job.model_slug);
+      fs.mkdirSync(logDir, { recursive: true });
+      fs.writeFileSync(path.join(logDir, "conversion.log"), conversionLog.buffer);
+    }
+
+    markJobReady(job.id, "Worker completed STEP/STP conversion.");
     res.json({ ok: true, status: "ready" });
   }
 );

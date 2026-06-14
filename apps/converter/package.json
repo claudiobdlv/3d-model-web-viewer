@@ -1,0 +1,19 @@
+{
+  "name": "converter",
+  "version": "1.0.0",
+  "description": "Local STEP to GLB converter",
+  "main": "src/cli.js",
+  "bin": {
+    "converter": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "validate": "node src/cli.js validate",
+    "test": "node src/cli.js --input node_modules/occt-import-js/test/testfiles/cax-if/dm1-id-214.stp --outdir output/smoke"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "^4.1.0",
+    "commander": "^12.1.0",
+    "occt-import-js": "^0.0.23"
+  }
+}

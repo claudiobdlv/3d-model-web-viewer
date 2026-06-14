@@ -1,15 +1,18 @@
 # 3D Model Web Viewer
 
-MVP Express + TypeScript server for uploading and viewing 3D models in the browser.
+MVP Express + TypeScript server, worker, and STEP/STP converter for uploading
+and viewing 3D models in the browser.
 
-The first stable baseline supports:
+The MVP supports:
 
-- GLB uploads, copied into viewer-ready storage and displayed with `<model-viewer>`.
-- STEP/STP uploads, recorded for the future conversion worker but not processed yet.
+- Public model list and read-only `<model-viewer>` pages.
+- Protected admin upload page using `ADMIN_PASSWORD` in deployed environments.
+- GLB uploads, copied into viewer-ready storage and displayed immediately.
+- STEP/STP uploads, queued for the worker and converted to GLB by `apps/converter`.
 - SQLite model/job records using `node:sqlite`.
-- A simple model list and per-model viewer page.
+- Original and converted GLB download links.
 
-The app currently lives in `apps/server` and runs on port `3009`.
+The app currently runs on port `3009`.
 
 ## Local Setup
 
@@ -23,10 +26,24 @@ npm start
 
 Open `http://localhost:3009`.
 
+For worker testing, start the server with `WORKER_API_TOKEN` set, then run:
+
+```powershell
+cd apps/worker
+npm install
+$env:WORKER_API_TOKEN="dev-worker-token"
+$env:SERVER_URL="http://localhost:3009"
+npm start
+```
+
+For the EliteDesk Docker deployment and Cloudflare Tunnel steps, see
+`README_DEPLOY_ELITEDESK.md`.
+
 ## Runtime Storage
 
 Do not commit runtime model data. These paths are ignored:
 
+- `data/`
 - `apps/server/storage/uploads/`
 - `apps/server/storage/models/`
 - `apps/server/storage/*.sqlite`
@@ -34,4 +51,6 @@ Do not commit runtime model data. These paths are ignored:
 
 ## Worker Pipeline
 
-STEP conversion is intentionally out of scope for this baseline. STEP/STP files can be uploaded and tracked, but they remain `uploaded` until a later worker/conversion pipeline is added.
+STEP/STP jobs move from `uploaded` to `processing`, then `ready` or `failed`.
+The worker stores `display.glb`, `stats.json`, and `conversion.log` for each
+conversion.

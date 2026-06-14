@@ -25,6 +25,10 @@ a {
 }
 
 .header {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
   margin-bottom: 20px;
 }
 
@@ -80,6 +84,25 @@ button {
   color: #ffffff;
   font-weight: 700;
   cursor: pointer;
+}
+
+.button-link {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  border-radius: 6px;
+  background: #172033;
+  color: #ffffff;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.button-link.secondary {
+  background: #eef3f9;
+  color: #172033;
 }
 
 button:hover {
@@ -169,6 +192,10 @@ code,
   }
 
   .viewer-toolbar {
+    display: block;
+  }
+
+  .header {
     display: block;
   }
 

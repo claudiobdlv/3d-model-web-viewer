@@ -1,0 +1,21 @@
+FROM node:24-bookworm-slim
+
+WORKDIR /app
+
+COPY apps/converter/package*.json ./apps/converter/
+RUN cd apps/converter && npm ci
+
+COPY apps/worker/package*.json ./apps/worker/
+RUN cd apps/worker && npm ci
+
+COPY apps/converter ./apps/converter
+COPY apps/worker ./apps/worker
+
+WORKDIR /app/apps/worker
+
+ENV SERVER_URL=http://server:3009
+ENV WORKER_OUTPUT_DIR=/app/worker-output
+ENV CONVERTER_CLI=/app/apps/converter/src/cli.js
+ENV CONVERTER_QUALITY=balanced
+
+CMD ["npm", "start"]

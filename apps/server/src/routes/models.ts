@@ -69,7 +69,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
   fs.mkdirSync(uploadDir, { recursive: true });
   fs.mkdirSync(modelDir, { recursive: true });
 
-  const sourcePath = path.join(uploadDir, sourceFilename);
+  const sourcePath = path.join(uploadDir, `original${sourceExt}`);
   fs.writeFileSync(sourcePath, req.file.buffer);
 
   const isGlb = sourceExt === ".glb";
@@ -105,7 +105,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
     status,
     message: isGlb
       ? "Uploaded GLB is ready for viewing."
-      : "Uploaded source model is waiting for the future conversion worker."
+      : "Uploaded source model is queued for conversion."
   });
 
   res.redirect(303, "/");

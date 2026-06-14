@@ -33,11 +33,13 @@ export class WorkerClient {
     displayGlbPath: string;
     manifestPath: string;
     statsPath: string;
+    conversionLogPath: string;
   }): Promise<void> {
     const form = new FormData();
     form.set("display.glb", await fileBlob(output.displayGlbPath), "display.glb");
     form.set("manifest.json", await fileBlob(output.manifestPath), "manifest.json");
     form.set("stats.json", await fileBlob(output.statsPath), "stats.json");
+    form.set("conversion.log", await fileBlob(output.conversionLogPath), "conversion.log");
 
     await this.request(`/api/worker/jobs/${jobId}/complete`, {
       method: "POST",

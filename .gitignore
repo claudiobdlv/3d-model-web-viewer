@@ -2,6 +2,7 @@ node_modules/
 
 .env
 .env.*
+!.env.example
 
 dist/
 build/
@@ -25,6 +26,8 @@ temp/
 
 apps/server/storage/uploads/
 apps/server/storage/models/
+apps/server/storage/db/
+apps/server/storage/logs/
 apps/server/storage/*.db
 apps/server/storage/*.sqlite
 apps/server/storage/*.sqlite3
@@ -33,3 +36,12 @@ apps/server/storage/*.sqlite-wal
 apps/server/storage/*.db-shm
 apps/server/storage/*.db-wal
 apps/worker/worker-output/
+data/
+backups/
+
+# Converter output
+apps/converter/input/
+apps/converter/output/
+apps/converter/test-models/
+*.step
+*.stp

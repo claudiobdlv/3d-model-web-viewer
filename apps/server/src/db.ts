@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { storageRoot } from "./storage.js";
+import { dbRoot } from "./storage.js";
 
 export type ModelRecord = {
   id: number;
@@ -29,8 +29,8 @@ export type JobRecord = {
   failed_at: string | null;
 };
 
-const dbPath = path.join(storageRoot, "viewer.sqlite");
-fs.mkdirSync(storageRoot, { recursive: true });
+const dbPath = path.join(dbRoot, "app.sqlite");
+fs.mkdirSync(dbRoot, { recursive: true });
 export const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA journal_mode = WAL");
 

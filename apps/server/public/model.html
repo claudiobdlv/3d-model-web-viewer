@@ -10,10 +10,11 @@
   <body>
     <main class="page viewer-page">
       <div class="viewer-toolbar">
-        <a href="/">Back to uploads</a>
+        <a href="/">Back to models</a>
         <div>
           <h1 id="modelTitle">Model Viewer</h1>
           <p id="modelMeta"></p>
+          <p id="downloadLinks"></p>
         </div>
       </div>
 
@@ -39,6 +40,7 @@
       const meta = document.querySelector("#modelMeta");
       const viewer = document.querySelector("#viewer");
       const notReady = document.querySelector("#notReady");
+      const downloadLinks = document.querySelector("#downloadLinks");
 
       async function loadModel() {
         const modelResponse = await fetch(`/api/models/${encodeURIComponent(slug)}`);
@@ -51,6 +53,7 @@
         const model = await modelResponse.json();
         title.textContent = model.name;
         meta.textContent = `${model.source_filename} | ${model.status}`;
+        downloadLinks.innerHTML = `<a href="/downloads/${encodeURIComponent(slug)}/original">Download original</a>`;
 
         const displayResponse = await fetch(`/model-files/${encodeURIComponent(slug)}/display.glb`, {
           method: "HEAD"
@@ -63,6 +66,7 @@
 
         viewer.setAttribute("src", `/model-files/${encodeURIComponent(slug)}/display.glb`);
         viewer.setAttribute("alt", model.name);
+        downloadLinks.innerHTML += ` | <a href="/downloads/${encodeURIComponent(slug)}/display.glb">Download GLB</a>`;
         viewer.classList.remove("hidden");
       }
 

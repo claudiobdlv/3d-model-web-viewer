@@ -6,14 +6,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export const appRoot = path.resolve(__dirname, "..");
-export const storageRoot = path.join(appRoot, "storage");
+export const storageRoot = path.resolve(process.env.DATA_DIR || path.join(appRoot, "storage"));
+export const dbRoot = path.join(storageRoot, "db");
 export const uploadsRoot = path.join(storageRoot, "uploads");
 export const modelsRoot = path.join(storageRoot, "models");
+export const logsRoot = path.join(storageRoot, "logs");
 export const publicRoot = path.join(appRoot, "public");
 
 export function ensureStorage(): void {
+  fs.mkdirSync(dbRoot, { recursive: true });
   fs.mkdirSync(uploadsRoot, { recursive: true });
   fs.mkdirSync(modelsRoot, { recursive: true });
+  fs.mkdirSync(logsRoot, { recursive: true });
 }
 
 export function createSlug(filename: string): string {
@@ -38,6 +42,10 @@ export function getUploadDir(slug: string): string {
 
 export function getModelDir(slug: string): string {
   return path.join(modelsRoot, slug);
+}
+
+export function getLogDir(slug: string): string {
+  return path.join(logsRoot, slug);
 }
 
 export function isSafeSlug(slug: string): boolean {

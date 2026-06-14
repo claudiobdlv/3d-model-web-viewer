@@ -1,0 +1,15 @@
+FROM node:24-bookworm-slim
+
+WORKDIR /app/apps/server
+
+COPY apps/server/package*.json ./
+RUN npm ci
+
+COPY apps/server ./
+
+ENV PORT=3009
+ENV DATA_DIR=/app/data
+
+EXPOSE 3009
+
+CMD ["npm", "start"]

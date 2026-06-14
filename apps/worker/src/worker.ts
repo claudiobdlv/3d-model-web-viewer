@@ -1,14 +1,16 @@
 import path from "node:path";
 import { WorkerClient, type WorkerJob } from "./client.js";
 import { loadConfig } from "./config.js";
-import { fakeProcess } from "./fakeProcessor.js";
+import { convertStepJob } from "./converterProcessor.js";
 
 const config = loadConfig();
 const client = new WorkerClient(config);
 
-console.log(`Fake worker starting against ${config.serverUrl}`);
+console.log(`Converter worker starting against ${config.serverUrl}`);
 console.log(`Poll interval: ${config.pollIntervalMs / 1000}s`);
 console.log(`Output dir: ${config.outputDir}`);
+console.log(`Converter CLI: ${config.converterCli}`);
+console.log(`Converter quality: ${config.quality}`);
 console.log(`Run once: ${config.runOnce}`);
 
 while (true) {
@@ -37,19 +39,20 @@ async function processJob(job: WorkerJob): Promise<void> {
     await client.startJob(job.id);
 
     const jobDir = path.join(config.outputDir, job.modelSlug);
-    const sourcePath = path.join(jobDir, "source.step");
+    const sourcePath = path.join(jobDir, job.sourceFilename);
     await client.downloadSource(job, sourcePath);
     console.log(`Downloaded source for ${job.modelSlug}`);
 
-    const output = await fakeProcess({
+    const output = await convertStepJob({
       slug: job.modelSlug,
       sourcePath,
       outputDir: config.outputDir,
-      placeholderGlb: config.placeholderGlb
+      converterCli: config.converterCli,
+      quality: config.quality
     });
 
     await client.completeJob(job.id, output);
-    console.log(`Completed fake processing for ${job.modelSlug}`);
+    console.log(`Completed conversion for ${job.modelSlug}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown worker error.";
     console.error(`Job ${job.id} failed: ${message}`);

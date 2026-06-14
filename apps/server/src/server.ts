@@ -7,7 +7,9 @@ import { modelsRouter } from "./routes/models.js";
 import { workerRouter } from "./routes/worker.js";
 import {
   ensureStorage,
+  getLogDir,
   getModelDir,
+  getUploadDir,
   isSafeSlug,
   publicRoot
 } from "./storage.js";
@@ -19,10 +21,50 @@ ensureStorage();
 initDb();
 
 app.use(express.json());
-app.use(express.static(publicRoot));
+app.use(express.static(publicRoot, { index: "index.html" }));
 
+if (!process.env.ADMIN_PASSWORD) {
+  console.warn("ADMIN_PASSWORD is not set. Admin upload routes are unprotected in this local/development process.");
+}
+
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const password = process.env.ADMIN_PASSWORD;
+  if (!password) {
+    next();
+    return;
+  }
+
+  const header = req.header("authorization") || "";
+  const [scheme, encoded] = header.split(" ");
+  if (scheme === "Basic" && encoded) {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    const submitted = separator >= 0 ? decoded.slice(separator + 1) : "";
+    if (submitted === password) {
+      next();
+      return;
+    }
+  }
+
+  res.setHeader("WWW-Authenticate", 'Basic realm="3D Viewer Admin"');
+  res.status(401).send("Admin password required.");
+}
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "3d-model-web-viewer" });
+});
+
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, service: "3d-model-web-viewer" });
+});
+
+app.get("/admin", requireAdmin, (_req, res) => {
+  res.sendFile(path.join(publicRoot, "admin.html"));
+});
+
+app.post("/api/models", requireAdmin);
 app.use("/api/models", modelsRouter);
-app.use("/api/jobs", jobsRouter);
+app.use("/api/jobs", requireAdmin, jobsRouter);
 app.use("/api/worker", workerRouter);
 
 app.get("/3dviewer/:slug", (req, res) => {
@@ -51,6 +93,62 @@ app.get("/model-files/:slug/:file", (req, res) => {
   }
 
   res.sendFile(filePath);
+});
+
+app.get("/downloads/:slug/original", (req, res) => {
+  const { slug } = req.params;
+  if (!isSafeSlug(slug)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  const uploadDir = getUploadDir(slug);
+  if (!fs.existsSync(uploadDir)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  const original = fs.readdirSync(uploadDir, { withFileTypes: true })
+    .find((entry) => entry.isFile() && /^original\.(step|stp|glb|gltf)$/i.test(entry.name));
+
+  if (!original) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  res.download(path.join(uploadDir, original.name));
+});
+
+app.get("/downloads/:slug/display.glb", (req, res) => {
+  const { slug } = req.params;
+  if (!isSafeSlug(slug)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  const filePath = path.join(getModelDir(slug), "display.glb");
+  if (!fs.existsSync(filePath)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  res.download(filePath, `${slug}.glb`);
+});
+
+app.get("/admin/logs/:slug/conversion.log", requireAdmin, (req, res) => {
+  const slug = String(req.params.slug);
+  if (!isSafeSlug(slug)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  const filePath = path.join(getLogDir(slug), "conversion.log");
+  if (!fs.existsSync(filePath)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  res.type("text/plain").sendFile(filePath);
 });
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
