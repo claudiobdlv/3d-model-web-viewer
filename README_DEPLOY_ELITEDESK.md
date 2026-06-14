@@ -45,7 +45,7 @@ SERVER_URL=http://server:3009
 POLL_INTERVAL_SECONDS=15
 WORKER_OUTPUT_DIR=/app/worker-output
 CONVERTER_CLI=/app/apps/converter/src/cli.js
-CONVERTER_QUALITY=balanced
+CONVERTER_QUALITY=high
 ```
 
 Start only this project:
@@ -163,6 +163,9 @@ curl -I https://viewer.parametricstandards.com
 
 - STEP color accuracy depends on what `occt-import-js` exposes and may not
   perfectly match the original CAD source.
+- `CONVERTER_QUALITY=high` improves curved fittings and round parts at the
+  cost of longer conversion time and larger GLBs. Use `balanced` if mobile load
+  time or conversion time becomes more important than edge smoothness.
 - Some STEP files may fail conversion. Failed jobs are marked `failed`, and the
   admin page links to conversion logs when available.
 - Large files can take minutes and significant CPU/RAM during `OCCT ReadStepFile`.

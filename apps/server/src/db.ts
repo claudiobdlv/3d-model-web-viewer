@@ -84,6 +84,16 @@ export function getModelBySlug(slug: string): ModelRecord | undefined {
   return db.prepare("SELECT * FROM models WHERE slug = ?").get(slug) as ModelRecord | undefined;
 }
 
+export function deleteModelBySlug(slug: string): { deletedJobs: number; deletedModels: number } {
+  const deleteJobsResult = db.prepare("DELETE FROM jobs WHERE model_slug = ?").run(slug);
+  const deleteModelResult = db.prepare("DELETE FROM models WHERE slug = ?").run(slug);
+
+  return {
+    deletedJobs: Number(deleteJobsResult.changes || 0),
+    deletedModels: Number(deleteModelResult.changes || 0)
+  };
+}
+
 export function createModel(input: {
   slug: string;
   name: string;

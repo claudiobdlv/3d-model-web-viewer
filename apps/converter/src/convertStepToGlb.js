@@ -16,9 +16,9 @@ function getQualityOptions(preset) {
   } else if (preset === 'balanced') {
     linearDeflection = 0.1;
     angularDeflection = 0.5;
-  } else if (preset === 'high') {
-    linearDeflection = 0.01;
-    angularDeflection = 0.1;
+  } else if (preset === 'high' || preset === 'detailed') {
+    linearDeflection = 0.035;
+    angularDeflection = 0.25;
   }
 
   return {
@@ -250,6 +250,184 @@ function colorKey(color) {
   return color.map((value) => Number(value).toFixed(6)).join(',');
 }
 
+function safeName(value) {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+}
+
+function getObjectColor(value) {
+  if (!value || typeof value !== 'object') return null;
+
+  const directCandidates = [
+    value.color,
+    value.colour,
+    value.diffuseColor,
+    value.diffuse_color,
+    value.materialColor,
+    value.material_color,
+    value.layerColor,
+    value.layer_color,
+    value.styleColor,
+    value.style_color
+  ];
+
+  for (const candidate of directCandidates) {
+    const color = normalizeColor(candidate);
+    if (color) return color;
+  }
+
+  if (value.material && typeof value.material === 'object') {
+    const color = getObjectColor(value.material);
+    if (color) return color;
+  }
+
+  if (value.style && typeof value.style === 'object') {
+    const color = getObjectColor(value.style);
+    if (color) return color;
+  }
+
+  return null;
+}
+
+function addCount(target, key) {
+  target[key] = (target[key] || 0) + 1;
+}
+
+function collectNodeStats(node, stats, depth = 0) {
+  if (!node || typeof node !== 'object') return;
+
+  stats.nodeCount++;
+  stats.maxNodeDepth = Math.max(stats.maxNodeDepth, depth);
+  const nodeName = safeName(node.name);
+  if (nodeName) stats.nodeNamesWithValues++;
+  if (getObjectColor(node)) stats.nodesWithExplicitColor++;
+
+  for (const key of Object.keys(node)) {
+    const value = node[key];
+    if (key === 'children') continue;
+    if (key === 'meshes') {
+      if (Array.isArray(value)) stats.nodesWithMeshReferences += value.length > 0 ? 1 : 0;
+      continue;
+    }
+
+    if (typeof value === 'string' && value.trim()) addCount(stats.nodeStringFields, key);
+    if (getObjectColor({ [key]: value })) addCount(stats.nodeColorFields, key);
+  }
+
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      collectNodeStats(child, stats, depth + 1);
+    }
+  }
+}
+
+function collectOcctMetadataStats(result) {
+  const stats = {
+    topLevelKeys: Object.keys(result || {}),
+    meshCount: Array.isArray(result && result.meshes) ? result.meshes.length : 0,
+    nodeCount: 0,
+    maxNodeDepth: 0,
+    nodesWithMeshReferences: 0,
+    nodeNamesWithValues: 0,
+    nodesWithExplicitColor: 0,
+    meshesWithNames: 0,
+    meshesWithExplicitColor: 0,
+    brepFaceCount: 0,
+    brepFacesWithExplicitColor: 0,
+    meshStringFields: {},
+    meshColorFields: {},
+    faceColorFields: {},
+    nodeStringFields: {},
+    nodeColorFields: {},
+    uniqueExplicitMeshColors: {},
+    uniqueExplicitFaceColors: {}
+  };
+
+  collectNodeStats(result && result.root, stats);
+
+  for (const mesh of result.meshes || []) {
+    if (!mesh || typeof mesh !== 'object') continue;
+    if (safeName(mesh.name)) stats.meshesWithNames++;
+    const meshColor = getObjectColor(mesh);
+    if (meshColor) {
+      stats.meshesWithExplicitColor++;
+      addCount(stats.uniqueExplicitMeshColors, colorKey(meshColor));
+    }
+
+    for (const key of Object.keys(mesh)) {
+      if (['attributes', 'index', 'brep_faces'].includes(key)) continue;
+      if (typeof mesh[key] === 'string' && mesh[key].trim()) addCount(stats.meshStringFields, key);
+      if (getObjectColor({ [key]: mesh[key] })) addCount(stats.meshColorFields, key);
+    }
+
+    for (const face of mesh.brep_faces || []) {
+      stats.brepFaceCount++;
+      const faceColor = getObjectColor(face);
+      if (faceColor) {
+        stats.brepFacesWithExplicitColor++;
+        addCount(stats.uniqueExplicitFaceColors, colorKey(faceColor));
+      }
+      for (const key of Object.keys(face)) {
+        if (getObjectColor({ [key]: face[key] })) addCount(stats.faceColorFields, key);
+      }
+    }
+  }
+
+  return stats;
+}
+
+function buildNameColorIndex(result) {
+  const buckets = new Map();
+
+  function add(name, color, reason = 'name') {
+    const normalizedName = safeName(name);
+    if (!normalizedName || !color) return;
+    const key = normalizedName.toLowerCase();
+    if (!buckets.has(key)) {
+      buckets.set(key, { name: normalizedName, counts: new Map() });
+    }
+    const bucket = buckets.get(key);
+    const materialKey = colorKey(color);
+    const current = bucket.counts.get(materialKey) || { color, count: 0, reasons: new Set() };
+    current.count++;
+    current.reasons.add(reason);
+    bucket.counts.set(materialKey, current);
+  }
+
+  function get(name) {
+    const bucket = buckets.get(safeName(name).toLowerCase());
+    if (!bucket) return null;
+    const ranked = Array.from(bucket.counts.values()).sort((a, b) => b.count - a.count);
+    if (ranked.length === 0) return null;
+    const reasons = Array.from(ranked[0].reasons || []);
+    return {
+      color: ranked[0].color,
+      source: reasons.includes('node-sibling') ? 'assembly' : ranked.length === 1 ? 'name' : 'name-dominant',
+      matchingColorCount: ranked[0].count,
+      colorVariantCount: ranked.length
+    };
+  }
+
+  for (const mesh of result.meshes || []) {
+    add(mesh && mesh.name, getObjectColor(mesh), 'mesh-name');
+  }
+
+  function walkNode(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node.meshes)) {
+      for (const meshIndex of node.meshes) {
+        const mesh = result.meshes && result.meshes[meshIndex];
+        add(node.name, getObjectColor(mesh), 'node-sibling');
+      }
+    }
+    if (Array.isArray(node.children)) {
+      for (const child of node.children) walkNode(child);
+    }
+  }
+  walkNode(result.root);
+
+  return { get };
+}
+
 function materialNameFromColor(color, source) {
   const rgb = color.slice(0, 3).map((value) => Math.round(value * 255).toString(16).padStart(2, '0')).join('');
   return `CAD_${source}_${rgb}`;
@@ -422,6 +600,12 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
   const document = new Document();
   const scene = document.createScene('Scene');
   const buffer = document.createBuffer('Data');
+  const occtMetadataStats = collectOcctMetadataStats(result);
+  const nameColorIndex = buildNameColorIndex(result);
+  statsRecorder.recordOcctMetadataStats(occtMetadataStats);
+  logger.warn(`[occt:metadata] keys=${occtMetadataStats.topLevelKeys.join(',')} nodes=${occtMetadataStats.nodeCount} maxDepth=${occtMetadataStats.maxNodeDepth} meshes=${occtMetadataStats.meshCount} namedNodes=${occtMetadataStats.nodeNamesWithValues} namedMeshes=${occtMetadataStats.meshesWithNames}`);
+  logger.warn(`[occt:colors] meshColors=${occtMetadataStats.meshesWithExplicitColor} faceColors=${occtMetadataStats.brepFacesWithExplicitColor} nodeColors=${occtMetadataStats.nodesWithExplicitColor} uniqueMeshColors=${Object.keys(occtMetadataStats.uniqueExplicitMeshColors).length} uniqueFaceColors=${Object.keys(occtMetadataStats.uniqueExplicitFaceColors).length}`);
+  logger.warn(`[occt:fields] meshColorFields=${Object.keys(occtMetadataStats.meshColorFields).join(',') || 'none'} faceColorFields=${Object.keys(occtMetadataStats.faceColorFields).join(',') || 'none'} nodeColorFields=${Object.keys(occtMetadataStats.nodeColorFields).join(',') || 'none'}`);
 
   let triangleCount = 0;
   let totalNodeCount = 0;
@@ -429,13 +613,21 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
     totalMeshes: result.meshes.length,
     referencedMeshes: referencedMeshIndices.size,
     meshesWithExplicitColor: 0,
+    explicitMeshColorCount: 0,
+    explicitFaceColorCount: 0,
     meshesUsingDefaultMaterial: 0,
     meshesWithFaceColors: 0,
+    meshesUsingInheritedColor: 0,
+    defaultMaterialCount: 0,
+    unknownUncoloredCount: 0,
     uniqueMaterialCount: 0,
     uniqueColors: [],
     materialSources: {
       face: 0,
       mesh: 0,
+      assembly: 0,
+      name: 0,
+      'name-dominant': 0,
       default: 0
     },
     meshDetails: []
@@ -474,8 +666,10 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
     return material;
   }
 
-  function getMaterialRuns(occtMesh, triangleTotal) {
-    const meshColor = normalizeColor(occtMesh.color);
+  function getMaterialRuns(occtMesh, triangleTotal, inheritedMaterial) {
+    const meshColor = getObjectColor(occtMesh);
+    const fallbackColor = inheritedMaterial && inheritedMaterial.color ? inheritedMaterial.color : DEFAULT_COLOR;
+    const fallbackSource = inheritedMaterial && inheritedMaterial.color ? inheritedMaterial.source : 'default';
     const faces = Array.isArray(occtMesh.brep_faces)
       ? occtMesh.brep_faces
         .filter((face) => Number.isInteger(face.first) && Number.isInteger(face.last) && face.first <= face.last)
@@ -490,18 +684,18 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
         runs.push({
           firstTriangle: triangleIndex,
           lastTriangle: Math.min(face.first - 1, triangleTotal - 1),
-          color: meshColor || DEFAULT_COLOR,
-          source: meshColor ? 'mesh' : 'default'
+          color: meshColor || fallbackColor,
+          source: meshColor ? 'mesh' : fallbackSource
         });
       }
 
-      const faceColor = normalizeColor(face.color);
+      const faceColor = getObjectColor(face);
       if (faceColor) explicitFaceColorCount++;
       runs.push({
         firstTriangle: Math.max(0, face.first),
         lastTriangle: Math.min(face.last, triangleTotal - 1),
-        color: faceColor || meshColor || DEFAULT_COLOR,
-        source: faceColor ? 'face' : meshColor ? 'mesh' : 'default'
+        color: faceColor || meshColor || fallbackColor,
+        source: faceColor ? 'face' : meshColor ? 'mesh' : fallbackSource
       });
       triangleIndex = Math.min(face.last + 1, triangleTotal);
     }
@@ -510,8 +704,8 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
       runs.push({
         firstTriangle: triangleIndex,
         lastTriangle: triangleTotal - 1,
-        color: meshColor || DEFAULT_COLOR,
-        source: meshColor ? 'mesh' : 'default'
+        color: meshColor || fallbackColor,
+        source: meshColor ? 'mesh' : fallbackSource
       });
     }
 
@@ -519,8 +713,8 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
       runs.push({
         firstTriangle: 0,
         lastTriangle: triangleTotal - 1,
-        color: meshColor || DEFAULT_COLOR,
-        source: meshColor ? 'mesh' : 'default'
+        color: meshColor || fallbackColor,
+        source: meshColor ? 'mesh' : fallbackSource
       });
     }
 
@@ -538,6 +732,7 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
     return {
       runs: mergedRuns,
       meshColor,
+      inheritedMaterial,
       explicitFaceColorCount,
       faceRangeCount: faces.length
     };
@@ -587,9 +782,12 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
     };
   }
 
-  function getOrCreateMesh(meshIndex) {
-    if (gltfMeshes.has(meshIndex)) {
-      return gltfMeshes.get(meshIndex);
+  function getOrCreateMesh(meshIndex, inheritedMaterial) {
+    const cacheKey = inheritedMaterial && inheritedMaterial.color
+      ? `${meshIndex}:${inheritedMaterial.source}:${colorKey(inheritedMaterial.color)}`
+      : `${meshIndex}:none`;
+    if (gltfMeshes.has(cacheKey)) {
+      return gltfMeshes.get(cacheKey);
     }
 
     const occtMesh = result.meshes[meshIndex];
@@ -611,11 +809,15 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
 
     triangleCount += Math.floor(indices.length / 3);
     const triangleTotal = Math.floor(indicesArray.length / 3);
-    const materialInfo = getMaterialRuns(occtMesh, triangleTotal);
+    const materialInfo = getMaterialRuns(occtMesh, triangleTotal, inheritedMaterial);
     const meshHasExplicitColor = Boolean(materialInfo.meshColor || materialInfo.explicitFaceColorCount > 0);
+    const meshUsesInherited = !meshHasExplicitColor && Boolean(inheritedMaterial && inheritedMaterial.color);
     const meshUsesDefault = materialInfo.runs.some((run) => run.source === 'default');
 
     if (meshHasExplicitColor) materialStats.meshesWithExplicitColor++;
+    if (materialInfo.meshColor) materialStats.explicitMeshColorCount++;
+    materialStats.explicitFaceColorCount += materialInfo.explicitFaceColorCount;
+    if (meshUsesInherited) materialStats.meshesUsingInheritedColor++;
     if (meshUsesDefault) materialStats.meshesUsingDefaultMaterial++;
     if (materialInfo.explicitFaceColorCount > 0) materialStats.meshesWithFaceColors++;
 
@@ -647,13 +849,19 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
           .setMaterial(material)
       );
 
-      materialStats.materialSources[run.source] += 1;
+      materialStats.materialSources[run.source] = (materialStats.materialSources[run.source] || 0) + 1;
+    }
+
+    if (meshUsesDefault) {
+      materialStats.unknownUncoloredCount++;
     }
 
     materialStats.meshDetails.push({
       meshIndex,
       name: occtMesh.name || `Mesh_${meshIndex}`,
       meshColor: materialInfo.meshColor,
+      inheritedColor: inheritedMaterial && inheritedMaterial.color ? inheritedMaterial.color : null,
+      inheritedSource: inheritedMaterial && inheritedMaterial.color ? inheritedMaterial.source : null,
       brepFaceRanges: materialInfo.faceRangeCount,
       explicitFaceColors: materialInfo.explicitFaceColorCount,
       materialRuns: materialInfo.runs.length,
@@ -661,14 +869,34 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
       normalSource
     });
 
-    gltfMeshes.set(meshIndex, gltfMesh);
+    gltfMeshes.set(cacheKey, gltfMesh);
     return gltfMesh;
   }
 
-  function traverseNode(occtNode, parentGltfNode) {
+  function resolveInheritedMaterial(occtNode, parentInheritedMaterial) {
+    const explicitColor = getObjectColor(occtNode);
+    if (explicitColor) {
+      return { color: explicitColor, source: 'assembly' };
+    }
+
+    const nameMatch = nameColorIndex.get(occtNode && occtNode.name);
+    if (nameMatch) {
+      return {
+        color: nameMatch.color,
+        source: nameMatch.source,
+        matchingColorCount: nameMatch.matchingColorCount,
+        colorVariantCount: nameMatch.colorVariantCount
+      };
+    }
+
+    return parentInheritedMaterial || null;
+  }
+
+  function traverseNode(occtNode, parentGltfNode, parentInheritedMaterial = null) {
     totalNodeCount++;
     const nodeName = occtNode.name || 'Node';
     const gltfNode = document.createNode(nodeName);
+    const inheritedMaterial = resolveInheritedMaterial(occtNode, parentInheritedMaterial);
 
     if (parentGltfNode) {
       parentGltfNode.addChild(gltfNode);
@@ -682,11 +910,17 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
       // but glTF allows one mesh per node.
       // So if multiple meshes, we create child nodes for each mesh.
       if (occtNode.meshes.length === 1) {
-        const gltfMesh = getOrCreateMesh(occtNode.meshes[0]);
+        const meshIndex = occtNode.meshes[0];
+        const mesh = result.meshes[meshIndex];
+        const meshNameMatch = nameColorIndex.get(mesh && mesh.name);
+        const gltfMesh = getOrCreateMesh(meshIndex, meshNameMatch || inheritedMaterial);
         if (gltfMesh) gltfNode.setMesh(gltfMesh);
       } else {
         for (const meshIndex of occtNode.meshes) {
-          const gltfMesh = getOrCreateMesh(meshIndex);
+          const mesh = result.meshes[meshIndex];
+          const meshNameMatch = nameColorIndex.get(mesh && mesh.name);
+          const meshInheritedMaterial = meshNameMatch || inheritedMaterial;
+          const gltfMesh = getOrCreateMesh(meshIndex, meshInheritedMaterial);
           if (gltfMesh) {
             const childMeshNode = document.createNode(`${nodeName}_mesh_${meshIndex}`).setMesh(gltfMesh);
             gltfNode.addChild(childMeshNode);
@@ -699,7 +933,7 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
     // Traverse children
     if (occtNode.children) {
       for (const child of occtNode.children) {
-        traverseNode(child, gltfNode);
+        traverseNode(child, gltfNode, inheritedMaterial);
       }
     }
   }
@@ -721,10 +955,11 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
   );
   materialStats.uniqueColors = Array.from(new Set(Array.from(materialCache.keys()).map((key) => key.split(':').slice(1).join(':'))));
   materialStats.uniqueMaterialCount = materialCache.size;
+  materialStats.defaultMaterialCount = materialStats.materialSources.default || 0;
   statsRecorder.recordMaterialStats(materialStats);
   statsRecorder.recordNormalStats(normalStats);
-  logger.warn(`[materials] totalMeshes=${materialStats.totalMeshes} referencedMeshes=${materialStats.referencedMeshes} explicitColorMeshes=${materialStats.meshesWithExplicitColor} defaultMaterialMeshes=${materialStats.meshesUsingDefaultMaterial} faceColorMeshes=${materialStats.meshesWithFaceColors} uniqueMaterials=${materialStats.uniqueMaterialCount}`);
-  logger.warn(`[materials] sources faceRuns=${materialStats.materialSources.face} meshRuns=${materialStats.materialSources.mesh} defaultRuns=${materialStats.materialSources.default}`);
+  logger.warn(`[materials] totalMeshes=${materialStats.totalMeshes} referencedMeshes=${materialStats.referencedMeshes} explicitMeshColorMeshes=${materialStats.meshesWithExplicitColor} explicitFaceColorMeshes=${materialStats.meshesWithFaceColors} inheritedColorMeshes=${materialStats.meshesUsingInheritedColor} defaultMaterialMeshes=${materialStats.meshesUsingDefaultMaterial} unknownUncoloredMeshes=${materialStats.unknownUncoloredCount} uniqueMaterials=${materialStats.uniqueMaterialCount}`);
+  logger.warn(`[materials] sources faceRuns=${materialStats.materialSources.face || 0} meshRuns=${materialStats.materialSources.mesh || 0} assemblyRuns=${materialStats.materialSources.assembly || 0} nameRuns=${materialStats.materialSources.name || 0} nameDominantRuns=${materialStats.materialSources['name-dominant'] || 0} defaultRuns=${materialStats.materialSources.default || 0}`);
   logger.warn(`[normals] mode=${normalStats.mode} cadFaceMeshes=${normalStats.meshesUsingCadFaceNormals} occtMeshes=${normalStats.meshesUsingOcctNormals} generatedFlatMeshes=${normalStats.meshesUsingGeneratedFlatNormals} planarBrepFaces=${normalStats.planarBrepFaces} curvedOrNonPlanarBrepFaces=${normalStats.curvedOrNonPlanarBrepFaces}`);
 
   const io = new NodeIO();

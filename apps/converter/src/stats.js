@@ -20,6 +20,7 @@ class StatsRecorder {
       objectCount: 0,
       validation: null,
       importOptionsUsed: null,
+      occtMetadataStats: null,
       materialStats: null,
       normalStats: null
     };
@@ -76,6 +77,10 @@ class StatsRecorder {
 
   recordMaterialStats(materialStats) {
     this.stats.materialStats = materialStats;
+  }
+
+  recordOcctMetadataStats(occtMetadataStats) {
+    this.stats.occtMetadataStats = occtMetadataStats;
   }
 
   recordNormalStats(normalStats) {

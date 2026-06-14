@@ -11,6 +11,7 @@ export const dbRoot = path.join(storageRoot, "db");
 export const uploadsRoot = path.join(storageRoot, "uploads");
 export const modelsRoot = path.join(storageRoot, "models");
 export const logsRoot = path.join(storageRoot, "logs");
+export const workerOutputRoot = path.resolve(process.env.WORKER_OUTPUT_DIR || path.join(storageRoot, "worker-output"));
 export const publicRoot = path.join(appRoot, "public");
 
 export function ensureStorage(): void {
@@ -18,6 +19,7 @@ export function ensureStorage(): void {
   fs.mkdirSync(uploadsRoot, { recursive: true });
   fs.mkdirSync(modelsRoot, { recursive: true });
   fs.mkdirSync(logsRoot, { recursive: true });
+  fs.mkdirSync(workerOutputRoot, { recursive: true });
 }
 
 export function createSlug(filename: string): string {
@@ -46,6 +48,10 @@ export function getModelDir(slug: string): string {
 
 export function getLogDir(slug: string): string {
   return path.join(logsRoot, slug);
+}
+
+export function getWorkerOutputDir(slug: string): string {
+  return path.join(workerOutputRoot, slug);
 }
 
 export function isSafeSlug(slug: string): boolean {

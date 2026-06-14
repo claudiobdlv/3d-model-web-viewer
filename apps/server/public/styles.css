@@ -109,6 +109,14 @@ button:hover {
   background: #26344d;
 }
 
+.danger-button {
+  background: #9b1c1c;
+}
+
+.danger-button:hover {
+  background: #7f1717;
+}
+
 .section-title {
   display: flex;
   gap: 12px;

@@ -63,6 +63,7 @@ app.get("/admin", requireAdmin, (_req, res) => {
 });
 
 app.post("/api/models", requireAdmin);
+app.delete("/api/models/:slug", requireAdmin);
 app.use("/api/models", modelsRouter);
 app.use("/api/jobs", requireAdmin, jobsRouter);
 app.use("/api/worker", workerRouter);

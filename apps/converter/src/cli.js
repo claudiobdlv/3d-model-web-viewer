@@ -102,7 +102,7 @@ async function main() {
     .description('CLI to convert STEP/STP files to GLB using OpenCascade')
     .option('-i, --input <path>', 'Input STEP/STP file path')
     .option('-o, --outdir <path>', 'Output directory for generated files', './output')
-    .option('-q, --quality <preset>', 'Quality preset: fast | balanced | high', 'balanced')
+    .option('-q, --quality <preset>', 'Quality preset: fast | balanced | high | detailed', 'balanced')
     .action(runConvert);
 
   program
@@ -133,8 +133,8 @@ async function runConvert(options) {
 
   const inputStat = fs.statSync(inputPath);
 
-  if (!['fast', 'balanced', 'high'].includes(quality)) {
-    console.error(`[ERROR] Invalid quality preset: ${quality}. Use fast, balanced, or high.`);
+  if (!['fast', 'balanced', 'high', 'detailed'].includes(quality)) {
+    console.error(`[ERROR] Invalid quality preset: ${quality}. Use fast, balanced, high, or detailed.`);
     process.exit(1);
   }
 

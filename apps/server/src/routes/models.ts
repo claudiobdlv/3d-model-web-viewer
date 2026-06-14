@@ -5,13 +5,16 @@ import multer from "multer";
 import {
   createJob,
   createModel,
+  deleteModelBySlug,
   getModelBySlug,
   listModels
 } from "../db.js";
 import {
   createSlug,
+  getLogDir,
   getModelDir,
   getUploadDir,
+  getWorkerOutputDir,
   isSafeSlug
 } from "../storage.js";
 
@@ -110,3 +113,51 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
 
   res.redirect(303, "/");
 });
+
+modelsRouter.delete("/:slug", async (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    if (!isSafeSlug(slug)) {
+      res.status(400).json({ error: "Invalid model slug." });
+      return;
+    }
+
+    const model = getModelBySlug(slug);
+    if (!model) {
+      res.status(404).json({ error: "Model not found." });
+      return;
+    }
+
+    const deletion = deleteModelBySlug(slug);
+    const removedPaths = await removeModelFiles(slug);
+
+    res.json({
+      ok: true,
+      slug,
+      deletedJobs: deletion.deletedJobs,
+      deletedModels: deletion.deletedModels,
+      removedPaths
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+async function removeModelFiles(slug: string): Promise<string[]> {
+  const directories = [
+    getUploadDir(slug),
+    getModelDir(slug),
+    getLogDir(slug),
+    getWorkerOutputDir(slug)
+  ];
+  const removedPaths: string[] = [];
+
+  for (const directory of directories) {
+    if (fs.existsSync(directory)) {
+      await fs.promises.rm(directory, { recursive: true, force: true });
+      removedPaths.push(directory);
+    }
+  }
+
+  return removedPaths;
+}
