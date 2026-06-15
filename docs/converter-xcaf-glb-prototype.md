@@ -54,7 +54,7 @@ The safe spike command is:
 cd /home/claudio/projects/3d-model-web-viewer
 ./spikes/occt-xcaf-glb/run.sh \
   /home/claudio/projects/3d-model-web-viewer/data/uploads/u843-non-haz-panel-20260615065620/original.stp \
-  /tmp/u843-xcaf-glb-output \
+  /tmp/u843-xcaf-glb-output-v2 \
   high
 ```
 
@@ -73,12 +73,19 @@ future click selection:
 - `displayName`
 - `layer`
 - `colourSource`
+- `materialSource`
+- `colourLookupPath`
+- `colourType`
+- `fallbackReason`
 - `originalStepLabel`
 
 The JSON sidecar also includes summary counts for free shapes, processed
 labels/components, named objects, coloured objects, layers, unique colours,
 primitive count, vertex count, triangle count, GLB size, conversion time,
-skipped shapes, and failed shapes.
+skipped shapes, and failed shapes. It also groups default-grey primitives by
+label path, display name, layer, parent label, shape type, ancestor-colour
+availability, and face/subshape-colour availability, with a top-20 list of the
+default-heavy labels/components.
 
 ## Colour extraction
 
@@ -88,16 +95,35 @@ priority is:
 1. Face surface colour.
 2. Face generic colour.
 3. Face curve colour.
-4. Label surface colour.
-5. Label generic colour.
-6. Label curve colour.
-7. Referred-label surface colour.
-8. Referred-label generic colour.
-9. Referred-label curve colour.
-10. Neutral grey fallback.
+4. Coloured XCAF subshape/solid label surface colour containing the face.
+5. Coloured XCAF subshape/solid label generic colour containing the face.
+6. Coloured XCAF subshape/solid shape colour containing the face.
+7. Owning label surface colour.
+8. Owning label generic colour.
+9. Owning label curve colour.
+10. Owning shape surface/generic/curve colour.
+11. Referred/original label surface colour for assembly references.
+12. Referred/original label generic colour for assembly references.
+13. Referred/original label curve colour for assembly references.
+14. Nearest explicitly coloured ancestor label.
+15. Layer label colour if OpenCascade exposes one for that layer.
+16. Neutral grey fallback.
+
+The important v2 improvement is step 4: assembly instances can reference a
+compound with no direct colour while its child solids have the actual XCAF
+surface colour and layer metadata. The exporter now collects those coloured
+subshape labels from both the instance label and the referred/original label,
+then propagates a solid/shell/subshape colour down to every tessellated face it
+contains. This preserves the face primitive layout and triangle count while
+applying the more specific XCAF metadata.
 
 Neutral grey fallback is used for uncoloured geometry instead of guessed
 red/blue/green/white materials.
+
+`colourSource` keeps the exact lookup that won, such as
+`referred_subshape_label_surface`. `materialSource` groups results into broader
+report buckets: `face/subshape`, `label`, `referred label`, `ancestor`, `layer`,
+or `default`.
 
 ## Tessellation
 
@@ -126,13 +152,19 @@ by the quality preset, but normals are not smoothed across triangles yet.
   paths and stable IDs are preserved in `extras`, but the original assembly tree
   is not fully recreated as nested GLB nodes.
 - The U843 metadata-only XCAF spike sees richer document-level colour/name data
-  than this first renderable GLB mapping currently applies. This prototype maps
-  colours that can be directly associated with tessellated shape labels/faces,
-  but more work is needed to bridge all XCAF subshape/document colour labels to
-  the final face primitives.
+  than the first renderable GLB mapping applied. The v2 prototype bridges the
+  largest gap by propagating coloured referred subshape/solid labels to their
+  tessellated faces, but some components still have no matching face/subshape,
+  label, referred-label, ancestor, or layer colour in OpenCascade 7.6.3.
 - The GLB is intentionally verbose because each face is a separate node/mesh to
   preserve object identity and sharp normals. A production backend should merge
   primitives by object/material where doing so does not lose selection metadata.
+- OpenCascade 7.6.3 exposes layer membership reliably for this sample, but layer
+  label colours are not always available through `XCAFDoc_ColorTool`; the
+  exporter uses layer colour only when OCCT exposes an explicit colour.
+- The current spike keeps flat normals for all triangles. That preserves hard
+  CAD edges and flat panels, but curved fittings would benefit from a later
+  normal-generation pass that smooths within curved faces only.
 - No production integration exists yet. `CONVERTER_BACKEND=occt-xcaf` should
   wait until colour coverage and hierarchy mapping are stronger.
 
@@ -140,8 +172,11 @@ by the quality preset, but normals are not smoothed across triangles yet.
 
 Recommended next work:
 
-- Reconcile the metadata-only XCAF label scan with the renderable tessellation
-  traversal so more of the known coloured labels reach GLB primitives.
+- Visually inspect `/tmp/u843-xcaf-glb-output-v2/display.glb` in the web viewer
+  and compare against Rhino or the source CAD colours.
+- Investigate the remaining default-heavy labels in `topDefaultHeavyLabels`,
+  especially components that appear genuinely uncoloured in XCAF versus labels
+  whose colours are still attached through a path the prototype does not follow.
 - Preserve a useful nested assembly hierarchy while keeping selectable leaf
   parts.
 - Add optional smooth normals for curved faces without smoothing across hard CAD
