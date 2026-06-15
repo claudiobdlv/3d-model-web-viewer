@@ -54,9 +54,8 @@ The safe spike command is:
 cd /home/claudio/projects/3d-model-web-viewer
 ./spikes/occt-xcaf-glb/run.sh \
   /home/claudio/projects/3d-model-web-viewer/data/uploads/u843-non-haz-panel-20260615065620/original.stp \
-  /tmp/u843-xcaf-glb-output-v7-linear \
-  balanced \
-  --colour-space srgb-to-linear
+  /tmp/u843-xcaf-glb-output-v8 \
+  balanced
 ```
 
 Keep U843 outputs under `/tmp` or another ignored path. Do not commit uploaded
@@ -213,10 +212,24 @@ as STEP green `0.0, 0.14902, 0.0` and blue `0.0, 0.0, 0.172549`: writing them
 directly as linear factors can make the browser render them much brighter and
 more saturated than Rhino-like display values.
 
+Visual inspection of v7-linear showed the opposite failure mode for U843: the
+converted model was too dark and still not Rhino-like. The v8 spike therefore
+keeps raw/display RGB as the default material-factor policy and leaves
+`--colour-space srgb-to-linear` as an explicit future experiment only.
+
 Raw STEP styles now carry a mapping confidence. The exporter applies raw style
 colours only when the style is traced through a named shape representation to an
 exact BREP/topology target, for example `exact manifold solid BREP`. Weak or
 name-only matches are reportable diagnostics but do not override XCAF colours.
+
+The v8 spike tightens that further with a strong-only scope rule. A raw style is
+not applied just because a named representation contains some exact styled BREP
+target. The representation must resolve to exactly one strong BREP/topology
+target for that exported component. Representation-level targets, weak/name-only
+matches, and ambiguous representations with multiple strong styled targets are
+left as audit entries instead of recolouring the whole component bucket. This
+avoids the v6/v7 risk where a precise STEP style target could still be applied
+too broadly after the exporter matched it by representation/component name.
 
 `xcaf-report.json` now includes:
 
@@ -228,6 +241,14 @@ name-only matches are reportable diagnostics but do not override XCAF colours.
   object names.
 - `rawStepStyleResolver.mappingConfidenceCounts` - counts of applied raw style
   mappings by confidence.
+- `rawStepDerivedComponents` - compact component list for raw-derived final
+  colours, including style id, target type/scope/path, confidence, face count,
+  and triangle count.
+- `componentsStayedDefaultGrey` - compact list of components still using the
+  neutral default, including any raw-style rejection reason.
+- `colourChangeAudit` - appended by `compare_reports.py` when v4/v5/v6/v7
+  reports are available, focused on objects whose colour/source changed across
+  the versioned test outputs.
 
 ## Tessellation
 
@@ -322,6 +343,12 @@ Latest U843 comparison:
 | Layer colour values exposed | not reported | not reported | not reported | no | no | no | no |
 | Conversion time | 73.58s | 97.38s | 71.95s | 71.97s | 76.98s | 79.21s | 77.29s |
 
+v8 should be compared as a fresh versioned admin-visible model, not by
+overwriting v6 or v7 outputs. Its expected semantic difference from v7 raw is
+scope confidence: raw/display RGB remains the default, but broad or ambiguous
+raw STEP style matches are refused instead of being applied through a
+representation/name match.
+
 The v5 GLB passed a direct GLB structural readback with 173 meshes, 173 nodes,
 six materials, 519 accessors, and a valid JSON/BIN chunk layout. The existing JS
 validator could not be run on the EliteDesk shell during this pass because `npm`
@@ -385,8 +412,9 @@ Recommended next work:
 - Add optional smooth normals for curved faces without smoothing across hard CAD
   edges.
 - Add automated GLB readback validation to the spike runner itself.
-- Visually compare v7 linear against Rhino and v7 raw/v6 before selecting the
-  production colour-space policy.
+- Visually compare v8 against Rhino and v6/v7. v7-linear was visually too dark,
+  so raw/display RGB should remain the default unless later evidence points
+  elsewhere.
 - Add backend selection behind `CONVERTER_BACKEND=occt-xcaf` only after U843
   visual inspection proves colour and selection quality are better than the
   current `occt-import-js` output.

@@ -254,6 +254,36 @@ weak/name-only match for the U843 fills now used by v7; the v7 applied mappings
 all resolved to exact manifold solid BREP targets. Visual Rhino comparison is
 still required before making `srgb-to-linear` the production default.
 
+## v8 scoped raw-style result
+
+Visual comparison of v7-linear showed that sRGB-to-linear conversion made the
+model too dark and still did not make the result Rhino-like. v8 therefore keeps
+raw/display RGB as the default GLB material-factor policy. The
+`--colour-space srgb-to-linear` option remains available, but it is not the v8
+default.
+
+The more likely failure mode is raw STEP style scope. v6/v7 could correctly find
+an exact `MANIFOLD_SOLID_BREP` styled target, then still apply that style too
+broadly because the final exporter matched the style back to an exported
+component by named representation. If a representation contains multiple styled
+BREP/topology items, applying the first resolved style to the whole component
+bucket can recolour unrelated-looking solids.
+
+v8 makes raw style application strong-only:
+
+1. Direct XCAF face/subshape/label/referred colours still win over raw STEP
+   styles.
+2. Representation-level, weak, and name-only raw style matches are report-only.
+3. A raw style can fill a missing colour only when the matched named
+   representation resolves to exactly one strong BREP/topology target.
+4. Ambiguous representations with multiple strong styled targets are rejected
+   and reported instead of painting a whole component with one target colour.
+
+The report now includes `rawStepDerivedComponents`, `componentsStayedDefaultGrey`,
+raw-style rejection counts, and, when `compare_reports.py` is run against the
+versioned outputs, a `colourChangeAudit` section comparing v4/v5/v6/v7/v8 object
+colour/source assignments.
+
 ## Tools added
 
 `spikes/step-style-inspector/step_style_inspector.py` generates the raw report
