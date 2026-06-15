@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 
 VERSION_ORDER = ["v4", "v5", "v6", "v7_raw", "v7_linear", "v8"]
+FINAL_RE = re.compile(r"(?:^|;\s*)final=([^;\s]+)")
 
 
 def load_report(path: Path) -> dict[str, Any]:
@@ -33,12 +35,18 @@ def object_key(obj: dict[str, Any]) -> str:
 
 
 def object_entry(obj: dict[str, Any]) -> dict[str, Any]:
+    final_colour = obj.get("finalColour") or obj.get("colour", "")
+    if not final_colour:
+        match = FINAL_RE.search(obj.get("colourTrace", ""))
+        if match:
+            final_colour = match.group(1)
     return {
         "displayName": obj.get("displayName", ""),
         "layer": obj.get("layer", ""),
-        "finalColour": obj.get("colourSource", ""),
-        "finalColourValue": obj.get("colourLookupPath") or obj.get("exactColourLookupPath") or obj.get("colour", ""),
+        "finalColour": final_colour,
+        "finalColourValue": final_colour,
         "source": obj.get("materialSource", ""),
+        "colourSource": obj.get("colourSource", ""),
         "rawStepStyledItemId": obj.get("rawStepStyledItemId", ""),
         "rawStepTargetType": obj.get("rawStepTargetType", ""),
         "rawStepTargetScope": obj.get("rawStepTargetScope", ""),

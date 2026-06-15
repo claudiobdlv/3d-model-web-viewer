@@ -962,10 +962,6 @@ class RawStepStyleResolver {
           continue;
         }
         std::vector<std::string> neighbours = currentEntity->second.refs;
-        const auto reverseFound = reverseRefs_.find(current);
-        if (reverseFound != reverseRefs_.end()) {
-          neighbours.insert(neighbours.end(), reverseFound->second.begin(), reverseFound->second.end());
-        }
         for (const auto& neighbour : neighbours) {
           if (!seen.insert(neighbour).second) {
             continue;
@@ -2801,6 +2797,7 @@ void writeReport(
     out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
     out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
     out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
+    out << "\"finalColour\": "; writeString(out, colourKey(primitive.colour)); out << ", ";
     out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
     out << "\"materialSource\": "; writeString(out, primitive.materialSource); out << ", ";
     out << "\"colourLookupPath\": "; writeString(out, primitive.colourLookupPath); out << ", ";
