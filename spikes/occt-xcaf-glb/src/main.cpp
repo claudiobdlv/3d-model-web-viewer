@@ -73,8 +73,11 @@ struct SubshapeColourCandidate {
   TopoDS_Shape shape;
   std::string labelPath;
   std::string displayName;
-  std::string layer;
+  std::vector<LayerInfo> layers;
   Colour colour;
+  bool hasColour = false;
+  Colour layerColour;
+  bool hasLayerColour = false;
 };
 
 struct Quality {
@@ -103,6 +106,14 @@ struct MeshPrimitive {
   std::string localTransform;
   std::string accumulatedTransform;
   std::string colourTrace;
+  std::string exactColourLookupPath;
+  std::string labelRole;
+  std::string parentChain;
+  std::string instanceLabelLayers;
+  std::string referredLabelLayers;
+  std::string ancestorLayers;
+  std::string matchedSubshapeLayers;
+  std::string candidateColours;
   std::string instanceLabelColour;
   std::string referredLabelColour;
   std::string owningShapeColour;
@@ -139,6 +150,8 @@ struct Stats {
   std::uint64_t vertices = 0;
   std::uint64_t triangles = 0;
   std::uint64_t defaultMaterialUses = 0;
+  int labelsWithLayerColourCandidates = 0;
+  int subshapeLayerColourCandidates = 0;
   double conversionSeconds = 0.0;
   std::map<std::string, int> coloursBySource;
   std::map<std::string, int> materialSourceCounts;
@@ -278,6 +291,46 @@ std::string colourSummary(const bool hasColour, const Colour& colour) {
     return "none";
   }
   return colourKey(colour) + " source=" + colour.source + " lookup=" + colour.lookupPath;
+}
+
+std::string layerNames(const std::vector<LayerInfo>& layers) {
+  std::set<std::string> names;
+  for (const auto& layer : layers) {
+    if (!layer.name.empty()) {
+      names.insert(layer.name);
+    }
+  }
+  std::ostringstream out;
+  bool first = true;
+  for (const auto& name : names) {
+    if (!first) out << " | ";
+    first = false;
+    out << name;
+  }
+  return out.str();
+}
+
+std::vector<LayerInfo> mergeLayers(
+    const std::vector<LayerInfo>& firstLayers,
+    const std::vector<LayerInfo>& secondLayers) {
+  std::vector<LayerInfo> merged = firstLayers;
+  merged.insert(merged.end(), secondLayers.begin(), secondLayers.end());
+  std::sort(merged.begin(), merged.end(), [](const LayerInfo& a, const LayerInfo& b) {
+    return a.name < b.name;
+  });
+  merged.erase(std::unique(merged.begin(), merged.end(), [](const LayerInfo& a, const LayerInfo& b) {
+    return a.name == b.name;
+  }), merged.end());
+  return merged;
+}
+
+std::string appendChain(const std::string& parent, const std::string& item) {
+  return parent.empty() ? item : parent + ">" + item;
+}
+
+std::string appendCandidateSummary(const std::string& existing, const std::string& name, const bool hasColour, const Colour& colour) {
+  std::string next = name + "=" + colourSummary(hasColour, colour);
+  return existing.empty() ? next : existing + "; " + next;
 }
 
 std::string colourTraceSummary(
@@ -525,6 +578,11 @@ std::string firstLayerName(const std::vector<LayerInfo>& layers) {
   return layers.empty() ? "" : layers.front().name;
 }
 
+bool layerColour(
+    const Handle(XCAFDoc_ColorTool)& colourTool,
+    const std::vector<LayerInfo>& layers,
+    Colour& colour);
+
 Quality parseQuality(const std::string& value) {
   if (value == "high") {
     return {"high", 0.12, 0.22, true};
@@ -646,15 +704,34 @@ void collectColouredSubshapes(
       continue;
     }
 
+    const auto childLayers = collectLayerInfos(layerTool, child);
     Colour colour;
-    if (firstColourForLabel(colourTool, child, sourcePrefix + "_label_", "face/subshape", colour) ||
-        firstColourForShape(colourTool, childShape, sourcePrefix + "_shape_", "face/subshape", labelEntry(child), colour)) {
+    const bool hasColour =
+        firstColourForLabel(colourTool, child, sourcePrefix + "_label_", "face/subshape", colour) ||
+        firstColourForShape(colourTool, childShape, sourcePrefix + "_shape_", "face/subshape", labelEntry(child), colour);
+    Colour childLayerColour;
+    const bool hasLayerColour = layerColour(colourTool, childLayers, childLayerColour);
+
+    if (hasColour) {
       candidates.push_back({
           childShape,
           labelEntry(child),
           safeName(labelName(child), labelEntry(child)),
-          firstLayerName(collectLayerInfos(layerTool, child)),
-          colour});
+          childLayers,
+          colour,
+          hasColour,
+          childLayerColour,
+          hasLayerColour});
+    } else if (!childLayers.empty() || hasLayerColour) {
+      candidates.push_back({
+          childShape,
+          labelEntry(child),
+          safeName(labelName(child), labelEntry(child)),
+          childLayers,
+          colour,
+          false,
+          childLayerColour,
+          hasLayerColour});
     }
   }
 }
@@ -663,14 +740,20 @@ bool matchingSubshapeColour(
     const TopoDS_Face& face,
     const std::vector<SubshapeColourCandidate>& candidates,
     Colour& colour,
-    std::string& layer) {
+    std::vector<LayerInfo>& layers,
+    bool& matchedHasColour,
+    bool& matchedHasLayerColour,
+    Colour& matchedLayerColour) {
   for (const auto& candidate : candidates) {
     if (face.IsSame(candidate.shape)) {
       colour = candidate.colour;
       if (colour.lookupPath.empty()) {
         colour.lookupPath = candidate.labelPath;
       }
-      layer = candidate.layer;
+      layers = candidate.layers;
+      matchedHasColour = candidate.hasColour;
+      matchedHasLayerColour = candidate.hasLayerColour;
+      matchedLayerColour = candidate.layerColour;
       return true;
     }
     for (TopExp_Explorer explorer(candidate.shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
@@ -679,7 +762,10 @@ bool matchingSubshapeColour(
         if (colour.lookupPath.empty()) {
           colour.lookupPath = candidate.labelPath;
         }
-        layer = candidate.layer;
+        layers = candidate.layers;
+        matchedHasColour = candidate.hasColour;
+        matchedHasLayerColour = candidate.hasLayerColour;
+        matchedLayerColour = candidate.layerColour;
         return true;
       }
     }
@@ -764,6 +850,8 @@ void tessellateLabel(
     const std::string& transformSource,
     const bool hasInheritedColour,
     const Colour& inheritedColour,
+    const std::vector<LayerInfo>& inheritedLayers,
+    const std::string& parentChain,
   std::vector<MeshPrimitive>& primitives,
   Stats& stats) {
   stats.labelsProcessed += 1;
@@ -790,7 +878,9 @@ void tessellateLabel(
   if (!displayName.empty() && displayName != labelPath) {
     stats.namedObjects += 1;
   }
-  const auto layers = collectLabelAndReferredLayers(layerTool, label, referred);
+  const auto instanceLayers = collectLayerInfos(layerTool, label);
+  const auto referredLayers = referred.IsNull() ? std::vector<LayerInfo>() : collectLayerInfos(layerTool, referred);
+  const auto layers = mergeLayers(mergeLayers(instanceLayers, referredLayers), inheritedLayers);
   const std::string layer = firstLayerName(layers);
   if (!layer.empty()) {
     stats.layers.insert(layer);
@@ -809,6 +899,11 @@ void tessellateLabel(
   if (!referred.IsNull()) {
     collectColouredSubshapes(shapeTool, colourTool, layerTool, referred, "referred_subshape", subshapeColours);
   }
+  for (const auto& candidate : subshapeColours) {
+    if (candidate.hasLayerColour) {
+      stats.subshapeLayerColourCandidates += 1;
+    }
+  }
 
   if (labelHasColour || owningShapeHasColour || referredHasColour || !subshapeColours.empty()) {
     stats.labelsWithColour += 1;
@@ -818,6 +913,15 @@ void tessellateLabel(
   const bool ancestorHasCandidateColour = nearestAncestorColour(hasInheritedColour, inheritedColour, ancestorCandidate);
   Colour layerCandidate;
   const bool layerHasCandidateColour = layerColour(colourTool, layers, layerCandidate);
+  if (layerHasCandidateColour) {
+    stats.labelsWithLayerColourCandidates += 1;
+  }
+  std::string baseCandidateColours;
+  baseCandidateColours = appendCandidateSummary(baseCandidateColours, "instanceLabel", labelHasColour, labelColour);
+  baseCandidateColours = appendCandidateSummary(baseCandidateColours, "owningShape", owningShapeHasColour, owningShapeColour);
+  baseCandidateColours = appendCandidateSummary(baseCandidateColours, "referredLabel", referredHasColour, referredColour);
+  baseCandidateColours = appendCandidateSummary(baseCandidateColours, "ancestor", ancestorHasCandidateColour, ancestorCandidate);
+  baseCandidateColours = appendCandidateSummary(baseCandidateColours, "labelOrAncestorLayer", layerHasCandidateColour, layerCandidate);
 
   try {
     BRepMesh_IncrementalMesh mesh(renderShape, quality.linearDeflection, quality.relative, quality.angularDeflection, Standard_True);
@@ -851,14 +955,27 @@ void tessellateLabel(
     bool faceOrSubshapeHasColour = false;
     std::string primitiveLayer = layer;
     Colour faceColour;
+    std::vector<LayerInfo> matchedSubshapeLayers;
+    bool matchedSubshapeHasColour = false;
+    bool matchedSubshapeHasLayerColour = false;
+    Colour matchedSubshapeLayerColour;
     if (firstColourForShape(colourTool, sourceFace, "face_", "face/subshape", labelPath + "/face/" + std::to_string(faceIndex), faceColour)) {
       colour = faceColour;
       hasColour = true;
       faceOrSubshapeHasColour = true;
-    } else if (matchingSubshapeColour(sourceFace, subshapeColours, faceColour, primitiveLayer)) {
+    } else if (matchingSubshapeColour(
+                   sourceFace,
+                   subshapeColours,
+                   faceColour,
+                   matchedSubshapeLayers,
+                   matchedSubshapeHasColour,
+                   matchedSubshapeHasLayerColour,
+                   matchedSubshapeLayerColour) &&
+               matchedSubshapeHasColour) {
       colour = faceColour;
       hasColour = true;
       faceOrSubshapeHasColour = true;
+      primitiveLayer = firstLayerName(matchedSubshapeLayers).empty() ? primitiveLayer : firstLayerName(matchedSubshapeLayers);
     } else if (owningShapeHasColour) {
       colour = owningShapeColour;
       hasColour = true;
@@ -868,6 +985,12 @@ void tessellateLabel(
     } else if (!labelHasColour && ancestorHasCandidateColour) {
       colour = ancestorCandidate;
       hasColour = true;
+    } else if (!labelHasColour && matchedSubshapeHasLayerColour) {
+      colour = matchedSubshapeLayerColour;
+      colour.source = "subshape_layer_" + colour.source;
+      colour.materialSource = "layer";
+      hasColour = true;
+      primitiveLayer = firstLayerName(matchedSubshapeLayers).empty() ? primitiveLayer : firstLayerName(matchedSubshapeLayers);
     } else if (!labelHasColour && layerHasCandidateColour) {
       colour = layerCandidate;
       hasColour = true;
@@ -910,6 +1033,26 @@ void tessellateLabel(
       primitive.transformSource = transformSource;
       primitive.localTransform = localTransform;
       primitive.accumulatedTransform = accumulatedTransform;
+      primitive.exactColourLookupPath = colour.lookupPath;
+      primitive.labelRole =
+          shapeTool->IsReference(label) ? "reference/component" :
+          (shapeTool->IsAssembly(label) ? "assembly" :
+           (shapeTool->IsSimpleShape(label) ? "simple/original" : "shape"));
+      primitive.parentChain = appendChain(parentChain, labelPath);
+      primitive.instanceLabelLayers = layerNames(instanceLayers);
+      primitive.referredLabelLayers = layerNames(referredLayers);
+      primitive.ancestorLayers = layerNames(inheritedLayers);
+      primitive.matchedSubshapeLayers = layerNames(matchedSubshapeLayers);
+      primitive.candidateColours = appendCandidateSummary(
+          baseCandidateColours,
+          "matchedSubshapeLayer",
+          matchedSubshapeHasLayerColour,
+          matchedSubshapeLayerColour);
+      primitive.candidateColours = appendCandidateSummary(
+          primitive.candidateColours,
+          "faceOrMatchedSubshape",
+          faceOrSubshapeHasColour,
+          faceColour);
       primitive.colourTrace = colourTraceSummary(
           faceOrSubshapeHasColour,
           colour,
@@ -976,10 +1119,20 @@ void traverse(
     const std::string& transformSource,
     const bool hasInheritedColour,
     const Colour& inheritedColour,
+    const std::vector<LayerInfo>& inheritedLayers,
+    const std::string& parentChain,
     std::vector<MeshPrimitive>& primitives,
     Stats& stats) {
   TDF_LabelSequence children;
-  const std::string currentInstancePath = appendInstancePath(instancePath, labelEntry(label));
+  const std::string labelPath = labelEntry(label);
+  const std::string currentInstancePath = appendInstancePath(instancePath, labelPath);
+  TDF_Label currentReferred;
+  if (shapeTool->IsReference(label)) {
+    shapeTool->GetReferredShape(label, currentReferred);
+  }
+  const auto currentLayers = collectLabelAndReferredLayers(layerTool, label, currentReferred);
+  const auto childInheritedLayers = mergeLayers(inheritedLayers, currentLayers);
+  const std::string currentParentChain = appendChain(parentChain, labelPath);
   bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
   TopLoc_Location childAccumulatedLocation = accumulatedLocation;
   std::string childTransformSource = transformSource;
@@ -1024,6 +1177,8 @@ void traverse(
           childTransformSource,
           childHasInherited,
           childInherited,
+          childInheritedLayers,
+          currentParentChain,
           primitives,
           stats);
     }
@@ -1041,6 +1196,8 @@ void traverse(
       transformSource,
       hasInheritedColour,
       inheritedColour,
+      inheritedLayers,
+      parentChain,
       primitives,
       stats);
 }
@@ -1201,6 +1358,12 @@ void writeGlb(const std::filesystem::path& outputPath, const std::vector<MeshPri
     json << "\"fallbackReason\":"; writeString(json, primitive.fallbackReason); json << ",";
     json << "\"originalStepLabel\":"; writeString(json, primitive.originalStepLabel); json << ",";
     json << "\"transformSource\":"; writeString(json, primitive.transformSource); json << ",";
+    json << "\"labelRole\":"; writeString(json, primitive.labelRole); json << ",";
+    json << "\"parentChain\":"; writeString(json, primitive.parentChain); json << ",";
+    json << "\"instanceLabelLayers\":"; writeString(json, primitive.instanceLabelLayers); json << ",";
+    json << "\"referredLabelLayers\":"; writeString(json, primitive.referredLabelLayers); json << ",";
+    json << "\"ancestorLayers\":"; writeString(json, primitive.ancestorLayers); json << ",";
+    json << "\"matchedSubshapeLayers\":"; writeString(json, primitive.matchedSubshapeLayers); json << ",";
     json << "\"faceCount\":" << primitive.faceCount;
     json << "}}";
   }
@@ -1452,7 +1615,7 @@ void writeReport(
   out << "    \"angularDeflection\": " << quality.angularDeflection << ",\n";
   out << "    \"relative\": " << (quality.relative ? "true" : "false") << "\n";
   out << "  },\n";
-  out << "  \"colourPriority\": [\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"ancestor_surface\", \"ancestor_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"],\n";
+  out << "  \"colourPriority\": [\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"],\n";
   out << "  \"summary\": {\n";
   out << "    \"freeShapes\": " << stats.freeShapes << ",\n";
   out << "    \"labelsComponentsProcessed\": " << stats.labelsProcessed << ",\n";
@@ -1509,6 +1672,13 @@ void writeReport(
     writeString(out, item);
   }
   out << "],\n";
+  out << "  \"layerColourAvailability\": {\n";
+  out << "    \"explicitLayerColourPrimitives\": " << (stats.materialSourceCounts.count("layer") ? stats.materialSourceCounts.at("layer") : 0) << ",\n";
+  out << "    \"labelsWithLayerColourCandidates\": " << stats.labelsWithLayerColourCandidates << ",\n";
+  out << "    \"subshapeLayerColourCandidates\": " << stats.subshapeLayerColourCandidates << ",\n";
+  out << "    \"layerNamesAvailable\": " << (!stats.layers.empty() ? "true" : "false") << ",\n";
+  out << "    \"layerColoursAvailable\": " << ((stats.labelsWithLayerColourCandidates > 0 || stats.subshapeLayerColourCandidates > 0) ? "true" : "false") << "\n";
+  out << "  },\n";
   out << "  \"layers\": [";
   first = true;
   for (const auto& layer : stats.layers) {
@@ -1590,6 +1760,46 @@ void writeReport(
     out << "}" << (outIndex + 1 < mismatchLimit ? "," : "") << "\n";
   }
   out << "  ],\n";
+  out << "  \"siblingColourComparison\": [\n";
+  const std::size_t siblingLimit = std::min<std::size_t>(80, repeatedGroups.size());
+  for (std::size_t groupIndex = 0; groupIndex < siblingLimit; ++groupIndex) {
+    const auto& group = repeatedGroups[groupIndex];
+    const bool mismatch = group.finalColours.size() > 1 || (group.defaultPrimitives > 0 && group.defaultPrimitives < group.primitives);
+    out << "    {";
+    out << "\"displayName\": "; writeString(out, group.displayName); out << ", ";
+    out << "\"originalStepLabel\": "; writeString(out, group.originalStepLabel); out << ", ";
+    out << "\"originalStepName\": "; writeString(out, group.originalStepName); out << ", ";
+    out << "\"topologySignature\": "; writeString(out, std::to_string(group.triangles) + " triangles across " + std::to_string(group.primitives) + " primitives"); out << ", ";
+    out << "\"instanceCount\": " << group.instancePaths.size() << ", ";
+    out << "\"mismatch\": " << (mismatch ? "true" : "false") << ", ";
+    out << "\"defaultPrimitives\": " << group.defaultPrimitives << ", ";
+    out << "\"finalColours\": "; writeStringSet(out, group.finalColours); out << ", ";
+    out << "\"materialSources\": "; writeStringSet(out, group.materialSources); out << ", ";
+    out << "\"colourSources\": "; writeStringSet(out, group.colourSources); out << ", ";
+    out << "\"siblings\": [";
+    const std::size_t siblingExampleLimit = std::min<std::size_t>(12, group.primitiveIndices.size());
+    for (std::size_t exampleIndex = 0; exampleIndex < siblingExampleLimit; ++exampleIndex) {
+      const auto& primitive = primitives[group.primitiveIndices[exampleIndex]];
+      if (exampleIndex > 0) out << ", ";
+      out << "{";
+      out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+      out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
+      out << "\"parentChain\": "; writeString(out, primitive.parentChain); out << ", ";
+      out << "\"finalColour\": "; writeString(out, colourKey(primitive.colour)); out << ", ";
+      out << "\"finalColourSource\": "; writeString(out, primitive.colourSource); out << ", ";
+      out << "\"finalColourLookupPath\": "; writeString(out, primitive.exactColourLookupPath); out << ", ";
+      out << "\"instanceLabelLayers\": "; writeString(out, primitive.instanceLabelLayers); out << ", ";
+      out << "\"referredLabelLayers\": "; writeString(out, primitive.referredLabelLayers); out << ", ";
+      out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
+      out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
+      out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
+      out << "\"fallbackReason\": "; writeString(out, primitive.fallbackReason);
+      out << "}";
+    }
+    out << "]";
+    out << "}" << (groupIndex + 1 < siblingLimit ? "," : "") << "\n";
+  }
+  out << "  ],\n";
   out << "  \"diagnosticNameMatches\": [\n";
   std::vector<std::size_t> diagnosticIndexes;
   for (std::size_t i = 0; i < primitives.size(); ++i) {
@@ -1610,6 +1820,13 @@ void writeReport(
     out << "\"finalColour\": "; writeString(out, colourKey(primitive.colour)); out << ", ";
     out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
     out << "\"materialSource\": "; writeString(out, primitive.materialSource); out << ", ";
+    out << "\"labelRole\": "; writeString(out, primitive.labelRole); out << ", ";
+    out << "\"parentChain\": "; writeString(out, primitive.parentChain); out << ", ";
+    out << "\"instanceLabelLayers\": "; writeString(out, primitive.instanceLabelLayers); out << ", ";
+    out << "\"referredLabelLayers\": "; writeString(out, primitive.referredLabelLayers); out << ", ";
+    out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
+    out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
+    out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
     out << "\"colourTrace\": "; writeString(out, primitive.colourTrace);
     out << "}" << (i + 1 < diagnosticLimit ? "," : "") << "\n";
   }
@@ -1673,9 +1890,17 @@ void writeReport(
     out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
     out << "\"materialSource\": "; writeString(out, primitive.materialSource); out << ", ";
     out << "\"colourLookupPath\": "; writeString(out, primitive.colourLookupPath); out << ", ";
+    out << "\"exactColourLookupPath\": "; writeString(out, primitive.exactColourLookupPath); out << ", ";
     out << "\"colourType\": "; writeString(out, primitive.colourType); out << ", ";
     out << "\"fallbackReason\": "; writeString(out, primitive.fallbackReason); out << ", ";
     out << "\"colourTrace\": "; writeString(out, primitive.colourTrace); out << ", ";
+    out << "\"labelRole\": "; writeString(out, primitive.labelRole); out << ", ";
+    out << "\"parentChain\": "; writeString(out, primitive.parentChain); out << ", ";
+    out << "\"instanceLabelLayers\": "; writeString(out, primitive.instanceLabelLayers); out << ", ";
+    out << "\"referredLabelLayers\": "; writeString(out, primitive.referredLabelLayers); out << ", ";
+    out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
+    out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
+    out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
     out << "\"instanceLabelColour\": "; writeString(out, primitive.instanceLabelColour); out << ", ";
     out << "\"referredLabelColour\": "; writeString(out, primitive.referredLabelColour); out << ", ";
     out << "\"owningShapeColour\": "; writeString(out, primitive.owningShapeColour); out << ", ";
@@ -1768,6 +1993,7 @@ int main(int argc, char** argv) {
 
     logLine("Free shapes: " + std::to_string(stats.freeShapes));
     Colour noInheritedColour;
+    std::vector<LayerInfo> noInheritedLayers;
     for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
       traverse(
           shapeTool,
@@ -1780,6 +2006,8 @@ int main(int argc, char** argv) {
           "label_shape_location",
           false,
           noInheritedColour,
+          noInheritedLayers,
+          "",
           primitives,
           stats);
     }

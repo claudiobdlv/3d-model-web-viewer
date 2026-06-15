@@ -54,7 +54,7 @@ The safe spike command is:
 cd /home/claudio/projects/3d-model-web-viewer
 ./spikes/occt-xcaf-glb/run.sh \
   /home/claudio/projects/3d-model-web-viewer/data/uploads/u843-non-haz-panel-20260615065620/original.stp \
-  /tmp/u843-xcaf-glb-output-v3 \
+  /tmp/u843-xcaf-glb-output-v5 \
   balanced
 ```
 
@@ -125,8 +125,11 @@ priority is:
 12. Referred/original label generic colour for assembly references.
 13. Referred/original label curve colour for assembly references.
 14. Nearest explicitly coloured ancestor label.
-15. Layer label colour if OpenCascade exposes one for that layer.
-16. Neutral grey fallback.
+15. Matched subshape layer colour if OpenCascade exposes an actual colour for
+    that layer.
+16. Label/referred/ancestor layer colour if OpenCascade exposes one for that
+    layer.
+17. Neutral grey fallback.
 
 The v4 colour fix separates metadata lookup topology from render topology. XCAF
 colour associations are resolved on the original/unmoved shape and face labels,
@@ -159,6 +162,35 @@ then flags groups where siblings have different final colours or a mix of
 default grey and coloured materials. `diagnosticNameMatches` adds colour lookup
 traces for valve-like names such as `VALVE`, `DIAPHRAGM`, `K30`, `VCR`,
 `GAUGE`, `REGULATOR`, `FITTING`, `TUBE`, `PIPE`, and `SUPPORT`.
+
+The v5 diagnostics add a more explicit `siblingColourComparison` section and
+per-object layer/style fields:
+
+- `labelRole`
+- `parentChain`
+- `instanceLabelLayers`
+- `referredLabelLayers`
+- `ancestorLayers`
+- `matchedSubshapeLayers`
+- `candidateColours`
+- `exactColourLookupPath`
+
+This makes the Rhino block/layer question inspectable without hard-coding the
+U843 model. For this STEP, repeated fittings that now colour consistently get
+their real colour from referred/original product labels such as
+`referred_label_surface`; their layer membership is usually exposed as a layer
+name such as `FITTINGS`, but OpenCascade 7.6.3 does not expose an actual layer
+colour value for those layer labels through the XCAF colour tool. Subshape
+labels can expose both layer membership and surface colours, for example the
+`ITEMS` layer on a matched referred subshape.
+
+The remaining default-grey objects have no XCAF face/subshape colour, owning
+label colour, referred/original label colour, inherited ancestor colour, or
+explicit layer colour exposed by the current OpenCascade/XCAF path. Rhino may be
+using its own imported layer table/presentation-style interpretation to render
+those objects by layer colour, but this prototype does not infer colours from
+layer names and does not yet read a separate Rhino layer-colour table from the
+STEP transfer.
 
 ## Tessellation
 
@@ -234,22 +266,25 @@ the first sibling's material by accident.
 
 Latest U843 comparison:
 
-| Metric | v2 high | v3 balanced | v4 balanced |
-| --- | ---: | ---: | ---: |
-| Coloured primitives | 20,185 | 147 | 159 |
-| Default grey primitives | 1,839 | 26 | 14 |
-| Default grey face uses | not reported | 17,652 | 1,839 |
-| Unique colours | 6 | 6 | 6 |
-| Node count | not reported | 173 | 173 |
-| Primitive count | 22,024 | 173 | 173 |
-| Vertices | 3,162,696 | 1,152,630 | 1,152,630 |
-| Triangles | 1,054,232 | 384,210 | 384,210 |
-| GLB size | 110,412,276 bytes | 32,478,256 bytes | 32,477,752 bytes |
-| Repeated component colour mismatches | not reported | not reported | 0 |
-| Conversion time | 73.58s | 97.38s | 71.95s |
+| Metric | v2 high | v3 balanced | v4 balanced | v5 balanced |
+| --- | ---: | ---: | ---: | ---: |
+| Coloured primitives | 20,185 | 147 | 159 | 159 |
+| Default grey primitives | 1,839 | 26 | 14 | 14 |
+| Default grey face uses | not reported | 17,652 | 1,839 | 1,839 |
+| Unique colours | 6 | 6 | 6 | 6 |
+| Node count | not reported | 173 | 173 | 173 |
+| Primitive count | 22,024 | 173 | 173 | 173 |
+| Vertices | 3,162,696 | 1,152,630 | 1,152,630 | 1,152,630 |
+| Triangles | 1,054,232 | 384,210 | 384,210 | 384,210 |
+| GLB size | 110,412,276 bytes | 32,478,256 bytes | 32,477,752 bytes | 32,507,932 bytes |
+| Repeated component colour mismatches | not reported | not reported | 0 | 0 |
+| Layer colour values exposed | not reported | not reported | not reported | no |
+| Conversion time | 73.58s | 97.38s | 71.95s | 71.97s |
 
-The v4 GLB passed readback validation with 173 meshes, 173 primitives, 173
-nodes, 384,210 triangles, and no validator errors or warnings.
+The v5 GLB passed a direct GLB structural readback with 173 meshes, 173 nodes,
+six materials, 519 accessors, and a valid JSON/BIN chunk layout. The existing JS
+validator could not be run on the EliteDesk shell during this pass because `npm`
+was not available in `PATH`.
 
 ## Current limitations
 
@@ -266,7 +301,9 @@ nodes, 384,210 triangles, and no validator errors or warnings.
   remains larger than an optimized indexed/smoothed mesh would be.
 - OpenCascade 7.6.3 exposes layer membership reliably for this sample, but layer
   label colours are not always available through `XCAFDoc_ColorTool`; the
-  exporter uses layer colour only when OCCT exposes an explicit colour.
+  exporter uses layer colour only when OCCT exposes an explicit colour. In the
+  v5 U843 run, layer names were available but explicit layer colour values were
+  not.
 - The current spike keeps flat normals for all triangles. That preserves hard
   CAD edges and flat panels, but curved fittings would benefit from a later
   normal-generation pass that smooths within curved faces only.
@@ -277,13 +314,19 @@ nodes, 384,210 triangles, and no validator errors or warnings.
 
 Recommended next work:
 
-- Visually inspect `/tmp/u843-xcaf-glb-output-v3/display.glb` in the web viewer
+- Visually inspect `/tmp/u843-xcaf-glb-output-v5/display.glb` in the web viewer
   and compare against Rhino or the source CAD colours.
 - Use `xcaf-report.json` `globalBoundingBox`, `topObjectsByBoundingBoxSize`, and
   `transformSamples` to investigate any remaining misplaced components.
+- Use `siblingColourComparison` and per-object `candidateColours` to inspect any
+  visually wrong repeated block instances.
 - Investigate the remaining default-heavy labels in `topDefaultHeavyLabels`,
   especially components that appear genuinely uncoloured in XCAF versus labels
   whose colours are still attached through a path the prototype does not follow.
+- Investigate whether a STEP presentation/layer style table is available through
+  lower-level OpenCascade STEP model entities when XCAF exposes only layer names.
+- Consider optional user-supplied layer-colour mapping only as an explicit
+  fallback, not as an automatic inference from U843 layer names.
 - Preserve a useful nested assembly hierarchy while keeping selectable component
   instances.
 - Add optional smooth normals for curved faces without smoothing across hard CAD
