@@ -35,6 +35,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -95,11 +96,19 @@ struct MeshPrimitive {
   std::string colourType;
   std::string fallbackReason;
   std::string originalStepLabel;
+  std::string originalStepName;
   std::string parentLabelPath;
   std::string shapeType;
   std::string transformSource;
   std::string localTransform;
   std::string accumulatedTransform;
+  std::string colourTrace;
+  std::string instanceLabelColour;
+  std::string referredLabelColour;
+  std::string owningShapeColour;
+  std::string ancestorColour;
+  std::string layerColour;
+  int subshapeColourCandidates = 0;
   bool ancestorHasColour = false;
   bool faceOrSubshapeHasColour = false;
   std::string stableObjectId;
@@ -162,6 +171,23 @@ struct ExportObjectKey {
     return std::tie(labelPath, displayName, layer, materialKey, materialSource, colourSource) <
            std::tie(other.labelPath, other.displayName, other.layer, other.materialKey, other.materialSource, other.colourSource);
   }
+};
+
+struct RepeatedComponentGroup {
+  std::string key;
+  std::string displayName;
+  std::string originalStepLabel;
+  std::string originalStepName;
+  std::string layer;
+  std::set<std::string> instancePaths;
+  std::set<std::string> finalColours;
+  std::set<std::string> materialSources;
+  std::set<std::string> colourSources;
+  int primitives = 0;
+  int defaultPrimitives = 0;
+  std::uint64_t triangles = 0;
+  bool keywordMatch = false;
+  std::vector<std::size_t> primitiveIndices;
 };
 
 std::ofstream logOut;
@@ -245,6 +271,61 @@ std::string colourKey(const Colour& colour) {
   out << std::fixed << std::setprecision(6)
       << colour.r << "," << colour.g << "," << colour.b << "," << colour.a;
   return out.str();
+}
+
+std::string colourSummary(const bool hasColour, const Colour& colour) {
+  if (!hasColour) {
+    return "none";
+  }
+  return colourKey(colour) + " source=" + colour.source + " lookup=" + colour.lookupPath;
+}
+
+std::string colourTraceSummary(
+    const bool faceOrSubshapeHasColour,
+    const Colour& finalColour,
+    const bool labelHasColour,
+    const Colour& labelColour,
+    const bool owningShapeHasColour,
+    const Colour& owningShapeColour,
+    const bool referredHasColour,
+    const Colour& referredColour,
+    const bool ancestorHasColour,
+    const Colour& ancestorColour,
+    const bool layerHasColour,
+    const Colour& layerColour,
+    const int subshapeCandidateCount) {
+  std::ostringstream out;
+  out << "final=" << colourKey(finalColour)
+      << " source=" << finalColour.source
+      << " lookup=" << finalColour.lookupPath
+      << "; faceOrSubshape=" << (faceOrSubshapeHasColour ? "hit" : "none")
+      << "; instanceLabel=" << colourSummary(labelHasColour, labelColour)
+      << "; owningShape=" << colourSummary(owningShapeHasColour, owningShapeColour)
+      << "; referredLabel=" << colourSummary(referredHasColour, referredColour)
+      << "; ancestor=" << colourSummary(ancestorHasColour, ancestorColour)
+      << "; layer=" << colourSummary(layerHasColour, layerColour)
+      << "; subshapeCandidates=" << subshapeCandidateCount;
+  return out.str();
+}
+
+std::string lowerAscii(const std::string& value) {
+  std::string result = value;
+  std::transform(result.begin(), result.end(), result.begin(), [](const unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return result;
+}
+
+bool containsDiagnosticKeyword(const MeshPrimitive& primitive) {
+  const std::string haystack = lowerAscii(
+      primitive.displayName + " " + primitive.instancePath + " " + primitive.originalStepName + " " + primitive.layer);
+  for (const std::string keyword : {
+           "valve", "diaphragm", "k30", "vcr", "gauge", "regulator", "fitting", "tube", "pipe", "support"}) {
+    if (haystack.find(keyword) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::string transformSummary(const TopLoc_Location& location) {
@@ -683,27 +764,29 @@ void tessellateLabel(
     const std::string& transformSource,
     const bool hasInheritedColour,
     const Colour& inheritedColour,
-    std::vector<MeshPrimitive>& primitives,
-    Stats& stats) {
+  std::vector<MeshPrimitive>& primitives,
+  Stats& stats) {
   stats.labelsProcessed += 1;
   TDF_Label referred;
-  TopoDS_Shape shape = shapeForLabel(shapeTool, label, referred);
-  if (shape.IsNull()) {
+  TopoDS_Shape sourceShape = shapeForLabel(shapeTool, label, referred);
+  if (sourceShape.IsNull()) {
     stats.skippedShapes += 1;
     return;
   }
-  const TopLoc_Location localLocation = shape.Location();
+  TopoDS_Shape renderShape = sourceShape;
+  const TopLoc_Location localLocation = sourceShape.Location();
   if (!accumulatedLocation.IsIdentity()) {
-    shape = shape.Moved(accumulatedLocation);
+    renderShape = sourceShape.Moved(accumulatedLocation);
   }
   const std::string localTransform = transformSummary(localLocation);
-  const std::string accumulatedTransform = transformSummary(shape.Location());
+  const std::string accumulatedTransform = transformSummary(renderShape.Location());
 
   const std::string labelPath = labelEntry(label);
   const std::string effectiveInstancePath = instancePath.empty() ? labelPath : instancePath;
   const std::string referredPath = referred.IsNull() ? "" : labelEntry(referred);
+  const std::string referredName = referred.IsNull() ? "" : labelName(referred);
   const std::string parentLabelPath = label.Father().IsNull() ? "" : labelEntry(label.Father());
-  const std::string displayName = safeName(labelName(label), safeName(referred.IsNull() ? "" : labelName(referred), labelPath));
+  const std::string displayName = safeName(labelName(label), safeName(referredName, labelPath));
   if (!displayName.empty() && displayName != labelPath) {
     stats.namedObjects += 1;
   }
@@ -716,7 +799,7 @@ void tessellateLabel(
   Colour labelColour;
   bool labelHasColour = findLabelColour(colourTool, label, labelColour);
   Colour owningShapeColour;
-  const bool owningShapeHasColour = firstColourForShape(colourTool, shape, "owning_shape_", "label", labelPath, owningShapeColour);
+  const bool owningShapeHasColour = firstColourForShape(colourTool, sourceShape, "owning_shape_", "label", labelPath, owningShapeColour);
 
   Colour referredColour;
   const bool referredHasColour = referredLabelColour(colourTool, referred, referredColour);
@@ -731,8 +814,13 @@ void tessellateLabel(
     stats.labelsWithColour += 1;
   }
 
+  Colour ancestorCandidate;
+  const bool ancestorHasCandidateColour = nearestAncestorColour(hasInheritedColour, inheritedColour, ancestorCandidate);
+  Colour layerCandidate;
+  const bool layerHasCandidateColour = layerColour(colourTool, layers, layerCandidate);
+
   try {
-    BRepMesh_IncrementalMesh mesh(shape, quality.linearDeflection, quality.relative, quality.angularDeflection, Standard_True);
+    BRepMesh_IncrementalMesh mesh(renderShape, quality.linearDeflection, quality.relative, quality.angularDeflection, Standard_True);
     mesh.Perform();
     stats.shapesTessellated += 1;
   } catch (const Standard_Failure& failure) {
@@ -744,10 +832,17 @@ void tessellateLabel(
   int faceIndex = 0;
   std::map<ExportObjectKey, std::size_t> primitiveByKey;
   std::vector<std::size_t> createdPrimitiveIndices;
-  for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
-    const TopoDS_Face face = TopoDS::Face(explorer.Current());
+  TopExp_Explorer sourceExplorer(sourceShape, TopAbs_FACE);
+  TopExp_Explorer renderExplorer(renderShape, TopAbs_FACE);
+  for (; renderExplorer.More(); renderExplorer.Next()) {
+    const TopoDS_Face renderFace = TopoDS::Face(renderExplorer.Current());
+    TopoDS_Face sourceFace = renderFace;
+    if (sourceExplorer.More()) {
+      sourceFace = TopoDS::Face(sourceExplorer.Current());
+      sourceExplorer.Next();
+    }
     TopLoc_Location loc;
-    if (BRep_Tool::Triangulation(face, loc).IsNull()) {
+    if (BRep_Tool::Triangulation(renderFace, loc).IsNull()) {
       continue;
     }
 
@@ -756,11 +851,11 @@ void tessellateLabel(
     bool faceOrSubshapeHasColour = false;
     std::string primitiveLayer = layer;
     Colour faceColour;
-    if (firstColourForShape(colourTool, face, "face_", "face/subshape", labelPath + "/face/" + std::to_string(faceIndex), faceColour)) {
+    if (firstColourForShape(colourTool, sourceFace, "face_", "face/subshape", labelPath + "/face/" + std::to_string(faceIndex), faceColour)) {
       colour = faceColour;
       hasColour = true;
       faceOrSubshapeHasColour = true;
-    } else if (matchingSubshapeColour(face, subshapeColours, faceColour, primitiveLayer)) {
+    } else if (matchingSubshapeColour(sourceFace, subshapeColours, faceColour, primitiveLayer)) {
       colour = faceColour;
       hasColour = true;
       faceOrSubshapeHasColour = true;
@@ -770,11 +865,11 @@ void tessellateLabel(
     } else if (!labelHasColour && referredHasColour) {
       colour = referredColour;
       hasColour = true;
-    } else if (!labelHasColour && nearestAncestorColour(hasInheritedColour, inheritedColour, faceColour)) {
-      colour = faceColour;
+    } else if (!labelHasColour && ancestorHasCandidateColour) {
+      colour = ancestorCandidate;
       hasColour = true;
-    } else if (!labelHasColour && layerColour(colourTool, layers, faceColour)) {
-      colour = faceColour;
+    } else if (!labelHasColour && layerHasCandidateColour) {
+      colour = layerCandidate;
       hasColour = true;
     }
 
@@ -809,11 +904,32 @@ void tessellateLabel(
       primitive.colourType = colour.colourType;
       primitive.fallbackReason = colour.fallbackReason;
       primitive.originalStepLabel = referredPath.empty() ? labelPath : referredPath;
+      primitive.originalStepName = safeName(referredName, displayName);
       primitive.parentLabelPath = parentLabelPath;
-      primitive.shapeType = shapeTypeName(shape.ShapeType());
+      primitive.shapeType = shapeTypeName(sourceShape.ShapeType());
       primitive.transformSource = transformSource;
       primitive.localTransform = localTransform;
       primitive.accumulatedTransform = accumulatedTransform;
+      primitive.colourTrace = colourTraceSummary(
+          faceOrSubshapeHasColour,
+          colour,
+          labelHasColour,
+          labelColour,
+          owningShapeHasColour,
+          owningShapeColour,
+          referredHasColour,
+          referredColour,
+          ancestorHasCandidateColour,
+          ancestorCandidate,
+          layerHasCandidateColour,
+          layerCandidate,
+          static_cast<int>(subshapeColours.size()));
+      primitive.instanceLabelColour = colourSummary(labelHasColour, labelColour);
+      primitive.referredLabelColour = colourSummary(referredHasColour, referredColour);
+      primitive.owningShapeColour = colourSummary(owningShapeHasColour, owningShapeColour);
+      primitive.ancestorColour = colourSummary(ancestorHasCandidateColour, ancestorCandidate);
+      primitive.layerColour = colourSummary(layerHasCandidateColour, layerCandidate);
+      primitive.subshapeColourCandidates = static_cast<int>(subshapeColours.size());
       primitive.ancestorHasColour = hasInheritedColour;
       primitive.faceOrSubshapeHasColour = faceOrSubshapeHasColour;
       primitive.stableObjectId = effectiveInstancePath + "/material/" + colourKey(colour);
@@ -827,7 +943,7 @@ void tessellateLabel(
 
     MeshPrimitive& primitive = primitives[found->second];
     const std::size_t verticesBefore = primitive.positions.size() / 3;
-    appendFaceTriangles(primitive, face);
+    appendFaceTriangles(primitive, renderFace);
     if (primitive.positions.size() / 3 > verticesBefore) {
       primitive.faceCount += 1;
       primitive.faceOrSubshapeHasColour = primitive.faceOrSubshapeHasColour || faceOrSubshapeHasColour;
@@ -1213,6 +1329,79 @@ std::vector<DefaultGroup> buildDefaultGroups(const std::vector<MeshPrimitive>& p
   return result;
 }
 
+std::vector<RepeatedComponentGroup> buildRepeatedComponentGroups(const std::vector<MeshPrimitive>& primitives) {
+  std::map<std::string, RepeatedComponentGroup> groups;
+  for (std::size_t i = 0; i < primitives.size(); ++i) {
+    const auto& primitive = primitives[i];
+    const std::uint64_t primitiveTriangles = primitive.indices.size() / 3;
+    const std::string key =
+        primitive.displayName + "|" + primitive.originalStepLabel + "|" + primitive.originalStepName + "|" +
+        primitive.layer + "|" + std::to_string(primitive.faceCount) + "|" + std::to_string(primitiveTriangles);
+
+    auto& group = groups[key];
+    if (group.primitives == 0) {
+      group.key = key;
+      group.displayName = primitive.displayName;
+      group.originalStepLabel = primitive.originalStepLabel;
+      group.originalStepName = primitive.originalStepName;
+      group.layer = primitive.layer;
+    }
+    group.instancePaths.insert(primitive.instancePath);
+    group.finalColours.insert(colourKey(primitive.colour));
+    group.materialSources.insert(primitive.materialSource);
+    group.colourSources.insert(primitive.colourSource);
+    group.primitives += 1;
+    group.defaultPrimitives += primitive.materialSource == "default" ? 1 : 0;
+    group.triangles += primitiveTriangles;
+    group.keywordMatch = group.keywordMatch || containsDiagnosticKeyword(primitive);
+    group.primitiveIndices.push_back(i);
+  }
+
+  std::vector<RepeatedComponentGroup> result;
+  for (const auto& item : groups) {
+    const auto& group = item.second;
+    if (group.instancePaths.size() > 1) {
+      result.push_back(group);
+    }
+  }
+  std::sort(result.begin(), result.end(), [](const RepeatedComponentGroup& a, const RepeatedComponentGroup& b) {
+    const bool aMismatch = a.finalColours.size() > 1 || (a.defaultPrimitives > 0 && a.defaultPrimitives < a.primitives);
+    const bool bMismatch = b.finalColours.size() > 1 || (b.defaultPrimitives > 0 && b.defaultPrimitives < b.primitives);
+    if (aMismatch != bMismatch) {
+      return aMismatch;
+    }
+    if (a.keywordMatch != b.keywordMatch) {
+      return a.keywordMatch;
+    }
+    if (a.instancePaths.size() != b.instancePaths.size()) {
+      return a.instancePaths.size() > b.instancePaths.size();
+    }
+    return a.triangles > b.triangles;
+  });
+  return result;
+}
+
+int repeatedMismatchCount(const std::vector<RepeatedComponentGroup>& groups) {
+  int count = 0;
+  for (const auto& group : groups) {
+    if (group.finalColours.size() > 1 || (group.defaultPrimitives > 0 && group.defaultPrimitives < group.primitives)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+void writeStringSet(std::ostream& out, const std::set<std::string>& values) {
+  out << "[";
+  bool first = true;
+  for (const auto& value : values) {
+    if (!first) out << ", ";
+    first = false;
+    writeString(out, value);
+  }
+  out << "]";
+}
+
 void writeReport(
     const std::filesystem::path& outputPath,
     const std::string& inputPath,
@@ -1227,6 +1416,8 @@ void writeReport(
 
   out << std::fixed << std::setprecision(6);
   const auto defaultGroups = buildDefaultGroups(primitives);
+  const auto repeatedGroups = buildRepeatedComponentGroups(primitives);
+  const int repeatedMismatchGroups = repeatedMismatchCount(repeatedGroups);
   std::array<float, 3> globalMin = emptyMinBounds();
   std::array<float, 3> globalMax = emptyMaxBounds();
   for (const auto& primitive : primitives) {
@@ -1279,6 +1470,8 @@ void writeReport(
   out << "    \"skippedShapes\": " << stats.skippedShapes << ",\n";
   out << "    \"failedShapes\": " << stats.failedShapes << ",\n";
   out << "    \"defaultMaterialUsage\": " << stats.defaultMaterialUses << ",\n";
+  out << "    \"repeatedComponentGroups\": " << repeatedGroups.size() << ",\n";
+  out << "    \"repeatedComponentColourMismatches\": " << repeatedMismatchGroups << ",\n";
   out << "    \"glbBytes\": " << glbSize << ",\n";
   out << "    \"conversionSeconds\": " << stats.conversionSeconds << "\n";
   out << "  },\n";
@@ -1355,6 +1548,72 @@ void writeReport(
     out << "}" << (i + 1 < topDefaultCount ? "," : "") << "\n";
   }
   out << "  ],\n";
+  out << "  \"repeatedComponentColourMismatches\": [\n";
+  std::vector<std::size_t> mismatchGroupIndexes;
+  for (std::size_t i = 0; i < repeatedGroups.size(); ++i) {
+    const auto& group = repeatedGroups[i];
+    if (group.finalColours.size() > 1 || (group.defaultPrimitives > 0 && group.defaultPrimitives < group.primitives)) {
+      mismatchGroupIndexes.push_back(i);
+    }
+  }
+  const std::size_t mismatchLimit = std::min<std::size_t>(60, mismatchGroupIndexes.size());
+  for (std::size_t outIndex = 0; outIndex < mismatchLimit; ++outIndex) {
+    const auto& group = repeatedGroups[mismatchGroupIndexes[outIndex]];
+    out << "    {";
+    out << "\"displayName\": "; writeString(out, group.displayName); out << ", ";
+    out << "\"originalStepLabel\": "; writeString(out, group.originalStepLabel); out << ", ";
+    out << "\"originalStepName\": "; writeString(out, group.originalStepName); out << ", ";
+    out << "\"layer\": "; writeString(out, group.layer); out << ", ";
+    out << "\"instanceCount\": " << group.instancePaths.size() << ", ";
+    out << "\"primitives\": " << group.primitives << ", ";
+    out << "\"defaultPrimitives\": " << group.defaultPrimitives << ", ";
+    out << "\"triangles\": " << group.triangles << ", ";
+    out << "\"keywordMatch\": " << (group.keywordMatch ? "true" : "false") << ", ";
+    out << "\"finalColours\": "; writeStringSet(out, group.finalColours); out << ", ";
+    out << "\"materialSources\": "; writeStringSet(out, group.materialSources); out << ", ";
+    out << "\"colourSources\": "; writeStringSet(out, group.colourSources); out << ", ";
+    out << "\"instancePaths\": "; writeStringSet(out, group.instancePaths); out << ", ";
+    out << "\"examples\": [";
+    const std::size_t exampleLimit = std::min<std::size_t>(8, group.primitiveIndices.size());
+    for (std::size_t exampleIndex = 0; exampleIndex < exampleLimit; ++exampleIndex) {
+      const auto& primitive = primitives[group.primitiveIndices[exampleIndex]];
+      if (exampleIndex > 0) out << ", ";
+      out << "{";
+      out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+      out << "\"colour\": "; writeString(out, colourKey(primitive.colour)); out << ", ";
+      out << "\"materialSource\": "; writeString(out, primitive.materialSource); out << ", ";
+      out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
+      out << "\"colourTrace\": "; writeString(out, primitive.colourTrace);
+      out << "}";
+    }
+    out << "]";
+    out << "}" << (outIndex + 1 < mismatchLimit ? "," : "") << "\n";
+  }
+  out << "  ],\n";
+  out << "  \"diagnosticNameMatches\": [\n";
+  std::vector<std::size_t> diagnosticIndexes;
+  for (std::size_t i = 0; i < primitives.size(); ++i) {
+    if (containsDiagnosticKeyword(primitives[i])) {
+      diagnosticIndexes.push_back(i);
+    }
+  }
+  const std::size_t diagnosticLimit = std::min<std::size_t>(120, diagnosticIndexes.size());
+  for (std::size_t i = 0; i < diagnosticLimit; ++i) {
+    const auto& primitive = primitives[diagnosticIndexes[i]];
+    out << "    {";
+    out << "\"stableObjectId\": "; writeString(out, primitive.stableObjectId); out << ", ";
+    out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+    out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+    out << "\"originalStepLabel\": "; writeString(out, primitive.originalStepLabel); out << ", ";
+    out << "\"originalStepName\": "; writeString(out, primitive.originalStepName); out << ", ";
+    out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
+    out << "\"finalColour\": "; writeString(out, colourKey(primitive.colour)); out << ", ";
+    out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
+    out << "\"materialSource\": "; writeString(out, primitive.materialSource); out << ", ";
+    out << "\"colourTrace\": "; writeString(out, primitive.colourTrace);
+    out << "}" << (i + 1 < diagnosticLimit ? "," : "") << "\n";
+  }
+  out << "  ],\n";
   out << "  \"topObjectsByTriangleCount\": [\n";
   const std::size_t topTriangleCount = std::min<std::size_t>(20, byTriangles.size());
   for (std::size_t i = 0; i < topTriangleCount; ++i) {
@@ -1416,6 +1675,15 @@ void writeReport(
     out << "\"colourLookupPath\": "; writeString(out, primitive.colourLookupPath); out << ", ";
     out << "\"colourType\": "; writeString(out, primitive.colourType); out << ", ";
     out << "\"fallbackReason\": "; writeString(out, primitive.fallbackReason); out << ", ";
+    out << "\"colourTrace\": "; writeString(out, primitive.colourTrace); out << ", ";
+    out << "\"instanceLabelColour\": "; writeString(out, primitive.instanceLabelColour); out << ", ";
+    out << "\"referredLabelColour\": "; writeString(out, primitive.referredLabelColour); out << ", ";
+    out << "\"owningShapeColour\": "; writeString(out, primitive.owningShapeColour); out << ", ";
+    out << "\"ancestorColour\": "; writeString(out, primitive.ancestorColour); out << ", ";
+    out << "\"layerColour\": "; writeString(out, primitive.layerColour); out << ", ";
+    out << "\"subshapeColourCandidates\": " << primitive.subshapeColourCandidates << ", ";
+    out << "\"originalStepLabel\": "; writeString(out, primitive.originalStepLabel); out << ", ";
+    out << "\"originalStepName\": "; writeString(out, primitive.originalStepName); out << ", ";
     out << "\"parentLabelPath\": "; writeString(out, primitive.parentLabelPath); out << ", ";
     out << "\"shapeType\": "; writeString(out, primitive.shapeType); out << ", ";
     out << "\"transformSource\": "; writeString(out, primitive.transformSource); out << ", ";

@@ -128,6 +128,14 @@ priority is:
 15. Layer label colour if OpenCascade exposes one for that layer.
 16. Neutral grey fallback.
 
+The v4 colour fix separates metadata lookup topology from render topology. XCAF
+colour associations are resolved on the original/unmoved shape and face labels,
+while GLB vertices are emitted from the shape after the accumulated assembly
+instance transform is applied. This matters for repeated assembly components:
+moving a referred shape before colour lookup can change the face/location
+identity enough that referred subshape colours no longer match, so one sibling
+keeps the intended colour while another falls back to neutral grey.
+
 The important v2 improvement is step 4: assembly instances can reference a
 compound with no direct colour while its child solids have the actual XCAF
 surface colour and layer metadata. The exporter now collects those coloured
@@ -143,6 +151,14 @@ red/blue/green/white materials.
 `referred_subshape_label_surface`. `materialSource` groups results into broader
 report buckets: `face/subshape`, `label`, `referred label`, `ancestor`, `layer`,
 or `default`.
+
+`xcaf-report.json` also includes compact colour diagnostics for repeated
+components. `repeatedComponentColourMismatches` groups repeated primitives by
+display name, referred/original label, layer, face count, and triangle count,
+then flags groups where siblings have different final colours or a mix of
+default grey and coloured materials. `diagnosticNameMatches` adds colour lookup
+traces for valve-like names such as `VALVE`, `DIAPHRAGM`, `K30`, `VCR`,
+`GAUGE`, `REGULATOR`, `FITTING`, `TUBE`, `PIPE`, and `SUPPORT`.
 
 ## Tessellation
 
@@ -184,6 +200,11 @@ applies it with `TopoDS_Shape::Moved()` before tessellation. This preserves each
 child component's own shape location while adding the missing parent instance
 transform.
 
+The v4 implementation keeps that transform handling but applies it only to the
+render shape. Colour lookup continues to use the untransformed source shape so
+OpenCascade can still match colours attached to referred/original faces,
+subshapes, solids, or labels.
+
 The report records:
 
 - `localTransform`: the shape location exposed on the leaf label.
@@ -200,26 +221,34 @@ prototype, not the final assembly-tree writer.
 v2 wrote one node/mesh/primitive per tessellated face. That preserved colour
 identity but produced more than 22,000 GLB primitives on U843 and a 110 MB file.
 
-v3 groups geometry by selectable component instance plus material/colour/layer.
+v3 and v4 group geometry by selectable component instance plus
+material/colour/layer.
 It does not merge the whole model into one mesh, so later click-selection can
 still operate at a useful component level. It also avoids smoothing across hard
 CAD edges by continuing to duplicate triangle vertices inside each grouped mesh.
 
+The grouping key intentionally preserves instance identity through
+`instancePath`/`stableObjectId`; repeated components with different final
+materials are exported as separate component/material buckets and cannot inherit
+the first sibling's material by accident.
+
 Latest U843 comparison:
 
-| Metric | v2 high | v3 balanced |
-| --- | ---: | ---: |
-| Coloured primitives | 20,185 | 147 |
-| Default grey primitives | 1,839 | 26 |
-| Unique colours | 6 | 6 |
-| Node count | not reported | 173 |
-| Primitive count | 22,024 | 173 |
-| Vertices | 3,162,696 | 1,152,630 |
-| Triangles | 1,054,232 | 384,210 |
-| GLB size | 110,412,276 bytes | 32,478,256 bytes |
-| Conversion time | 73.58s | 97.38s |
+| Metric | v2 high | v3 balanced | v4 balanced |
+| --- | ---: | ---: | ---: |
+| Coloured primitives | 20,185 | 147 | 159 |
+| Default grey primitives | 1,839 | 26 | 14 |
+| Default grey face uses | not reported | 17,652 | 1,839 |
+| Unique colours | 6 | 6 | 6 |
+| Node count | not reported | 173 | 173 |
+| Primitive count | 22,024 | 173 | 173 |
+| Vertices | 3,162,696 | 1,152,630 | 1,152,630 |
+| Triangles | 1,054,232 | 384,210 | 384,210 |
+| GLB size | 110,412,276 bytes | 32,478,256 bytes | 32,477,752 bytes |
+| Repeated component colour mismatches | not reported | not reported | 0 |
+| Conversion time | 73.58s | 97.38s | 71.95s |
 
-The v3 GLB passed readback validation with 173 meshes, 173 primitives, 173
+The v4 GLB passed readback validation with 173 meshes, 173 primitives, 173
 nodes, 384,210 triangles, and no validator errors or warnings.
 
 ## Current limitations
@@ -230,7 +259,8 @@ nodes, 384,210 triangles, and no validator errors or warnings.
 - The U843 metadata-only XCAF spike sees richer document-level colour/name data
   than the first renderable GLB mapping applied. The v2 prototype bridges the
   largest gap by propagating coloured referred subshape/solid labels to their
-  tessellated faces, but some components still have no matching face/subshape,
+  tessellated faces, and v4 keeps lookup on source topology for transformed
+  repeated instances. Some components may still have no matching face/subshape,
   label, referred-label, ancestor, or layer colour in OpenCascade 7.6.3.
 - The GLB still duplicates triangle vertices to preserve hard CAD normals, so it
   remains larger than an optimized indexed/smoothed mesh would be.
