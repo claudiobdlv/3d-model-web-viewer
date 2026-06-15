@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 /path/to/input.step /path/to/output-dir [balanced|high]" >&2
+  echo "Usage: $0 /path/to/input.step /path/to/output-dir [preview|balanced|high]" >&2
 }
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then

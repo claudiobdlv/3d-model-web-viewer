@@ -1,5 +1,7 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
 #include <Poly_Triangle.hxx>
@@ -44,6 +46,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -83,6 +86,7 @@ struct Quality {
 struct MeshPrimitive {
   std::string name;
   std::string labelPath;
+  std::string instancePath;
   std::string displayName;
   std::string layer;
   std::string colourSource;
@@ -93,9 +97,13 @@ struct MeshPrimitive {
   std::string originalStepLabel;
   std::string parentLabelPath;
   std::string shapeType;
+  std::string transformSource;
+  std::string localTransform;
+  std::string accumulatedTransform;
   bool ancestorHasColour = false;
   bool faceOrSubshapeHasColour = false;
   std::string stableObjectId;
+  int faceCount = 0;
   Colour colour;
   std::vector<float> positions;
   std::vector<float> normals;
@@ -142,6 +150,20 @@ struct DefaultGroup {
   std::string fallbackReason;
 };
 
+struct ExportObjectKey {
+  std::string labelPath;
+  std::string displayName;
+  std::string layer;
+  std::string materialKey;
+  std::string materialSource;
+  std::string colourSource;
+
+  bool operator<(const ExportObjectKey& other) const {
+    return std::tie(labelPath, displayName, layer, materialKey, materialSource, colourSource) <
+           std::tie(other.labelPath, other.displayName, other.layer, other.materialKey, other.materialSource, other.colourSource);
+  }
+};
+
 std::ofstream logOut;
 
 void logLine(const std::string& message) {
@@ -182,6 +204,10 @@ std::string labelEntry(const TDF_Label& label) {
   return entry.ToCString();
 }
 
+std::string appendInstancePath(const std::string& parent, const std::string& labelPath) {
+  return parent.empty() ? labelPath : parent + ">" + labelPath;
+}
+
 std::string extendedToUtf8(const TCollection_ExtendedString& value) {
   TCollection_AsciiString ascii(value, '?');
   return ascii.ToCString();
@@ -219,6 +245,55 @@ std::string colourKey(const Colour& colour) {
   out << std::fixed << std::setprecision(6)
       << colour.r << "," << colour.g << "," << colour.b << "," << colour.a;
   return out.str();
+}
+
+std::string transformSummary(const TopLoc_Location& location) {
+  if (location.IsIdentity()) {
+    return "identity";
+  }
+
+  const gp_Trsf transform = location.Transformation();
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(6);
+  out << "[";
+  for (int row = 1; row <= 3; ++row) {
+    if (row > 1) out << "; ";
+    out << transform.Value(row, 1) << "," << transform.Value(row, 2) << "," << transform.Value(row, 3)
+        << "," << transform.Value(row, 4);
+  }
+  out << "]";
+  return out.str();
+}
+
+TopLoc_Location shapeLocation(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_Label& label) {
+  TopoDS_Shape shape;
+  shapeTool->GetShape(label, shape);
+  return shape.IsNull() ? TopLoc_Location() : shape.Location();
+}
+
+double bboxDiagonal(const MeshPrimitive& primitive) {
+  const double dx = static_cast<double>(primitive.max[0]) - primitive.min[0];
+  const double dy = static_cast<double>(primitive.max[1]) - primitive.min[1];
+  const double dz = static_cast<double>(primitive.max[2]) - primitive.min[2];
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+std::array<float, 3> emptyMinBounds() {
+  return {
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::max()};
+}
+
+std::array<float, 3> emptyMaxBounds() {
+  return {
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::lowest()};
+}
+
+void writeVec3(std::ostream& out, const std::array<float, 3>& value) {
+  out << "[" << value[0] << ", " << value[1] << ", " << value[2] << "]";
 }
 
 bool readLabelColour(
@@ -374,7 +449,10 @@ Quality parseQuality(const std::string& value) {
     return {"high", 0.12, 0.22, true};
   }
   if (value == "balanced") {
-    return {"balanced", 0.35, 0.45, true};
+    return {"balanced", 0.45, 0.50, true};
+  }
+  if (value == "preview") {
+    return {"preview", 0.85, 0.65, true};
   }
   throw std::runtime_error("Unsupported quality preset: " + value);
 }
@@ -600,6 +678,9 @@ void tessellateLabel(
     const Handle(XCAFDoc_LayerTool)& layerTool,
     const TDF_Label& label,
     const Quality& quality,
+    const std::string& instancePath,
+    const TopLoc_Location& accumulatedLocation,
+    const std::string& transformSource,
     const bool hasInheritedColour,
     const Colour& inheritedColour,
     std::vector<MeshPrimitive>& primitives,
@@ -611,8 +692,15 @@ void tessellateLabel(
     stats.skippedShapes += 1;
     return;
   }
+  const TopLoc_Location localLocation = shape.Location();
+  if (!accumulatedLocation.IsIdentity()) {
+    shape = shape.Moved(accumulatedLocation);
+  }
+  const std::string localTransform = transformSummary(localLocation);
+  const std::string accumulatedTransform = transformSummary(shape.Location());
 
   const std::string labelPath = labelEntry(label);
+  const std::string effectiveInstancePath = instancePath.empty() ? labelPath : instancePath;
   const std::string referredPath = referred.IsNull() ? "" : labelEntry(referred);
   const std::string parentLabelPath = label.Father().IsNull() ? "" : labelEntry(label.Father());
   const std::string displayName = safeName(labelName(label), safeName(referred.IsNull() ? "" : labelName(referred), labelPath));
@@ -654,6 +742,8 @@ void tessellateLabel(
   }
 
   int faceIndex = 0;
+  std::map<ExportObjectKey, std::size_t> primitiveByKey;
+  std::vector<std::size_t> createdPrimitiveIndices;
   for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
     const TopoDS_Face face = TopoDS::Face(explorer.Current());
     TopLoc_Location loc;
@@ -698,35 +788,64 @@ void tessellateLabel(
       stats.layers.insert(primitiveLayer);
     }
 
-    MeshPrimitive primitive;
-    primitive.name = displayName + " face " + std::to_string(faceIndex);
-    primitive.labelPath = labelPath;
-    primitive.displayName = displayName;
-    primitive.layer = primitiveLayer;
-    primitive.colourSource = colour.source;
-    primitive.materialSource = colour.materialSource;
-    primitive.colourLookupPath = colour.lookupPath;
-    primitive.colourType = colour.colourType;
-    primitive.fallbackReason = colour.fallbackReason;
-    primitive.originalStepLabel = referredPath.empty() ? labelPath : referredPath;
-    primitive.parentLabelPath = parentLabelPath;
-    primitive.shapeType = shapeTypeName(face.ShapeType());
-    primitive.ancestorHasColour = hasInheritedColour;
-    primitive.faceOrSubshapeHasColour = faceOrSubshapeHasColour;
-    primitive.stableObjectId = labelPath + "/face/" + std::to_string(faceIndex);
-    primitive.colour = colour;
-    appendFaceTriangles(primitive, face);
-
-    if (!primitive.indices.empty()) {
-      stats.vertices += primitive.positions.size() / 3;
-      stats.triangles += primitive.indices.size() / 3;
-      stats.primitivesExported += 1;
-      stats.coloursBySource[colour.source] += 1;
-      stats.materialSourceCounts[colour.materialSource] += 1;
-      stats.uniqueColours.insert(colourKey(colour));
+    const ExportObjectKey key = {
+        labelPath,
+        displayName,
+        primitiveLayer,
+        colourKey(colour),
+        colour.materialSource,
+        colour.source};
+    auto found = primitiveByKey.find(key);
+    if (found == primitiveByKey.end()) {
+      MeshPrimitive primitive;
+      primitive.name = displayName + " " + colour.source;
+      primitive.labelPath = labelPath;
+      primitive.instancePath = effectiveInstancePath;
+      primitive.displayName = displayName;
+      primitive.layer = primitiveLayer;
+      primitive.colourSource = colour.source;
+      primitive.materialSource = colour.materialSource;
+      primitive.colourLookupPath = colour.lookupPath;
+      primitive.colourType = colour.colourType;
+      primitive.fallbackReason = colour.fallbackReason;
+      primitive.originalStepLabel = referredPath.empty() ? labelPath : referredPath;
+      primitive.parentLabelPath = parentLabelPath;
+      primitive.shapeType = shapeTypeName(shape.ShapeType());
+      primitive.transformSource = transformSource;
+      primitive.localTransform = localTransform;
+      primitive.accumulatedTransform = accumulatedTransform;
+      primitive.ancestorHasColour = hasInheritedColour;
+      primitive.faceOrSubshapeHasColour = faceOrSubshapeHasColour;
+      primitive.stableObjectId = effectiveInstancePath + "/material/" + colourKey(colour);
+      primitive.colour = colour;
       primitives.push_back(std::move(primitive));
+      const std::size_t index = primitives.size() - 1;
+      primitiveByKey[key] = index;
+      createdPrimitiveIndices.push_back(index);
+      found = primitiveByKey.find(key);
+    }
+
+    MeshPrimitive& primitive = primitives[found->second];
+    const std::size_t verticesBefore = primitive.positions.size() / 3;
+    appendFaceTriangles(primitive, face);
+    if (primitive.positions.size() / 3 > verticesBefore) {
+      primitive.faceCount += 1;
+      primitive.faceOrSubshapeHasColour = primitive.faceOrSubshapeHasColour || faceOrSubshapeHasColour;
     }
     faceIndex += 1;
+  }
+
+  for (const std::size_t index : createdPrimitiveIndices) {
+    const auto& primitive = primitives[index];
+    if (primitive.indices.empty()) {
+      continue;
+    }
+    stats.vertices += primitive.positions.size() / 3;
+    stats.triangles += primitive.indices.size() / 3;
+    stats.primitivesExported += 1;
+    stats.coloursBySource[primitive.colourSource] += 1;
+    stats.materialSourceCounts[primitive.materialSource] += 1;
+    stats.uniqueColours.insert(colourKey(primitive.colour));
   }
 }
 
@@ -736,16 +855,25 @@ void traverse(
     const Handle(XCAFDoc_LayerTool)& layerTool,
     const TDF_Label& label,
     const Quality& quality,
+    const std::string& instancePath,
+    const TopLoc_Location& accumulatedLocation,
+    const std::string& transformSource,
     const bool hasInheritedColour,
     const Colour& inheritedColour,
     std::vector<MeshPrimitive>& primitives,
     Stats& stats) {
   TDF_LabelSequence children;
+  const std::string currentInstancePath = appendInstancePath(instancePath, labelEntry(label));
   bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
+  TopLoc_Location childAccumulatedLocation = accumulatedLocation;
+  std::string childTransformSource = transformSource;
   if (!hasChildren && shapeTool->IsReference(label)) {
     TDF_Label referred;
     if (shapeTool->GetReferredShape(label, referred)) {
       hasChildren = shapeTool->GetComponents(referred, children, Standard_False);
+      const TopLoc_Location referenceLocation = shapeLocation(shapeTool, label);
+      childAccumulatedLocation = accumulatedLocation * referenceLocation;
+      childTransformSource = "referred_assembly_instance";
     }
   }
 
@@ -769,12 +897,36 @@ void traverse(
       }
     }
     for (Standard_Integer i = 1; i <= children.Length(); ++i) {
-      traverse(shapeTool, colourTool, layerTool, children.Value(i), quality, childHasInherited, childInherited, primitives, stats);
+      traverse(
+          shapeTool,
+          colourTool,
+          layerTool,
+          children.Value(i),
+          quality,
+          currentInstancePath,
+          childAccumulatedLocation,
+          childTransformSource,
+          childHasInherited,
+          childInherited,
+          primitives,
+          stats);
     }
     return;
   }
 
-  tessellateLabel(shapeTool, colourTool, layerTool, label, quality, hasInheritedColour, inheritedColour, primitives, stats);
+  tessellateLabel(
+      shapeTool,
+      colourTool,
+      layerTool,
+      label,
+      quality,
+      currentInstancePath,
+      accumulatedLocation,
+      transformSource,
+      hasInheritedColour,
+      inheritedColour,
+      primitives,
+      stats);
 }
 
 template <typename T>
@@ -923,6 +1075,7 @@ void writeGlb(const std::filesystem::path& outputPath, const std::vector<MeshPri
     json << ",\"mesh\":" << i << ",\"extras\":{";
     json << "\"stableObjectId\":"; writeString(json, primitive.stableObjectId); json << ",";
     json << "\"labelPath\":"; writeString(json, primitive.labelPath); json << ",";
+    json << "\"instancePath\":"; writeString(json, primitive.instancePath); json << ",";
     json << "\"displayName\":"; writeString(json, primitive.displayName); json << ",";
     json << "\"layer\":"; writeString(json, primitive.layer); json << ",";
     json << "\"colourSource\":"; writeString(json, primitive.colourSource); json << ",";
@@ -930,7 +1083,9 @@ void writeGlb(const std::filesystem::path& outputPath, const std::vector<MeshPri
     json << "\"colourLookupPath\":"; writeString(json, primitive.colourLookupPath); json << ",";
     json << "\"colourType\":"; writeString(json, primitive.colourType); json << ",";
     json << "\"fallbackReason\":"; writeString(json, primitive.fallbackReason); json << ",";
-    json << "\"originalStepLabel\":"; writeString(json, primitive.originalStepLabel);
+    json << "\"originalStepLabel\":"; writeString(json, primitive.originalStepLabel); json << ",";
+    json << "\"transformSource\":"; writeString(json, primitive.transformSource); json << ",";
+    json << "\"faceCount\":" << primitive.faceCount;
     json << "}}";
   }
   json << "],";
@@ -1072,6 +1227,26 @@ void writeReport(
 
   out << std::fixed << std::setprecision(6);
   const auto defaultGroups = buildDefaultGroups(primitives);
+  std::array<float, 3> globalMin = emptyMinBounds();
+  std::array<float, 3> globalMax = emptyMaxBounds();
+  for (const auto& primitive : primitives) {
+    for (int axis = 0; axis < 3; ++axis) {
+      globalMin[axis] = std::min(globalMin[axis], primitive.min[axis]);
+      globalMax[axis] = std::max(globalMax[axis], primitive.max[axis]);
+    }
+  }
+  std::vector<std::size_t> byTriangles(primitives.size());
+  std::vector<std::size_t> byBounds(primitives.size());
+  for (std::size_t i = 0; i < primitives.size(); ++i) {
+    byTriangles[i] = i;
+    byBounds[i] = i;
+  }
+  std::sort(byTriangles.begin(), byTriangles.end(), [&](const std::size_t a, const std::size_t b) {
+    return primitives[a].indices.size() > primitives[b].indices.size();
+  });
+  std::sort(byBounds.begin(), byBounds.end(), [&](const std::size_t a, const std::size_t b) {
+    return bboxDiagonal(primitives[a]) > bboxDiagonal(primitives[b]);
+  });
   out << "{\n";
   out << "  \"inputFile\": "; writeString(out, inputPath); out << ",\n";
   out << "  \"openCascadeVersion\": "; writeString(out, OCC_VERSION_COMPLETE); out << ",\n";
@@ -1095,7 +1270,10 @@ void writeReport(
   out << "    \"uniqueColours\": " << stats.uniqueColours.size() << ",\n";
   out << "    \"layers\": " << stats.layers.size() << ",\n";
   out << "    \"shapesTessellated\": " << stats.shapesTessellated << ",\n";
+  out << "    \"nodeCount\": " << primitives.size() << ",\n";
   out << "    \"meshesPrimitivesExported\": " << stats.primitivesExported << ",\n";
+  out << "    \"primitiveCount\": " << stats.primitivesExported << ",\n";
+  out << "    \"materialCount\": " << stats.uniqueColours.size() << ",\n";
   out << "    \"vertices\": " << stats.vertices << ",\n";
   out << "    \"triangles\": " << stats.triangles << ",\n";
   out << "    \"skippedShapes\": " << stats.skippedShapes << ",\n";
@@ -1104,6 +1282,14 @@ void writeReport(
   out << "    \"glbBytes\": " << glbSize << ",\n";
   out << "    \"conversionSeconds\": " << stats.conversionSeconds << "\n";
   out << "  },\n";
+  out << "  \"globalBoundingBox\": {\"min\": ";
+  writeVec3(out, globalMin);
+  out << ", \"max\": ";
+  writeVec3(out, globalMax);
+  out << ", \"diagonal\": " << std::sqrt(
+      std::pow(static_cast<double>(globalMax[0]) - globalMin[0], 2) +
+      std::pow(static_cast<double>(globalMax[1]) - globalMin[1], 2) +
+      std::pow(static_cast<double>(globalMax[2]) - globalMin[2], 2)) << "},\n";
   out << "  \"coloursBySource\": {";
   bool first = true;
   for (const auto& item : stats.coloursBySource) {
@@ -1169,12 +1355,60 @@ void writeReport(
     out << "}" << (i + 1 < topDefaultCount ? "," : "") << "\n";
   }
   out << "  ],\n";
+  out << "  \"topObjectsByTriangleCount\": [\n";
+  const std::size_t topTriangleCount = std::min<std::size_t>(20, byTriangles.size());
+  for (std::size_t i = 0; i < topTriangleCount; ++i) {
+    const auto& primitive = primitives[byTriangles[i]];
+    out << "    {";
+    out << "\"stableObjectId\": "; writeString(out, primitive.stableObjectId); out << ", ";
+    out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+    out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
+    out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+    out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
+    out << "\"materialSource\": "; writeString(out, primitive.materialSource); out << ", ";
+    out << "\"triangles\": " << (primitive.indices.size() / 3) << ", ";
+    out << "\"faces\": " << primitive.faceCount;
+    out << "}" << (i + 1 < topTriangleCount ? "," : "") << "\n";
+  }
+  out << "  ],\n";
+  out << "  \"topObjectsByBoundingBoxSize\": [\n";
+  const std::size_t topBoundsCount = std::min<std::size_t>(20, byBounds.size());
+  for (std::size_t i = 0; i < topBoundsCount; ++i) {
+    const auto& primitive = primitives[byBounds[i]];
+    out << "    {";
+    out << "\"stableObjectId\": "; writeString(out, primitive.stableObjectId); out << ", ";
+    out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+    out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
+    out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+    out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
+    out << "\"diagonal\": " << bboxDiagonal(primitive) << ", ";
+    out << "\"min\": "; writeVec3(out, primitive.min); out << ", ";
+    out << "\"max\": "; writeVec3(out, primitive.max);
+    out << "}" << (i + 1 < topBoundsCount ? "," : "") << "\n";
+  }
+  out << "  ],\n";
+  out << "  \"transformSamples\": [\n";
+  const std::size_t transformSampleCount = std::min<std::size_t>(80, primitives.size());
+  for (std::size_t i = 0; i < transformSampleCount; ++i) {
+    const auto& primitive = primitives[i];
+    out << "    {";
+    out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
+    out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+    out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+    out << "\"transformSource\": "; writeString(out, primitive.transformSource); out << ", ";
+    out << "\"localTransform\": "; writeString(out, primitive.localTransform); out << ", ";
+    out << "\"accumulatedTransform\": "; writeString(out, primitive.accumulatedTransform); out << ", ";
+    out << "\"originalStepLabel\": "; writeString(out, primitive.originalStepLabel);
+    out << "}" << (i + 1 < transformSampleCount ? "," : "") << "\n";
+  }
+  out << "  ],\n";
   out << "  \"objects\": [\n";
   for (std::size_t i = 0; i < primitives.size(); ++i) {
     const auto& primitive = primitives[i];
     out << "    {";
     out << "\"stableObjectId\": "; writeString(out, primitive.stableObjectId); out << ", ";
     out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
+    out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
     out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
     out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
     out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
@@ -1184,14 +1418,19 @@ void writeReport(
     out << "\"fallbackReason\": "; writeString(out, primitive.fallbackReason); out << ", ";
     out << "\"parentLabelPath\": "; writeString(out, primitive.parentLabelPath); out << ", ";
     out << "\"shapeType\": "; writeString(out, primitive.shapeType); out << ", ";
+    out << "\"transformSource\": "; writeString(out, primitive.transformSource); out << ", ";
+    out << "\"localTransform\": "; writeString(out, primitive.localTransform); out << ", ";
+    out << "\"accumulatedTransform\": "; writeString(out, primitive.accumulatedTransform); out << ", ";
     out << "\"ancestorHasColour\": " << (primitive.ancestorHasColour ? "true" : "false") << ", ";
     out << "\"faceOrSubshapeHasColour\": " << (primitive.faceOrSubshapeHasColour ? "true" : "false") << ", ";
+    out << "\"faces\": " << primitive.faceCount << ", ";
+    out << "\"boundingBox\": {\"min\": "; writeVec3(out, primitive.min); out << ", \"max\": "; writeVec3(out, primitive.max); out << ", \"diagonal\": " << bboxDiagonal(primitive) << "}, ";
     out << "\"triangles\": " << (primitive.indices.size() / 3);
     out << "}" << (i + 1 < primitives.size() ? "," : "") << "\n";
   }
   out << "  ],\n";
   out << "  \"limitations\": [\n";
-  out << "    \"Prototype writes one GLB node per tessellated face to preserve sharp CAD normals and face colour identity; this is verbose for large assemblies.\",\n";
+  out << "    \"Prototype writes one GLB node per component/material bucket, with duplicated triangle vertices to preserve sharp CAD normals and face colour identity.\",\n";
   out << "    \"Assembly hierarchy is flattened to renderable nodes; label paths and stableObjectId are preserved in node extras for later selection work.\",\n";
   out << "    \"Material rules are not used; uncoloured geometry receives a neutral grey fallback.\"\n";
   out << "  ]\n";
@@ -1202,7 +1441,7 @@ void writeReport(
 
 int main(int argc, char** argv) {
   if (argc < 3 || argc > 4) {
-    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [balanced|high]\n";
+    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high]\n";
     return 2;
   }
 
@@ -1262,7 +1501,19 @@ int main(int argc, char** argv) {
     logLine("Free shapes: " + std::to_string(stats.freeShapes));
     Colour noInheritedColour;
     for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
-      traverse(shapeTool, colourTool, layerTool, freeShapes.Value(i), quality, false, noInheritedColour, primitives, stats);
+      traverse(
+          shapeTool,
+          colourTool,
+          layerTool,
+          freeShapes.Value(i),
+          quality,
+          "",
+          TopLoc_Location(),
+          "label_shape_location",
+          false,
+          noInheritedColour,
+          primitives,
+          stats);
     }
 
     if (primitives.empty()) {
