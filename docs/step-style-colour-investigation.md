@@ -177,6 +177,22 @@ but it is not the fix for this colour gap by itself. A user-supplied layer
 colour sidecar is not the primary fix here because the STEP contains explicit
 presentation colours; the layers appear to have names but not colour values.
 
+## v6 implementation result
+
+The native XCAF GLB spike now includes a first-pass raw STEP presentation-style
+resolver. It parses STEP entity records in C++, maps explicit `COLOUR_RGB`
+presentation-style chains to `STYLED_ITEM` targets, and walks named
+shape-representation graphs to BREP/topology items targeted by those styled
+items. The GLB exporter applies those raw colours only after direct XCAF
+face/subshape/label/referred-label colours and before inherited ancestor/default
+grey fallback.
+
+On the U843 balanced run, v6 applied `raw_step_styled_item` colour to 13
+component/material buckets, reducing default-grey buckets from 14 to 1 and
+default-grey face uses from 1,839 to 18. The output is available on the
+EliteDesk as `/tmp/u843-xcaf-glb-output-v6/display.glb` and is registered in the
+admin UI as `u843-xcaf-v6-display` for visual inspection.
+
 ## Tools added
 
 `spikes/step-style-inspector/step_style_inspector.py` generates the raw report

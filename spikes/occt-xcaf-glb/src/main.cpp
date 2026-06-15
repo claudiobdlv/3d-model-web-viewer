@@ -43,6 +43,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <deque>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -152,11 +153,34 @@ struct Stats {
   std::uint64_t defaultMaterialUses = 0;
   int labelsWithLayerColourCandidates = 0;
   int subshapeLayerColourCandidates = 0;
+  int rawStepEntities = 0;
+  int rawStepStyledItems = 0;
+  int rawStepColours = 0;
+  int rawStepRepresentationColours = 0;
+  int rawStepColourUses = 0;
   double conversionSeconds = 0.0;
   std::map<std::string, int> coloursBySource;
   std::map<std::string, int> materialSourceCounts;
   std::set<std::string> uniqueColours;
   std::set<std::string> layers;
+};
+
+struct RawStepEntity {
+  std::string id;
+  std::string type;
+  std::string args;
+  std::vector<std::string> refs;
+  std::string name;
+};
+
+struct RawStepStyleMatch {
+  Colour colour;
+  std::string representationId;
+  std::string representationName;
+  std::string styledItemId;
+  std::string styledTargetId;
+  std::string styledTargetType;
+  std::string path;
 };
 
 struct DefaultGroup {
@@ -346,6 +370,8 @@ std::string colourTraceSummary(
     const Colour& ancestorColour,
     const bool layerHasColour,
     const Colour& layerColour,
+    const bool rawStepHasColour,
+    const Colour& rawStepColour,
     const int subshapeCandidateCount) {
   std::ostringstream out;
   out << "final=" << colourKey(finalColour)
@@ -355,6 +381,7 @@ std::string colourTraceSummary(
       << "; instanceLabel=" << colourSummary(labelHasColour, labelColour)
       << "; owningShape=" << colourSummary(owningShapeHasColour, owningShapeColour)
       << "; referredLabel=" << colourSummary(referredHasColour, referredColour)
+      << "; rawStepStyledItem=" << colourSummary(rawStepHasColour, rawStepColour)
       << "; ancestor=" << colourSummary(ancestorHasColour, ancestorColour)
       << "; layer=" << colourSummary(layerHasColour, layerColour)
       << "; subshapeCandidates=" << subshapeCandidateCount;
@@ -368,6 +395,456 @@ std::string lowerAscii(const std::string& value) {
   });
   return result;
 }
+
+std::string normalizeStepName(const std::string& value) {
+  std::string result;
+  bool lastWasSpace = true;
+  for (const unsigned char c : value) {
+    if (std::isalnum(c)) {
+      result.push_back(static_cast<char>(std::tolower(c)));
+      lastWasSpace = false;
+    } else if (!lastWasSpace) {
+      result.push_back(' ');
+      lastWasSpace = true;
+    }
+  }
+  if (!result.empty() && result.back() == ' ') {
+    result.pop_back();
+  }
+  return result;
+}
+
+std::string unquoteStepString(const std::string& value) {
+  std::string trimmed = value;
+  while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+    trimmed.erase(trimmed.begin());
+  }
+  while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+    trimmed.pop_back();
+  }
+  if (trimmed.size() >= 2 && trimmed.front() == '\'' && trimmed.back() == '\'') {
+    std::string out;
+    for (std::size_t i = 1; i + 1 < trimmed.size(); ++i) {
+      if (trimmed[i] == '\'' && i + 1 < trimmed.size() - 1 && trimmed[i + 1] == '\'') {
+        out.push_back('\'');
+        i += 1;
+      } else {
+        out.push_back(trimmed[i]);
+      }
+    }
+    return out;
+  }
+  return trimmed;
+}
+
+std::string firstStepString(const std::string& args) {
+  bool inString = false;
+  std::size_t start = 0;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    if (args[i] != '\'') {
+      continue;
+    }
+    if (inString && i + 1 < args.size() && args[i + 1] == '\'') {
+      i += 1;
+      continue;
+    }
+    if (inString) {
+      return unquoteStepString(args.substr(start, i - start + 1));
+    }
+    inString = true;
+    start = i;
+  }
+  return {};
+}
+
+std::vector<std::string> splitTopLevel(const std::string& args) {
+  std::vector<std::string> parts;
+  int depth = 0;
+  bool inString = false;
+  std::size_t start = 0;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const char c = args[i];
+    if (c == '\'') {
+      if (inString && i + 1 < args.size() && args[i + 1] == '\'') {
+        i += 1;
+        continue;
+      }
+      inString = !inString;
+    } else if (!inString) {
+      if (c == '(') {
+        depth += 1;
+      } else if (c == ')') {
+        depth = std::max(0, depth - 1);
+      } else if (c == ',' && depth == 0) {
+        parts.push_back(args.substr(start, i - start));
+        start = i + 1;
+      }
+    }
+  }
+  if (start < args.size()) {
+    parts.push_back(args.substr(start));
+  }
+  return parts;
+}
+
+std::vector<std::string> extractStepRefs(const std::string& args) {
+  std::set<std::string> refs;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    if (args[i] != '#') {
+      continue;
+    }
+    std::size_t j = i + 1;
+    while (j < args.size() && std::isdigit(static_cast<unsigned char>(args[j]))) {
+      j += 1;
+    }
+    if (j > i + 1) {
+      refs.insert(args.substr(i, j - i));
+      i = j - 1;
+    }
+  }
+  return {refs.begin(), refs.end()};
+}
+
+std::vector<double> extractNumbers(const std::string& value) {
+  std::vector<double> numbers;
+  for (std::size_t i = 0; i < value.size();) {
+    if (!(std::isdigit(static_cast<unsigned char>(value[i])) || value[i] == '-' || value[i] == '+' || value[i] == '.')) {
+      i += 1;
+      continue;
+    }
+    std::size_t consumed = 0;
+    try {
+      const double number = std::stod(value.substr(i), &consumed);
+      if (consumed > 0) {
+        numbers.push_back(number);
+        i += consumed;
+        continue;
+      }
+    } catch (...) {
+    }
+    i += 1;
+  }
+  return numbers;
+}
+
+std::map<std::string, RawStepEntity> parseRawStepEntities(const std::string& inputPath) {
+  std::ifstream in(inputPath);
+  if (!in) {
+    throw std::runtime_error("Could not open STEP input for raw style pass: " + inputPath);
+  }
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  const std::string text = buffer.str();
+  std::map<std::string, RawStepEntity> entities;
+
+  std::size_t i = 0;
+  while (true) {
+    const std::size_t hashAt = text.find('#', i);
+    if (hashAt == std::string::npos) {
+      break;
+    }
+    std::size_t idEnd = hashAt + 1;
+    while (idEnd < text.size() && std::isdigit(static_cast<unsigned char>(text[idEnd]))) {
+      idEnd += 1;
+    }
+    if (idEnd == hashAt + 1) {
+      i = hashAt + 1;
+      continue;
+    }
+    std::size_t j = idEnd;
+    while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j]))) {
+      j += 1;
+    }
+    if (j >= text.size() || text[j] != '=') {
+      i = idEnd;
+      continue;
+    }
+    j += 1;
+    while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j]))) {
+      j += 1;
+    }
+    const std::size_t typeStart = j;
+    while (j < text.size() && (std::isalnum(static_cast<unsigned char>(text[j])) || text[j] == '_')) {
+      j += 1;
+    }
+    std::string type = text.substr(typeStart, j - typeStart);
+    std::transform(type.begin(), type.end(), type.begin(), [](const unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j]))) {
+      j += 1;
+    }
+    if (j >= text.size() || text[j] != '(') {
+      i = j + 1;
+      continue;
+    }
+
+    const std::size_t argsStart = j + 1;
+    int depth = 1;
+    bool inString = false;
+    j += 1;
+    for (; j < text.size(); ++j) {
+      const char c = text[j];
+      if (c == '\'') {
+        if (inString && j + 1 < text.size() && text[j + 1] == '\'') {
+          j += 1;
+          continue;
+        }
+        inString = !inString;
+      } else if (!inString) {
+        if (c == '(') {
+          depth += 1;
+        } else if (c == ')') {
+          depth -= 1;
+          if (depth == 0) {
+            const std::string id = text.substr(hashAt, idEnd - hashAt);
+            const std::string args = text.substr(argsStart, j - argsStart);
+            entities[id] = {id, type, args, extractStepRefs(args), firstStepString(args)};
+            break;
+          }
+        }
+      }
+    }
+    i = j + 1;
+  }
+
+  return entities;
+}
+
+bool isRepresentationEntity(const std::string& type) {
+  return type.find("REPRESENTATION") != std::string::npos;
+}
+
+bool isBrepOrTopologyEntity(const std::string& type) {
+  return type.find("BREP") != std::string::npos ||
+         type.find("SOLID") != std::string::npos ||
+         type.find("SHELL") != std::string::npos ||
+         type.find("FACE") != std::string::npos ||
+         type.find("CURVE") != std::string::npos ||
+         type.find("EDGE") != std::string::npos ||
+         type.find("LOOP") != std::string::npos ||
+         type.find("VERTEX") != std::string::npos;
+}
+
+bool isRawStyleTraversalEntity(const std::string& type) {
+  return type == "STYLED_ITEM" ||
+         type == "PRESENTATION_STYLE_ASSIGNMENT" ||
+         type.find("STYLE") != std::string::npos ||
+         type.find("COLOUR") != std::string::npos ||
+         type.find("COLOR") != std::string::npos;
+}
+
+bool colourFromStepEntity(const RawStepEntity& entity, Colour& colour) {
+  if (entity.type != "COLOUR_RGB") {
+    return false;
+  }
+  const std::vector<double> numbers = extractNumbers(entity.args);
+  if (numbers.size() < 3) {
+    return false;
+  }
+  colour.r = numbers[numbers.size() - 3];
+  colour.g = numbers[numbers.size() - 2];
+  colour.b = numbers[numbers.size() - 1];
+  colour.a = 1.0;
+  colour.source = "raw_step_styled_item";
+  colour.materialSource = "raw_step_styled_item";
+  colour.colourType = "surface";
+  colour.fallbackReason.clear();
+  return true;
+}
+
+std::map<std::string, std::vector<std::string>> buildReverseStepRefs(const std::map<std::string, RawStepEntity>& entities) {
+  std::map<std::string, std::vector<std::string>> reverse;
+  for (const auto& [id, entity] : entities) {
+    for (const auto& ref : entity.refs) {
+      reverse[ref].push_back(id);
+    }
+  }
+  return reverse;
+}
+
+std::vector<std::string> findColoursFromStyledItem(
+    const std::map<std::string, RawStepEntity>& entities,
+    const std::string& styledItemId) {
+  std::vector<std::string> colourIds;
+  std::set<std::string> seen;
+  std::deque<std::pair<std::string, int>> queue;
+  queue.push_back({styledItemId, 0});
+  seen.insert(styledItemId);
+  while (!queue.empty()) {
+    const auto [current, depth] = queue.front();
+    queue.pop_front();
+    if (depth > 8) {
+      continue;
+    }
+    const auto found = entities.find(current);
+    if (found == entities.end()) {
+      continue;
+    }
+    for (const auto& ref : found->second.refs) {
+      if (!seen.insert(ref).second) {
+        continue;
+      }
+      const auto refEntity = entities.find(ref);
+      if (refEntity == entities.end()) {
+        continue;
+      }
+      if (refEntity->second.type == "COLOUR_RGB") {
+        colourIds.push_back(ref);
+      } else if (isRawStyleTraversalEntity(refEntity->second.type)) {
+        queue.push_back({ref, depth + 1});
+      }
+    }
+  }
+  return colourIds;
+}
+
+std::string pathToString(const std::vector<std::string>& path, const std::map<std::string, RawStepEntity>& entities) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    if (i > 0) out << " -> ";
+    out << path[i];
+    const auto found = entities.find(path[i]);
+    if (found != entities.end()) {
+      out << " " << found->second.type;
+    }
+  }
+  return out.str();
+}
+
+class RawStepStyleResolver {
+ public:
+  void load(const std::string& inputPath) {
+    entities_ = parseRawStepEntities(inputPath);
+    reverseRefs_ = buildReverseStepRefs(entities_);
+    buildStyledItemIndex();
+    buildRepresentationIndex();
+  }
+
+  int entityCount() const { return static_cast<int>(entities_.size()); }
+  int styledItemCount() const { return styledItemCount_; }
+  int colourCount() const { return colourCount_; }
+  int representationColourCount() const { return representationColourCount_; }
+
+  bool findForNames(const std::vector<std::string>& names, RawStepStyleMatch& match) const {
+    std::set<std::string> checkedKeys;
+    for (const auto& name : names) {
+      const std::string normalized = normalizeStepName(name);
+      if (normalized.empty() || !checkedKeys.insert(normalized).second) {
+        continue;
+      }
+      const auto found = matchesByNormalizedRepresentationName_.find(normalized);
+      if (found == matchesByNormalizedRepresentationName_.end() || found->second.empty()) {
+        continue;
+      }
+      match = found->second.front();
+      return true;
+    }
+    return false;
+  }
+
+ private:
+  void buildStyledItemIndex() {
+    for (const auto& [id, entity] : entities_) {
+      if (entity.type == "COLOUR_RGB") {
+        colourCount_ += 1;
+      }
+      if (entity.type != "STYLED_ITEM") {
+        continue;
+      }
+      styledItemCount_ += 1;
+      const auto colourIds = findColoursFromStyledItem(entities_, id);
+      if (colourIds.empty()) {
+        continue;
+      }
+      Colour colour;
+      const auto colourEntity = entities_.find(colourIds.front());
+      if (colourEntity == entities_.end() || !colourFromStepEntity(colourEntity->second, colour)) {
+        continue;
+      }
+      const auto refs = entity.refs;
+      for (const auto& ref : refs) {
+        const auto target = entities_.find(ref);
+        if (target == entities_.end() || target->second.type == "PRESENTATION_STYLE_ASSIGNMENT") {
+          continue;
+        }
+        RawStepStyleMatch match;
+        match.colour = colour;
+        match.styledItemId = id;
+        match.styledTargetId = ref;
+        match.styledTargetType = target->second.type;
+        match.colour.lookupPath = id + " -> " + ref + " -> " + colourIds.front();
+        match.path = match.colour.lookupPath;
+        styledByTarget_[ref].push_back(match);
+      }
+    }
+  }
+
+  void buildRepresentationIndex() {
+    for (const auto& [id, entity] : entities_) {
+      if (!isRepresentationEntity(entity.type) || entity.name.empty()) {
+        continue;
+      }
+      std::set<std::string> seen{id};
+      std::deque<std::pair<std::string, std::vector<std::string>>> queue;
+      queue.push_back({id, {id}});
+      while (!queue.empty()) {
+        const auto [current, path] = queue.front();
+        queue.pop_front();
+        if (path.size() > 8) {
+          continue;
+        }
+        const auto currentEntity = entities_.find(current);
+        if (currentEntity == entities_.end()) {
+          continue;
+        }
+        std::vector<std::string> neighbours = currentEntity->second.refs;
+        const auto reverseFound = reverseRefs_.find(current);
+        if (reverseFound != reverseRefs_.end()) {
+          neighbours.insert(neighbours.end(), reverseFound->second.begin(), reverseFound->second.end());
+        }
+        for (const auto& neighbour : neighbours) {
+          if (!seen.insert(neighbour).second) {
+            continue;
+          }
+          const auto neighbourEntity = entities_.find(neighbour);
+          if (neighbourEntity == entities_.end()) {
+            continue;
+          }
+          const std::string& type = neighbourEntity->second.type;
+          const bool canTraverse = isRepresentationEntity(type) ||
+                                   isBrepOrTopologyEntity(type) ||
+                                   type.find("PLACEMENT") != std::string::npos ||
+                                   type.find("TRANSFORMATION") != std::string::npos;
+          if (!canTraverse) {
+            continue;
+          }
+          std::vector<std::string> nextPath = path;
+          nextPath.push_back(neighbour);
+          const auto styledFound = styledByTarget_.find(neighbour);
+          if (styledFound != styledByTarget_.end()) {
+            for (auto match : styledFound->second) {
+              match.representationId = id;
+              match.representationName = entity.name;
+              match.path = pathToString(nextPath, entities_) + " -> " + match.styledItemId + " STYLED_ITEM";
+              match.colour.lookupPath = match.path;
+              const std::string key = normalizeStepName(entity.name);
+              matchesByNormalizedRepresentationName_[key].push_back(match);
+              representationColourCount_ += 1;
+            }
+          }
+          queue.push_back({neighbour, nextPath});
+        }
+      }
+    }
+  }
+
+  std::map<std::string, RawStepEntity> entities_;
+  std::map<std::string, std::vector<std::string>> reverseRefs_;
+  std::map<std::string, std::vector<RawStepStyleMatch>> styledByTarget_;
+  std::map<std::string, std::vector<RawStepStyleMatch>> matchesByNormalizedRepresentationName_;
+  int styledItemCount_ = 0;
+  int colourCount_ = 0;
+  int representationColourCount_ = 0;
+};
 
 bool containsDiagnosticKeyword(const MeshPrimitive& primitive) {
   const std::string haystack = lowerAscii(
@@ -843,6 +1320,7 @@ void tessellateLabel(
     const Handle(XCAFDoc_ShapeTool)& shapeTool,
     const Handle(XCAFDoc_ColorTool)& colourTool,
     const Handle(XCAFDoc_LayerTool)& layerTool,
+    const RawStepStyleResolver* rawStepStyles,
     const TDF_Label& label,
     const Quality& quality,
     const std::string& instancePath,
@@ -893,6 +1371,15 @@ void tessellateLabel(
 
   Colour referredColour;
   const bool referredHasColour = referredLabelColour(colourTool, referred, referredColour);
+  RawStepStyleMatch rawStepMatch;
+  Colour rawStepColour;
+  const bool rawStepHasColour = rawStepStyles != nullptr &&
+      rawStepStyles->findForNames(
+          {displayName, referredName, labelName(label), referredPath, labelPath},
+          rawStepMatch);
+  if (rawStepHasColour) {
+    rawStepColour = rawStepMatch.colour;
+  }
 
   std::vector<SubshapeColourCandidate> subshapeColours;
   collectColouredSubshapes(shapeTool, colourTool, layerTool, label, "subshape", subshapeColours);
@@ -920,6 +1407,7 @@ void tessellateLabel(
   baseCandidateColours = appendCandidateSummary(baseCandidateColours, "instanceLabel", labelHasColour, labelColour);
   baseCandidateColours = appendCandidateSummary(baseCandidateColours, "owningShape", owningShapeHasColour, owningShapeColour);
   baseCandidateColours = appendCandidateSummary(baseCandidateColours, "referredLabel", referredHasColour, referredColour);
+  baseCandidateColours = appendCandidateSummary(baseCandidateColours, "rawStepStyledItem", rawStepHasColour, rawStepColour);
   baseCandidateColours = appendCandidateSummary(baseCandidateColours, "ancestor", ancestorHasCandidateColour, ancestorCandidate);
   baseCandidateColours = appendCandidateSummary(baseCandidateColours, "labelOrAncestorLayer", layerHasCandidateColour, layerCandidate);
 
@@ -982,6 +1470,10 @@ void tessellateLabel(
     } else if (!labelHasColour && referredHasColour) {
       colour = referredColour;
       hasColour = true;
+    } else if (!labelHasColour && rawStepHasColour) {
+      colour = rawStepColour;
+      hasColour = true;
+      stats.rawStepColourUses += 1;
     } else if (!labelHasColour && ancestorHasCandidateColour) {
       colour = ancestorCandidate;
       hasColour = true;
@@ -1066,6 +1558,8 @@ void tessellateLabel(
           ancestorCandidate,
           layerHasCandidateColour,
           layerCandidate,
+          rawStepHasColour,
+          rawStepColour,
           static_cast<int>(subshapeColours.size()));
       primitive.instanceLabelColour = colourSummary(labelHasColour, labelColour);
       primitive.referredLabelColour = colourSummary(referredHasColour, referredColour);
@@ -1112,6 +1606,7 @@ void traverse(
     const Handle(XCAFDoc_ShapeTool)& shapeTool,
     const Handle(XCAFDoc_ColorTool)& colourTool,
     const Handle(XCAFDoc_LayerTool)& layerTool,
+    const RawStepStyleResolver* rawStepStyles,
     const TDF_Label& label,
     const Quality& quality,
     const std::string& instancePath,
@@ -1170,6 +1665,7 @@ void traverse(
           shapeTool,
           colourTool,
           layerTool,
+          rawStepStyles,
           children.Value(i),
           quality,
           currentInstancePath,
@@ -1189,6 +1685,7 @@ void traverse(
       shapeTool,
       colourTool,
       layerTool,
+      rawStepStyles,
       label,
       quality,
       currentInstancePath,
@@ -1615,7 +2112,7 @@ void writeReport(
   out << "    \"angularDeflection\": " << quality.angularDeflection << ",\n";
   out << "    \"relative\": " << (quality.relative ? "true" : "false") << "\n";
   out << "  },\n";
-  out << "  \"colourPriority\": [\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"],\n";
+  out << "  \"colourPriority\": [\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"raw_step_styled_item\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"],\n";
   out << "  \"summary\": {\n";
   out << "    \"freeShapes\": " << stats.freeShapes << ",\n";
   out << "    \"labelsComponentsProcessed\": " << stats.labelsProcessed << ",\n";
@@ -1633,6 +2130,7 @@ void writeReport(
   out << "    \"skippedShapes\": " << stats.skippedShapes << ",\n";
   out << "    \"failedShapes\": " << stats.failedShapes << ",\n";
   out << "    \"defaultMaterialUsage\": " << stats.defaultMaterialUses << ",\n";
+  out << "    \"rawStepStyledItemFaceUses\": " << stats.rawStepColourUses << ",\n";
   out << "    \"repeatedComponentGroups\": " << repeatedGroups.size() << ",\n";
   out << "    \"repeatedComponentColourMismatches\": " << repeatedMismatchGroups << ",\n";
   out << "    \"glbBytes\": " << glbSize << ",\n";
@@ -1664,6 +2162,14 @@ void writeReport(
     out << ": " << item.second;
   }
   out << "},\n";
+  out << "  \"rawStepStyleResolver\": {\n";
+  out << "    \"entitiesParsed\": " << stats.rawStepEntities << ",\n";
+  out << "    \"styledItems\": " << stats.rawStepStyledItems << ",\n";
+  out << "    \"colourRgbEntities\": " << stats.rawStepColours << ",\n";
+  out << "    \"representationColourLinks\": " << stats.rawStepRepresentationColours << ",\n";
+  out << "    \"styledItemFaceUses\": " << stats.rawStepColourUses << ",\n";
+  out << "    \"method\": \"raw STEP COLOUR_RGB -> presentation style -> STYLED_ITEM target, then named shape representation graph to BREP/topology target\"\n";
+  out << "  },\n";
   out << "  \"uniqueColourValues\": [";
   first = true;
   for (const auto& item : stats.uniqueColours) {
@@ -1984,14 +2490,26 @@ int main(int argc, char** argv) {
     Handle(XCAFDoc_ColorTool) colourTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
     Handle(XCAFDoc_LayerTool) layerTool = XCAFDoc_DocumentTool::LayerTool(doc->Main());
 
+    logLine("Parsing raw STEP presentation styles");
+    RawStepStyleResolver rawStepStyles;
+    rawStepStyles.load(inputPath);
+
     TDF_LabelSequence freeShapes;
     shapeTool->GetFreeShapes(freeShapes);
 
     Stats stats;
     stats.freeShapes = freeShapes.Length();
+    stats.rawStepEntities = rawStepStyles.entityCount();
+    stats.rawStepStyledItems = rawStepStyles.styledItemCount();
+    stats.rawStepColours = rawStepStyles.colourCount();
+    stats.rawStepRepresentationColours = rawStepStyles.representationColourCount();
     std::vector<MeshPrimitive> primitives;
 
     logLine("Free shapes: " + std::to_string(stats.freeShapes));
+    logLine("Raw STEP styles: entities=" + std::to_string(stats.rawStepEntities) +
+            " styledItems=" + std::to_string(stats.rawStepStyledItems) +
+            " colours=" + std::to_string(stats.rawStepColours) +
+            " representationColourLinks=" + std::to_string(stats.rawStepRepresentationColours));
     Colour noInheritedColour;
     std::vector<LayerInfo> noInheritedLayers;
     for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
@@ -1999,6 +2517,7 @@ int main(int argc, char** argv) {
           shapeTool,
           colourTool,
           layerTool,
+          &rawStepStyles,
           freeShapes.Value(i),
           quality,
           "",

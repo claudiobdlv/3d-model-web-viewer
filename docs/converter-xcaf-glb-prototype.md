@@ -54,7 +54,7 @@ The safe spike command is:
 cd /home/claudio/projects/3d-model-web-viewer
 ./spikes/occt-xcaf-glb/run.sh \
   /home/claudio/projects/3d-model-web-viewer/data/uploads/u843-non-haz-panel-20260615065620/original.stp \
-  /tmp/u843-xcaf-glb-output-v5 \
+  /tmp/u843-xcaf-glb-output-v6 \
   balanced
 ```
 
@@ -124,12 +124,14 @@ priority is:
 11. Referred/original label surface colour for assembly references.
 12. Referred/original label generic colour for assembly references.
 13. Referred/original label curve colour for assembly references.
-14. Nearest explicitly coloured ancestor label.
-15. Matched subshape layer colour if OpenCascade exposes an actual colour for
+14. Raw STEP presentation-style colour traced from a named shape representation
+    to its styled BREP/topology item.
+15. Nearest explicitly coloured ancestor label.
+16. Matched subshape layer colour if OpenCascade exposes an actual colour for
     that layer.
-16. Label/referred/ancestor layer colour if OpenCascade exposes one for that
+17. Label/referred/ancestor layer colour if OpenCascade exposes one for that
     layer.
-17. Neutral grey fallback.
+18. Neutral grey fallback.
 
 The v4 colour fix separates metadata lookup topology from render topology. XCAF
 colour associations are resolved on the original/unmoved shape and face labels,
@@ -191,6 +193,15 @@ using its own imported layer table/presentation-style interpretation to render
 those objects by layer colour, but this prototype does not infer colours from
 layer names and does not yet read a separate Rhino layer-colour table from the
 STEP transfer.
+
+The v6 spike adds a raw STEP presentation-style resolver. It shallow-parses STEP
+entity records, resolves explicit `COLOUR_RGB` -> presentation style ->
+`STYLED_ITEM` chains, and then walks named shape-representation graphs to BREP
+or topology items targeted by those styled items. The resolver feeds only those
+explicit raw `STYLED_ITEM` colours into the GLB exporter, after direct XCAF
+face/subshape/label/referred-label colours and before inherited ancestor/default
+grey fallback. It does not use layer names, component names, or hard-coded colour
+tables as material rules.
 
 ## Tessellation
 
@@ -266,25 +277,31 @@ the first sibling's material by accident.
 
 Latest U843 comparison:
 
-| Metric | v2 high | v3 balanced | v4 balanced | v5 balanced |
-| --- | ---: | ---: | ---: | ---: |
-| Coloured primitives | 20,185 | 147 | 159 | 159 |
-| Default grey primitives | 1,839 | 26 | 14 | 14 |
-| Default grey face uses | not reported | 17,652 | 1,839 | 1,839 |
-| Unique colours | 6 | 6 | 6 | 6 |
-| Node count | not reported | 173 | 173 | 173 |
-| Primitive count | 22,024 | 173 | 173 | 173 |
-| Vertices | 3,162,696 | 1,152,630 | 1,152,630 | 1,152,630 |
-| Triangles | 1,054,232 | 384,210 | 384,210 | 384,210 |
-| GLB size | 110,412,276 bytes | 32,478,256 bytes | 32,477,752 bytes | 32,507,932 bytes |
-| Repeated component colour mismatches | not reported | not reported | 0 | 0 |
-| Layer colour values exposed | not reported | not reported | not reported | no |
-| Conversion time | 73.58s | 97.38s | 71.95s | 71.97s |
+| Metric | v2 high | v3 balanced | v4 balanced | v5 balanced | v6 balanced |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Coloured primitives | 20,185 | 147 | 159 | 159 | 172 |
+| Raw STEP styled-item primitives | 0 | 0 | 0 | 0 | 13 |
+| Default grey primitives | 1,839 | 26 | 14 | 14 | 1 |
+| Default grey face uses | not reported | 17,652 | 1,839 | 1,839 | 18 |
+| Unique colours | 6 | 6 | 6 | 6 | 9 |
+| Node count | not reported | 173 | 173 | 173 | 173 |
+| Primitive count | 22,024 | 173 | 173 | 173 | 173 |
+| Vertices | 3,162,696 | 1,152,630 | 1,152,630 | 1,152,630 | 1,152,630 |
+| Triangles | 1,054,232 | 384,210 | 384,210 | 384,210 | 384,210 |
+| GLB size | 110,412,276 bytes | 32,478,256 bytes | 32,477,752 bytes | 32,507,932 bytes | 32,509,484 bytes |
+| Repeated component colour mismatches | not reported | not reported | 0 | 0 | 0 |
+| Layer colour values exposed | not reported | not reported | not reported | no | no |
+| Conversion time | 73.58s | 97.38s | 71.95s | 71.97s | 76.98s |
 
 The v5 GLB passed a direct GLB structural readback with 173 meshes, 173 nodes,
 six materials, 519 accessors, and a valid JSON/BIN chunk layout. The existing JS
 validator could not be run on the EliteDesk shell during this pass because `npm`
 was not available in `PATH`.
+
+The v6 GLB passed direct GLB v2 readback with two chunks, 173 meshes, 173 nodes,
+nine materials, 519 accessors, and 384,210 triangles. It is registered on the
+EliteDesk as the temporary admin-visible model `u843-xcaf-v6-display` for visual
+inspection before production converter integration.
 
 ## Current limitations
 
@@ -314,7 +331,7 @@ was not available in `PATH`.
 
 Recommended next work:
 
-- Visually inspect `/tmp/u843-xcaf-glb-output-v5/display.glb` in the web viewer
+- Visually inspect `/tmp/u843-xcaf-glb-output-v6/display.glb` in the web viewer
   and compare against Rhino or the source CAD colours.
 - Use `xcaf-report.json` `globalBoundingBox`, `topObjectsByBoundingBoxSize`, and
   `transformSamples` to investigate any remaining misplaced components.
