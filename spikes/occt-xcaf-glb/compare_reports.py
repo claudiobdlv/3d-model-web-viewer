@@ -24,13 +24,17 @@ def load_report(path: Path) -> dict[str, Any]:
 
 
 def object_key(obj: dict[str, Any]) -> str:
-    stable = obj.get("stableObjectId")
-    if stable:
-        return f"stable:{stable}"
-    return "fallback:{}|{}|{}".format(
+    instance = obj.get("instancePath")
+    if instance:
+        return "instance:{}|{}|{}".format(
+            instance,
+            obj.get("displayName", ""),
+            obj.get("layer", ""),
+        )
+    return "label:{}|{}|{}".format(
+        obj.get("labelPath", ""),
         obj.get("displayName", ""),
         obj.get("layer", ""),
-        obj.get("labelPath", ""),
     )
 
 
