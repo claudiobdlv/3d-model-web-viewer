@@ -65,6 +65,16 @@ struct Colour {
   std::string fallbackReason;
 };
 
+enum class ColourSpaceMode {
+  Raw,
+  SrgbToLinear
+};
+
+struct ColourSpaceConfig {
+  ColourSpaceMode mode = ColourSpaceMode::Raw;
+  std::string name = "raw";
+};
+
 struct LayerInfo {
   std::string name;
   TDF_Label label;
@@ -120,6 +130,10 @@ struct MeshPrimitive {
   std::string owningShapeColour;
   std::string ancestorColour;
   std::string layerColour;
+  std::string rawStepMappingConfidence;
+  std::string rawStepStyledItemId;
+  std::string rawStepTargetId;
+  std::string rawStepTargetType;
   int subshapeColourCandidates = 0;
   bool ancestorHasColour = false;
   bool faceOrSubshapeHasColour = false;
@@ -161,6 +175,7 @@ struct Stats {
   double conversionSeconds = 0.0;
   std::map<std::string, int> coloursBySource;
   std::map<std::string, int> materialSourceCounts;
+  std::map<std::string, int> rawStepMappingConfidenceCounts;
   std::set<std::string> uniqueColours;
   std::set<std::string> layers;
 };
@@ -180,7 +195,27 @@ struct RawStepStyleMatch {
   std::string styledItemId;
   std::string styledTargetId;
   std::string styledTargetType;
+  std::string colourId;
   std::string path;
+  std::string confidence = "weak/name-only match";
+};
+
+struct RawStepColourAudit {
+  std::string colourId;
+  Colour colour;
+  std::vector<std::string> styledItemIds;
+  std::vector<std::string> mappedObjectNames;
+};
+
+struct FinalColourAudit {
+  Colour colour;
+  std::string hex;
+  std::string materialName;
+  std::set<std::string> sources;
+  std::set<std::string> materialSources;
+  std::uint64_t primitives = 0;
+  std::uint64_t faces = 0;
+  std::uint64_t triangles = 0;
 };
 
 struct DefaultGroup {
@@ -307,6 +342,42 @@ std::string colourKey(const Colour& colour) {
   std::ostringstream out;
   out << std::fixed << std::setprecision(6)
       << colour.r << "," << colour.g << "," << colour.b << "," << colour.a;
+  return out.str();
+}
+
+double clamp01(const double value) {
+  return std::max(0.0, std::min(1.0, value));
+}
+
+double srgbComponentToLinear(const double value) {
+  const double c = clamp01(value);
+  if (c <= 0.04045) {
+    return c / 12.92;
+  }
+  return std::pow((c + 0.055) / 1.055, 2.4);
+}
+
+Colour convertColourForGlb(const Colour& colour, const ColourSpaceConfig& colourSpace) {
+  Colour converted = colour;
+  if (colourSpace.mode == ColourSpaceMode::SrgbToLinear) {
+    converted.r = srgbComponentToLinear(colour.r);
+    converted.g = srgbComponentToLinear(colour.g);
+    converted.b = srgbComponentToLinear(colour.b);
+  }
+  return converted;
+}
+
+int colourChannelToByte(const double value) {
+  return static_cast<int>(std::round(clamp01(value) * 255.0));
+}
+
+std::string colourHex(const Colour& colour) {
+  std::ostringstream out;
+  out << "#"
+      << std::uppercase << std::hex << std::setfill('0')
+      << std::setw(2) << colourChannelToByte(colour.r)
+      << std::setw(2) << colourChannelToByte(colour.g)
+      << std::setw(2) << colourChannelToByte(colour.b);
   return out.str();
 }
 
@@ -632,6 +703,29 @@ bool isRawStyleTraversalEntity(const std::string& type) {
          type.find("COLOR") != std::string::npos;
 }
 
+std::string rawStyleConfidenceForTarget(const std::string& type) {
+  if (type == "MANIFOLD_SOLID_BREP") {
+    return "exact manifold solid BREP";
+  }
+  if (type.find("BREP") != std::string::npos) {
+    return "exact BREP id";
+  }
+  if (isBrepOrTopologyEntity(type)) {
+    return "exact topology id";
+  }
+  if (isRepresentationEntity(type)) {
+    return "shape representation path";
+  }
+  return "weak/name-only match";
+}
+
+bool isStrongRawStyleConfidence(const std::string& confidence) {
+  return confidence == "exact BREP id" ||
+         confidence == "exact manifold solid BREP" ||
+         confidence == "exact topology id" ||
+         confidence == "shape representation path";
+}
+
 bool colourFromStepEntity(const RawStepEntity& entity, Colour& colour) {
   if (entity.type != "COLOUR_RGB") {
     return false;
@@ -735,11 +829,18 @@ class RawStepStyleResolver {
       if (found == matchesByNormalizedRepresentationName_.end() || found->second.empty()) {
         continue;
       }
-      match = found->second.front();
-      return true;
+      for (const auto& candidate : found->second) {
+        if (!isStrongRawStyleConfidence(candidate.confidence)) {
+          continue;
+        }
+        match = candidate;
+        return true;
+      }
     }
     return false;
   }
+
+  const std::map<std::string, RawStepColourAudit>& colourAudit() const { return colourAudit_; }
 
  private:
   void buildStyledItemIndex() {
@@ -768,12 +869,18 @@ class RawStepStyleResolver {
         }
         RawStepStyleMatch match;
         match.colour = colour;
+        match.colourId = colourIds.front();
         match.styledItemId = id;
         match.styledTargetId = ref;
         match.styledTargetType = target->second.type;
+        match.confidence = rawStyleConfidenceForTarget(target->second.type);
         match.colour.lookupPath = id + " -> " + ref + " -> " + colourIds.front();
         match.path = match.colour.lookupPath;
         styledByTarget_[ref].push_back(match);
+        auto& audit = colourAudit_[colourIds.front()];
+        audit.colourId = colourIds.front();
+        audit.colour = colour;
+        audit.styledItemIds.push_back(id);
       }
     }
   }
@@ -826,8 +933,15 @@ class RawStepStyleResolver {
               match.representationName = entity.name;
               match.path = pathToString(nextPath, entities_) + " -> " + match.styledItemId + " STYLED_ITEM";
               match.colour.lookupPath = match.path;
+              if (match.confidence == "weak/name-only match") {
+                match.confidence = rawStyleConfidenceForTarget(match.styledTargetType);
+              }
               const std::string key = normalizeStepName(entity.name);
               matchesByNormalizedRepresentationName_[key].push_back(match);
+              auto auditFound = colourAudit_.find(match.colourId);
+              if (auditFound != colourAudit_.end()) {
+                auditFound->second.mappedObjectNames.push_back(entity.name);
+              }
               representationColourCount_ += 1;
             }
           }
@@ -841,6 +955,7 @@ class RawStepStyleResolver {
   std::map<std::string, std::vector<std::string>> reverseRefs_;
   std::map<std::string, std::vector<RawStepStyleMatch>> styledByTarget_;
   std::map<std::string, std::vector<RawStepStyleMatch>> matchesByNormalizedRepresentationName_;
+  std::map<std::string, RawStepColourAudit> colourAudit_;
   int styledItemCount_ = 0;
   int colourCount_ = 0;
   int representationColourCount_ = 0;
@@ -1071,6 +1186,34 @@ Quality parseQuality(const std::string& value) {
     return {"preview", 0.85, 0.65, true};
   }
   throw std::runtime_error("Unsupported quality preset: " + value);
+}
+
+ColourSpaceConfig parseColourSpace(const std::string& value) {
+  if (value == "raw") {
+    return {ColourSpaceMode::Raw, "raw"};
+  }
+  if (value == "srgb-to-linear") {
+    return {ColourSpaceMode::SrgbToLinear, "srgb-to-linear"};
+  }
+  throw std::runtime_error("Unsupported colour-space mode: " + value);
+}
+
+ColourSpaceConfig parseColourSpaceArg(const int argc, char** argv, const int startIndex) {
+  ColourSpaceConfig colourSpace = parseColourSpace("raw");
+  for (int i = startIndex; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--colour-space") {
+      if (i + 1 >= argc) {
+        throw std::runtime_error("--colour-space requires raw or srgb-to-linear");
+      }
+      colourSpace = parseColourSpace(argv[++i]);
+    } else if (arg.rfind("--colour-space=", 0) == 0) {
+      colourSpace = parseColourSpace(arg.substr(std::string("--colour-space=").size()));
+    } else {
+      throw std::runtime_error("Unknown argument: " + arg);
+    }
+  }
+  return colourSpace;
 }
 
 std::array<float, 3> normalFromTriangle(
@@ -1379,6 +1522,11 @@ void tessellateLabel(
           rawStepMatch);
   if (rawStepHasColour) {
     rawStepColour = rawStepMatch.colour;
+    rawStepColour.lookupPath = rawStepMatch.path;
+    rawStepColour.fallbackReason = "confidence=" + rawStepMatch.confidence +
+        " styledItem=" + rawStepMatch.styledItemId +
+        " target=" + rawStepMatch.styledTargetId +
+        " targetType=" + rawStepMatch.styledTargetType;
   }
 
   std::vector<SubshapeColourCandidate> subshapeColours;
@@ -1474,6 +1622,7 @@ void tessellateLabel(
       colour = rawStepColour;
       hasColour = true;
       stats.rawStepColourUses += 1;
+      stats.rawStepMappingConfidenceCounts[rawStepMatch.confidence] += 1;
     } else if (!labelHasColour && ancestorHasCandidateColour) {
       colour = ancestorCandidate;
       hasColour = true;
@@ -1566,6 +1715,10 @@ void tessellateLabel(
       primitive.owningShapeColour = colourSummary(owningShapeHasColour, owningShapeColour);
       primitive.ancestorColour = colourSummary(ancestorHasCandidateColour, ancestorCandidate);
       primitive.layerColour = colourSummary(layerHasCandidateColour, layerCandidate);
+      primitive.rawStepMappingConfidence = rawStepHasColour ? rawStepMatch.confidence : "";
+      primitive.rawStepStyledItemId = rawStepHasColour ? rawStepMatch.styledItemId : "";
+      primitive.rawStepTargetId = rawStepHasColour ? rawStepMatch.styledTargetId : "";
+      primitive.rawStepTargetType = rawStepHasColour ? rawStepMatch.styledTargetType : "";
       primitive.subshapeColourCandidates = static_cast<int>(subshapeColours.size());
       primitive.ancestorHasColour = hasInheritedColour;
       primitive.faceOrSubshapeHasColour = faceOrSubshapeHasColour;
@@ -1760,7 +1913,10 @@ int addIndexBuffer(
   return static_cast<int>(views.size() - 1);
 }
 
-void writeGlb(const std::filesystem::path& outputPath, const std::vector<MeshPrimitive>& primitives) {
+void writeGlb(
+    const std::filesystem::path& outputPath,
+    const std::vector<MeshPrimitive>& primitives,
+    const ColourSpaceConfig& colourSpace) {
   std::vector<std::uint8_t> bin;
   std::vector<BufferViewInfo> views;
   std::vector<AccessorInfo> accessors;
@@ -1778,13 +1934,14 @@ void writeGlb(const std::filesystem::path& outputPath, const std::vector<MeshPri
   std::vector<Colour> materials;
 
   for (const auto& primitive : primitives) {
-    const std::string key = colourKey(primitive.colour);
+    const Colour glbColour = convertColourForGlb(primitive.colour, colourSpace);
+    const std::string key = colourKey(glbColour);
     int materialIndex = 0;
     const auto found = materialByColour.find(key);
     if (found == materialByColour.end()) {
       materialIndex = static_cast<int>(materials.size());
       materialByColour[key] = materialIndex;
-      materials.push_back(primitive.colour);
+      materials.push_back(glbColour);
     } else {
       materialIndex = found->second;
     }
@@ -1829,6 +1986,7 @@ void writeGlb(const std::filesystem::path& outputPath, const std::vector<MeshPri
   json << std::fixed << std::setprecision(6);
   json << "{";
   json << "\"asset\":{\"version\":\"2.0\",\"generator\":\"occt-xcaf-glb-spike\"},";
+  json << "\"extras\":{\"colourSpace\":"; writeString(json, colourSpace.name); json << "},";
   json << "\"scene\":0,\"scenes\":[{\"nodes\":[";
   for (std::size_t i = 0; i < primitives.size(); ++i) {
     if (i > 0) json << ",";
@@ -1861,6 +2019,10 @@ void writeGlb(const std::filesystem::path& outputPath, const std::vector<MeshPri
     json << "\"referredLabelLayers\":"; writeString(json, primitive.referredLabelLayers); json << ",";
     json << "\"ancestorLayers\":"; writeString(json, primitive.ancestorLayers); json << ",";
     json << "\"matchedSubshapeLayers\":"; writeString(json, primitive.matchedSubshapeLayers); json << ",";
+    json << "\"rawStepMappingConfidence\":"; writeString(json, primitive.rawStepMappingConfidence); json << ",";
+    json << "\"rawStepStyledItemId\":"; writeString(json, primitive.rawStepStyledItemId); json << ",";
+    json << "\"rawStepTargetId\":"; writeString(json, primitive.rawStepTargetId); json << ",";
+    json << "\"rawStepTargetType\":"; writeString(json, primitive.rawStepTargetType); json << ",";
     json << "\"faceCount\":" << primitive.faceCount;
     json << "}}";
   }
@@ -2062,11 +2224,65 @@ void writeStringSet(std::ostream& out, const std::set<std::string>& values) {
   out << "]";
 }
 
+void writeStringVector(std::ostream& out, const std::vector<std::string>& values, const std::size_t limit = 0) {
+  out << "[";
+  bool first = true;
+  std::set<std::string> seen;
+  std::size_t written = 0;
+  for (const auto& value : values) {
+    if (!seen.insert(value).second) {
+      continue;
+    }
+    if (limit > 0 && written >= limit) {
+      break;
+    }
+    if (!first) out << ", ";
+    first = false;
+    writeString(out, value);
+    written += 1;
+  }
+  out << "]";
+}
+
+std::vector<FinalColourAudit> buildFinalColourAudit(
+    const std::vector<MeshPrimitive>& primitives,
+    const ColourSpaceConfig& colourSpace) {
+  std::map<std::string, FinalColourAudit> grouped;
+  for (const auto& primitive : primitives) {
+    const Colour glbColour = convertColourForGlb(primitive.colour, colourSpace);
+    auto& audit = grouped[colourKey(glbColour)];
+    if (audit.primitives == 0) {
+      audit.colour = glbColour;
+      audit.hex = colourHex(glbColour);
+      audit.materialName = primitive.colourSource + "_" + std::to_string(grouped.size() - 1);
+    }
+    audit.sources.insert(primitive.colourSource);
+    audit.materialSources.insert(primitive.materialSource);
+    audit.primitives += 1;
+    audit.faces += primitive.faceCount;
+    audit.triangles += primitive.indices.size() / 3;
+  }
+
+  std::vector<FinalColourAudit> result;
+  for (const auto& item : grouped) {
+    result.push_back(item.second);
+  }
+  std::sort(result.begin(), result.end(), [](const FinalColourAudit& a, const FinalColourAudit& b) {
+    if (a.primitives != b.primitives) {
+      return a.primitives > b.primitives;
+    }
+    return a.triangles > b.triangles;
+  });
+  return result;
+}
+
 void writeReport(
     const std::filesystem::path& outputPath,
     const std::string& inputPath,
     const Quality& quality,
+    const ColourSpaceConfig& colourSpace,
     const Stats& stats,
+    const std::map<std::string, RawStepColourAudit>& rawStepColourAudit,
     const std::vector<MeshPrimitive>& primitives,
     const std::uintmax_t glbSize) {
   std::ofstream out(outputPath);
@@ -2077,6 +2293,7 @@ void writeReport(
   out << std::fixed << std::setprecision(6);
   const auto defaultGroups = buildDefaultGroups(primitives);
   const auto repeatedGroups = buildRepeatedComponentGroups(primitives);
+  const auto finalColourAudit = buildFinalColourAudit(primitives, colourSpace);
   const int repeatedMismatchGroups = repeatedMismatchCount(repeatedGroups);
   std::array<float, 3> globalMin = emptyMinBounds();
   std::array<float, 3> globalMax = emptyMaxBounds();
@@ -2111,6 +2328,11 @@ void writeReport(
   out << "    \"linearDeflection\": " << quality.linearDeflection << ",\n";
   out << "    \"angularDeflection\": " << quality.angularDeflection << ",\n";
   out << "    \"relative\": " << (quality.relative ? "true" : "false") << "\n";
+  out << "  },\n";
+  out << "  \"colourSpace\": {\n";
+  out << "    \"mode\": "; writeString(out, colourSpace.name); out << ",\n";
+  out << "    \"baseColorFactorValues\": "; writeString(out, colourSpace.mode == ColourSpaceMode::SrgbToLinear ? "sRGB STEP/XCAF display RGB converted to linear before GLB material write" : "raw STEP/XCAF RGB written directly to GLB material baseColorFactor"); out << ",\n";
+  out << "    \"converted\": " << (colourSpace.mode == ColourSpaceMode::SrgbToLinear ? "true" : "false") << "\n";
   out << "  },\n";
   out << "  \"colourPriority\": [\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"raw_step_styled_item\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"],\n";
   out << "  \"summary\": {\n";
@@ -2168,8 +2390,47 @@ void writeReport(
   out << "    \"colourRgbEntities\": " << stats.rawStepColours << ",\n";
   out << "    \"representationColourLinks\": " << stats.rawStepRepresentationColours << ",\n";
   out << "    \"styledItemFaceUses\": " << stats.rawStepColourUses << ",\n";
-  out << "    \"method\": \"raw STEP COLOUR_RGB -> presentation style -> STYLED_ITEM target, then named shape representation graph to BREP/topology target\"\n";
+  out << "    \"mappingConfidenceCounts\": {";
+  first = true;
+  for (const auto& item : stats.rawStepMappingConfidenceCounts) {
+    if (!first) out << ", ";
+    first = false;
+    writeString(out, item.first);
+    out << ": " << item.second;
+  }
+  out << "},\n";
+  out << "    \"weakMappingsOverrideXcaf\": false,\n";
+  out << "    \"method\": \"raw STEP COLOUR_RGB -> presentation style -> STYLED_ITEM target, then named shape representation graph to BREP/topology target; weak/name-only matches are reported but not applied\"\n";
   out << "  },\n";
+  out << "  \"finalGlbColourAudit\": [\n";
+  for (std::size_t i = 0; i < finalColourAudit.size(); ++i) {
+    const auto& audit = finalColourAudit[i];
+    out << "    {";
+    out << "\"rgbWrittenToGlb\": [" << audit.colour.r << ", " << audit.colour.g << ", " << audit.colour.b << ", " << audit.colour.a << "], ";
+    out << "\"hex\": "; writeString(out, audit.hex); out << ", ";
+    out << "\"materialName\": "; writeString(out, audit.materialName); out << ", ";
+    out << "\"sources\": "; writeStringSet(out, audit.sources); out << ", ";
+    out << "\"materialSources\": "; writeStringSet(out, audit.materialSources); out << ", ";
+    out << "\"primitiveCount\": " << audit.primitives << ", ";
+    out << "\"faceCount\": " << audit.faces << ", ";
+    out << "\"triangleCount\": " << audit.triangles;
+    out << "}" << (i + 1 < finalColourAudit.size() ? "," : "") << "\n";
+  }
+  out << "  ],\n";
+  out << "  \"rawStepColourAudit\": [\n";
+  std::size_t rawAuditIndex = 0;
+  for (const auto& [colourId, audit] : rawStepColourAudit) {
+    const Colour linear = convertColourForGlb(audit.colour, ColourSpaceConfig{ColourSpaceMode::SrgbToLinear, "srgb-to-linear"});
+    out << "    {";
+    out << "\"colourId\": "; writeString(out, colourId); out << ", ";
+    out << "\"rawRgb\": [" << audit.colour.r << ", " << audit.colour.g << ", " << audit.colour.b << ", " << audit.colour.a << "], ";
+    out << "\"hexIfSrgb\": "; writeString(out, colourHex(audit.colour)); out << ", ";
+    out << "\"linearConvertedRgb\": [" << linear.r << ", " << linear.g << ", " << linear.b << ", " << linear.a << "], ";
+    out << "\"styledItemIds\": "; writeStringVector(out, audit.styledItemIds, 20); out << ", ";
+    out << "\"mappedObjectNames\": "; writeStringVector(out, audit.mappedObjectNames, 20);
+    out << "}" << (++rawAuditIndex < rawStepColourAudit.size() ? "," : "") << "\n";
+  }
+  out << "  ],\n";
   out << "  \"uniqueColourValues\": [";
   first = true;
   for (const auto& item : stats.uniqueColours) {
@@ -2299,6 +2560,10 @@ void writeReport(
       out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
       out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
       out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
+      out << "\"rawStepMappingConfidence\": "; writeString(out, primitive.rawStepMappingConfidence); out << ", ";
+      out << "\"rawStepStyledItemId\": "; writeString(out, primitive.rawStepStyledItemId); out << ", ";
+      out << "\"rawStepTargetId\": "; writeString(out, primitive.rawStepTargetId); out << ", ";
+      out << "\"rawStepTargetType\": "; writeString(out, primitive.rawStepTargetType); out << ", ";
       out << "\"fallbackReason\": "; writeString(out, primitive.fallbackReason);
       out << "}";
     }
@@ -2333,6 +2598,10 @@ void writeReport(
     out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
     out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
     out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
+    out << "\"rawStepMappingConfidence\": "; writeString(out, primitive.rawStepMappingConfidence); out << ", ";
+    out << "\"rawStepStyledItemId\": "; writeString(out, primitive.rawStepStyledItemId); out << ", ";
+    out << "\"rawStepTargetId\": "; writeString(out, primitive.rawStepTargetId); out << ", ";
+    out << "\"rawStepTargetType\": "; writeString(out, primitive.rawStepTargetType); out << ", ";
     out << "\"colourTrace\": "; writeString(out, primitive.colourTrace);
     out << "}" << (i + 1 < diagnosticLimit ? "," : "") << "\n";
   }
@@ -2407,6 +2676,10 @@ void writeReport(
     out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
     out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
     out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
+    out << "\"rawStepMappingConfidence\": "; writeString(out, primitive.rawStepMappingConfidence); out << ", ";
+    out << "\"rawStepStyledItemId\": "; writeString(out, primitive.rawStepStyledItemId); out << ", ";
+    out << "\"rawStepTargetId\": "; writeString(out, primitive.rawStepTargetId); out << ", ";
+    out << "\"rawStepTargetType\": "; writeString(out, primitive.rawStepTargetType); out << ", ";
     out << "\"instanceLabelColour\": "; writeString(out, primitive.instanceLabelColour); out << ", ";
     out << "\"referredLabelColour\": "; writeString(out, primitive.referredLabelColour); out << ", ";
     out << "\"owningShapeColour\": "; writeString(out, primitive.owningShapeColour); out << ", ";
@@ -2439,14 +2712,16 @@ void writeReport(
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3 || argc > 4) {
-    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high]\n";
+  if (argc < 3 || argc > 6) {
+    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-space raw|srgb-to-linear]\n";
     return 2;
   }
 
   const std::string inputPath = argv[1];
   const std::filesystem::path outputDir = argv[2];
-  const Quality quality = parseQuality(argc == 4 ? argv[3] : "balanced");
+  const bool hasQualityArg = argc >= 4 && std::string(argv[3]).rfind("--", 0) != 0;
+  const Quality quality = parseQuality(hasQualityArg ? argv[3] : "balanced");
+  const ColourSpaceConfig colourSpace = parseColourSpaceArg(argc, argv, hasQualityArg ? 4 : 3);
   const auto started = std::chrono::steady_clock::now();
 
   try {
@@ -2462,6 +2737,7 @@ int main(int argc, char** argv) {
             " linearDeflection=" + std::to_string(quality.linearDeflection) +
             " angularDeflection=" + std::to_string(quality.angularDeflection) +
             " relative=" + (quality.relative ? "true" : "false"));
+    logLine("Colour space: " + colourSpace.name);
 
     Interface_Static::SetIVal("read.step.assembly.level", 1);
 
@@ -2537,14 +2813,14 @@ int main(int argc, char** argv) {
 
     logLine("Writing display.glb");
     const auto glbPath = outputDir / "display.glb";
-    writeGlb(glbPath, primitives);
+    writeGlb(glbPath, primitives, colourSpace);
 
     const auto finished = std::chrono::steady_clock::now();
     stats.conversionSeconds = std::chrono::duration<double>(finished - started).count();
     const auto glbSize = std::filesystem::file_size(glbPath);
 
     logLine("Writing xcaf-report.json");
-    writeReport(outputDir / "xcaf-report.json", inputPath, quality, stats, primitives, glbSize);
+    writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, stats, rawStepStyles.colourAudit(), primitives, glbSize);
     logLine("Done: primitives=" + std::to_string(stats.primitivesExported) +
             " triangles=" + std::to_string(stats.triangles) +
             " glbBytes=" + std::to_string(glbSize));

@@ -193,6 +193,67 @@ default-grey face uses from 1,839 to 18. The output is available on the
 EliteDesk as `/tmp/u843-xcaf-glb-output-v6/display.glb` and is registered in the
 admin UI as `u843-xcaf-v6-display` for visual inspection.
 
+## v7 colour-space and confidence result
+
+The v6 resolver filled most missing grey geometry, but visual inspection showed
+some newly recovered blue and green components as too bright/saturated compared
+with Rhino. The likely cause is colour-space interpretation: STEP `COLOUR_RGB`
+values are display-style RGB values, while glTF material `baseColorFactor`
+values are consumed as linear factors. Writing dark display values directly as
+linear factors makes them display brighter in a browser renderer.
+
+The v7 spike adds:
+
+- `--colour-space raw` - preserves v6 material behaviour.
+- `--colour-space srgb-to-linear` - converts XCAF/STEP display RGB to linear
+  values before writing GLB `baseColorFactor`.
+- Raw STEP mapping confidence. Raw `STYLED_ITEM` colours are applied only when
+  the mapping reaches an exact BREP/topology target through a named shape
+  representation path. Weak/name-only matches are report diagnostics and do not
+  override XCAF colours.
+- Colour audit sections in `xcaf-report.json`:
+  - `finalGlbColourAudit`
+  - `rawStepColourAudit`
+  - `rawStepStyleResolver.mappingConfidenceCounts`
+
+The U843 v7 outputs are:
+
+```text
+/tmp/u843-xcaf-glb-output-v7-raw/display.glb
+/tmp/u843-xcaf-glb-output-v7-linear/display.glb
+```
+
+Both variants preserve the same geometry: 173 nodes, 173 meshes/primitives,
+519 accessors, and 384,210 triangles. The raw output is 32,533,468 bytes; the
+linear output is 32,533,476 bytes. The BIN geometry chunk is identical. The
+small size difference is JSON material/report metadata.
+
+On the U843 run, all applied raw STEP style fills were traced with
+`exact manifold solid BREP` confidence:
+
+| Metric | v6 raw | v7 raw | v7 sRGB-to-linear |
+| --- | ---: | ---: | ---: |
+| Unique colours | 9 | 9 | 9 |
+| Raw STEP styled-item primitive buckets | 13 | 13 | 13 |
+| Raw STEP styled-item face uses | 1,821 | 1,821 | 1,821 |
+| Default grey primitives | 1 | 1 | 1 |
+| Default grey face uses | 18 | 18 | 18 |
+| Raw mapping confidence | unreported | exact manifold solid BREP | exact manifold solid BREP |
+
+Examples from `finalGlbColourAudit`:
+
+| Source RGB | v7 raw GLB factor | v7 linear GLB factor | Source |
+| --- | --- | --- | --- |
+| `0.0, 0.14902, 0.0` | `0.0, 0.14902, 0.0` | `0.0, 0.019382, 0.0` | raw STEP styled item |
+| `0.0, 0.0, 0.172549` | `0.0, 0.0, 0.172549` | `0.0, 0.0, 0.025187` | raw STEP styled item |
+| `0.32549, 0.32549, 0.380392` | `0.32549, 0.32549, 0.380392` | `0.0865, 0.0865, 0.119538` | raw STEP styled item |
+
+This supports the colour-space hypothesis for the bright blue/green issue. It
+does not show evidence that v6 applied raw STEP styles through an over-broad
+weak/name-only match for the U843 fills now used by v7; the v7 applied mappings
+all resolved to exact manifold solid BREP targets. Visual Rhino comparison is
+still required before making `srgb-to-linear` the production default.
+
 ## Tools added
 
 `spikes/step-style-inspector/step_style_inspector.py` generates the raw report

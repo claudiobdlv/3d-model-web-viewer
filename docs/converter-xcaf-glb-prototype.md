@@ -54,8 +54,9 @@ The safe spike command is:
 cd /home/claudio/projects/3d-model-web-viewer
 ./spikes/occt-xcaf-glb/run.sh \
   /home/claudio/projects/3d-model-web-viewer/data/uploads/u843-non-haz-panel-20260615065620/original.stp \
-  /tmp/u843-xcaf-glb-output-v6 \
-  balanced
+  /tmp/u843-xcaf-glb-output-v7-linear \
+  balanced \
+  --colour-space srgb-to-linear
 ```
 
 Keep U843 outputs under `/tmp` or another ignored path. Do not commit uploaded
@@ -203,6 +204,31 @@ face/subshape/label/referred-label colours and before inherited ancestor/default
 grey fallback. It does not use layer names, component names, or hard-coded colour
 tables as material rules.
 
+The v7 spike adds configurable colour-space handling and stricter raw STEP style
+confidence. `--colour-space raw` preserves v6 behaviour and writes XCAF/STEP RGB
+values directly to glTF `baseColorFactor`. `--colour-space srgb-to-linear`
+treats XCAF/STEP RGB values as display/sRGB values and converts them to linear
+values before writing GLB materials. This matters for dark display colours such
+as STEP green `0.0, 0.14902, 0.0` and blue `0.0, 0.0, 0.172549`: writing them
+directly as linear factors can make the browser render them much brighter and
+more saturated than Rhino-like display values.
+
+Raw STEP styles now carry a mapping confidence. The exporter applies raw style
+colours only when the style is traced through a named shape representation to an
+exact BREP/topology target, for example `exact manifold solid BREP`. Weak or
+name-only matches are reportable diagnostics but do not override XCAF colours.
+
+`xcaf-report.json` now includes:
+
+- `colourSpace` - whether GLB material values were converted.
+- `finalGlbColourAudit` - every unique GLB material colour, RGB written to GLB,
+  hex, source buckets, and primitive/face/triangle counts.
+- `rawStepColourAudit` - every raw STEP `COLOUR_RGB`, hex if interpreted as
+  sRGB, linear-converted values, referencing `STYLED_ITEM` ids, and mapped
+  object names.
+- `rawStepStyleResolver.mappingConfidenceCounts` - counts of applied raw style
+  mappings by confidence.
+
 ## Tessellation
 
 The prototype uses `BRepMesh_IncrementalMesh`.
@@ -277,21 +303,24 @@ the first sibling's material by accident.
 
 Latest U843 comparison:
 
-| Metric | v2 high | v3 balanced | v4 balanced | v5 balanced | v6 balanced |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Coloured primitives | 20,185 | 147 | 159 | 159 | 172 |
-| Raw STEP styled-item primitives | 0 | 0 | 0 | 0 | 13 |
-| Default grey primitives | 1,839 | 26 | 14 | 14 | 1 |
-| Default grey face uses | not reported | 17,652 | 1,839 | 1,839 | 18 |
-| Unique colours | 6 | 6 | 6 | 6 | 9 |
-| Node count | not reported | 173 | 173 | 173 | 173 |
-| Primitive count | 22,024 | 173 | 173 | 173 | 173 |
-| Vertices | 3,162,696 | 1,152,630 | 1,152,630 | 1,152,630 | 1,152,630 |
-| Triangles | 1,054,232 | 384,210 | 384,210 | 384,210 | 384,210 |
-| GLB size | 110,412,276 bytes | 32,478,256 bytes | 32,477,752 bytes | 32,507,932 bytes | 32,509,484 bytes |
-| Repeated component colour mismatches | not reported | not reported | 0 | 0 | 0 |
-| Layer colour values exposed | not reported | not reported | not reported | no | no |
-| Conversion time | 73.58s | 97.38s | 71.95s | 71.97s | 76.98s |
+| Metric | v2 high | v3 balanced | v4 balanced | v5 balanced | v6 balanced | v7 raw balanced | v7 linear balanced |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Colour-space mode | raw | raw | raw | raw | raw | raw | sRGB-to-linear |
+| Coloured primitives | 20,185 | 147 | 159 | 159 | 172 | 172 | 172 |
+| Raw STEP styled-item primitive buckets | 0 | 0 | 0 | 0 | 13 | 13 | 13 |
+| Raw STEP styled-item face uses | 0 | 0 | 0 | 0 | 1,821 | 1,821 | 1,821 |
+| Raw STEP confidence | n/a | n/a | n/a | n/a | unreported | exact manifold solid BREP | exact manifold solid BREP |
+| Default grey primitives | 1,839 | 26 | 14 | 14 | 1 | 1 | 1 |
+| Default grey face uses | not reported | 17,652 | 1,839 | 1,839 | 18 | 18 | 18 |
+| Unique colours | 6 | 6 | 6 | 6 | 9 | 9 | 9 |
+| Node count | not reported | 173 | 173 | 173 | 173 | 173 | 173 |
+| Primitive count | 22,024 | 173 | 173 | 173 | 173 | 173 | 173 |
+| Vertices | 3,162,696 | 1,152,630 | 1,152,630 | 1,152,630 | 1,152,630 | 1,152,630 | 1,152,630 |
+| Triangles | 1,054,232 | 384,210 | 384,210 | 384,210 | 384,210 | 384,210 | 384,210 |
+| GLB size | 110,412,276 bytes | 32,478,256 bytes | 32,477,752 bytes | 32,507,932 bytes | 32,509,484 bytes | 32,533,468 bytes | 32,533,476 bytes |
+| Repeated component colour mismatches | not reported | not reported | 0 | 0 | 0 | 0 | 0 |
+| Layer colour values exposed | not reported | not reported | not reported | no | no | no | no |
+| Conversion time | 73.58s | 97.38s | 71.95s | 71.97s | 76.98s | 79.21s | 77.29s |
 
 The v5 GLB passed a direct GLB structural readback with 173 meshes, 173 nodes,
 six materials, 519 accessors, and a valid JSON/BIN chunk layout. The existing JS
@@ -302,6 +331,13 @@ The v6 GLB passed direct GLB v2 readback with two chunks, 173 meshes, 173 nodes,
 nine materials, 519 accessors, and 384,210 triangles. It is registered on the
 EliteDesk as the temporary admin-visible model `u843-xcaf-v6-display` for visual
 inspection before production converter integration.
+
+The v7 raw and linear GLBs both passed direct GLB v2 readback with two chunks,
+173 meshes, 173 nodes, nine materials, 519 accessors, and 384,210 triangles.
+They are registered on the EliteDesk as `u843-xcaf-v7-raw-display` and
+`u843-xcaf-v7-linear-display`. Compare the linear variant first when checking
+the v6 bright blue/green issue, because it is the variant that converts STEP
+display RGB into glTF linear material factors.
 
 ## Current limitations
 
@@ -349,6 +385,8 @@ Recommended next work:
 - Add optional smooth normals for curved faces without smoothing across hard CAD
   edges.
 - Add automated GLB readback validation to the spike runner itself.
+- Visually compare v7 linear against Rhino and v7 raw/v6 before selecting the
+  production colour-space policy.
 - Add backend selection behind `CONVERTER_BACKEND=occt-xcaf` only after U843
   visual inspection proves colour and selection quality are better than the
   current `occt-import-js` output.
