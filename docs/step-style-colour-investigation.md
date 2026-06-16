@@ -3,6 +3,26 @@
 This document records the raw STEP presentation/style investigation for the
 native OpenCascade/XCAF GLB spike.
 
+## Baseline reset
+
+The v6/v7/v8 raw STEP style and colour-space experiments are now treated as
+diagnostics, not the clean conversion baseline. The active baseline mode is:
+
+```bash
+--colour-mode xcaf-baseline --colour-space raw
+```
+
+In that mode, raw STEP `STYLED_ITEM` colours are still parsed and reported, but
+they do not assign GLB materials. Layer membership remains report metadata, but
+layer names or layer colours do not assign GLB materials. The baseline uses only
+direct OpenCascade/XCAF face, subshape, owning label/body, referred/original
+label, instance/component label, explicit inherited ancestor colour, and then
+neutral grey fallback.
+
+The next proper fix should investigate how a raw STEP styled item can be mapped
+to the exact XCAF topology/subshape inside an assembly block without broad
+representation or name-based material assignment.
+
 ## Scope
 
 - Production worker integration was not changed.

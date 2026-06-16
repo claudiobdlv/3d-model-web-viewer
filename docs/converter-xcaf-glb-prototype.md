@@ -25,7 +25,7 @@ EliteDesk services.
 From the repo root:
 
 ```bash
-./spikes/occt-xcaf-glb/run.sh /path/to/input.stp /tmp/u843-xcaf-glb-output balanced
+./spikes/occt-xcaf-glb/run.sh /path/to/input.stp /tmp/u843-xcaf-glb-output balanced --colour-mode xcaf-baseline
 ```
 
 The output directory receives:
@@ -39,6 +39,20 @@ conversion.log
 The runner builds `occt-xcaf-glb-spike:local` with Docker when Docker is
 available. If Docker is unavailable, it falls back to a local CMake build and
 expects OpenCascade development packages to already be installed.
+
+The current evidence-based baseline mode is:
+
+```bash
+--colour-mode xcaf-baseline --colour-space raw
+```
+
+This keeps the native OpenCascade/XCAF backend direction, v3/v4 transform
+handling, lightweight grouped GLB export, valid GLB output, and object
+metadata/extras. It disables the experimental active colour paths that produced
+unreliable visual results: raw STEP styled-item material assignment,
+sRGB-to-linear conversion as a default, layer-colour material assignment, broad
+representation graph colour application, material rules, layer/name guessing,
+and U843-specific fallback logic.
 
 ## EliteDesk U843 run
 
@@ -54,8 +68,9 @@ The safe spike command is:
 cd /home/claudio/projects/3d-model-web-viewer
 ./spikes/occt-xcaf-glb/run.sh \
   /home/claudio/projects/3d-model-web-viewer/data/uploads/u843-non-haz-panel-20260615065620/original.stp \
-  /tmp/u843-xcaf-glb-output-v8 \
-  balanced
+  /tmp/u843-xcaf-baseline-output \
+  balanced \
+  --colour-mode xcaf-baseline
 ```
 
 Keep U843 outputs under `/tmp` or another ignored path. Do not commit uploaded
@@ -108,30 +123,27 @@ losing the source label for debugging.
 
 ## Colour extraction
 
-The prototype uses XCAF colour tools only. Material rules are not used. Colour
-priority is:
+`--colour-mode xcaf-baseline` uses direct OpenCascade/XCAF colour metadata only.
+Material rules are not used. Name, layer-name, and component-name guessing are
+not used. Raw STEP styled-item colours are parsed for diagnostics only and do
+not become GLB material assignment. Layer membership is preserved as metadata,
+but layer colours do not become materials in baseline mode.
 
-1. Face surface colour.
-2. Face generic colour.
-3. Face curve colour.
-4. Coloured XCAF subshape/solid label surface colour containing the face.
-5. Coloured XCAF subshape/solid label generic colour containing the face.
-6. Coloured XCAF subshape/solid shape colour containing the face.
-7. Owning label surface colour.
-8. Owning label generic colour.
-9. Owning label curve colour.
-10. Owning shape surface/generic/curve colour.
-11. Referred/original label surface colour for assembly references.
-12. Referred/original label generic colour for assembly references.
-13. Referred/original label curve colour for assembly references.
-14. Raw STEP presentation-style colour traced from a named shape representation
-    to its styled BREP/topology item.
-15. Nearest explicitly coloured ancestor label.
-16. Matched subshape layer colour if OpenCascade exposes an actual colour for
-    that layer.
-17. Label/referred/ancestor layer colour if OpenCascade exposes one for that
-    layer.
-18. Neutral grey fallback.
+Baseline colour priority is:
+
+1. Exact face/subshape surface colour from XCAF.
+2. Exact face/subshape generic colour from XCAF.
+3. Owning solid/body label colour from XCAF, if explicitly set.
+4. Referred/original label colour from XCAF, if explicitly set and tied to that
+   topology.
+5. Instance/component label colour from XCAF, if explicitly set.
+6. Explicit inherited ancestor colour, only when passed through a real coloured
+   parent label.
+7. Neutral grey fallback.
+
+The legacy `--colour-mode experimental` path still exists for comparison. It
+keeps the v8 strong-only raw STEP style application and layer-colour material
+assignment behaviour, but that path is not the clean baseline.
 
 The v4 colour fix separates metadata lookup topology from render topology. XCAF
 colour associations are resolved on the original/unmoved shape and face labels,
@@ -194,7 +206,7 @@ those objects by layer colour, but this prototype does not infer colours from
 layer names and does not yet read a separate Rhino layer-colour table from the
 STEP transfer.
 
-The v6 spike adds a raw STEP presentation-style resolver. It shallow-parses STEP
+The v6 spike added a raw STEP presentation-style resolver. It shallow-parses STEP
 entity records, resolves explicit `COLOUR_RGB` -> presentation style ->
 `STYLED_ITEM` chains, and then walks named shape-representation graphs to BREP
 or topology items targeted by those styled items. The resolver feeds only those
@@ -202,6 +214,12 @@ explicit raw `STYLED_ITEM` colours into the GLB exporter, after direct XCAF
 face/subshape/label/referred-label colours and before inherited ancestor/default
 grey fallback. It does not use layer names, component names, or hard-coded colour
 tables as material rules.
+
+That active raw-style application is disabled in `xcaf-baseline`. The resolver
+remains useful as an inspector because it can show whether the STEP file carries
+colours outside the direct XCAF label/subshape path, but v6/v7/v8 visual testing
+showed that applying those colours through the current representation matching
+can still produce wrong saturated or missing colours.
 
 The v7 spike adds configurable colour-space handling and stricter raw STEP style
 confidence. `--colour-space raw` preserves v6 behaviour and writes XCAF/STEP RGB
@@ -233,6 +251,8 @@ too broadly after the exporter matched it by representation/component name.
 
 `xcaf-report.json` now includes:
 
+- `colourMode` - whether active material assignment is clean XCAF baseline or
+  the old experimental raw-style path.
 - `colourSpace` - whether GLB material values were converted.
 - `finalGlbColourAudit` - every unique GLB material colour, RGB written to GLB,
   hex, source buckets, and primitive/face/triangle counts.
@@ -246,6 +266,9 @@ too broadly after the exporter matched it by representation/component name.
   and triangle count.
 - `componentsStayedDefaultGrey` - compact list of components still using the
   neutral default, including any raw-style rejection reason.
+- `simpleVsAssemblyColourComparison` - a placeholder in single-input reports,
+  replaced by `compare_simple_assembly.py` after the simple and full-assembly
+  baseline reports are both available.
 - `colourChangeAudit` - appended by `compare_reports.py` when v4/v5/v6/v7
   reports are available, focused on objects whose colour/source changed across
   the versioned test outputs.
@@ -343,11 +366,9 @@ Latest U843 comparison:
 | Layer colour values exposed | not reported | not reported | not reported | no | no | no | no |
 | Conversion time | 73.58s | 97.38s | 71.95s | 71.97s | 76.98s | 79.21s | 77.29s |
 
-v8 should be compared as a fresh versioned admin-visible model, not by
-overwriting v6 or v7 outputs. Its expected semantic difference from v7 raw is
-scope confidence: raw/display RGB remains the default, but broad or ambiguous
-raw STEP style matches are refused instead of being applied through a
-representation/name match.
+The next comparison target is the baseline output, not another layered raw-style
+variant. Baseline should be generated as fresh admin-visible models without
+overwriting v6/v7/v8 outputs.
 
 The v5 GLB passed a direct GLB structural readback with 173 meshes, 173 nodes,
 six materials, 519 accessors, and a valid JSON/BIN chunk layout. The existing JS
@@ -394,12 +415,15 @@ display RGB into glTF linear material factors.
 
 Recommended next work:
 
-- Visually inspect `/tmp/u843-xcaf-glb-output-v6/display.glb` in the web viewer
-  and compare against Rhino or the source CAD colours.
+- Visually inspect `/tmp/u843-xcaf-baseline-output/display.glb` in the web
+  viewer and compare against Rhino or the source CAD colours.
 - Use `xcaf-report.json` `globalBoundingBox`, `topObjectsByBoundingBoxSize`, and
   `transformSamples` to investigate any remaining misplaced components.
 - Use `siblingColourComparison` and per-object `candidateColours` to inspect any
   visually wrong repeated block instances.
+- Use `simpleVsAssemblyColourComparison`, appended by
+  `spikes/occt-xcaf-glb/compare_simple_assembly.py`, to compare a standalone
+  object report with a full-assembly report.
 - Investigate the remaining default-heavy labels in `topDefaultHeavyLabels`,
   especially components that appear genuinely uncoloured in XCAF versus labels
   whose colours are still attached through a path the prototype does not follow.
@@ -412,9 +436,13 @@ Recommended next work:
 - Add optional smooth normals for curved faces without smoothing across hard CAD
   edges.
 - Add automated GLB readback validation to the spike runner itself.
-- Visually compare v8 against Rhino and v6/v7. v7-linear was visually too dark,
-  so raw/display RGB should remain the default unless later evidence points
-  elsewhere.
+- Visually inspect the `xcaf-baseline` outputs first. If the standalone object
+  is green/correct but the matching full-assembly object is white/grey, use
+  `simpleVsAssemblyColourComparison` plus per-object `candidateColours` to
+  determine whether the same colour exists on the referred/original label,
+  instance label, subshape label, layer membership, or only raw STEP style data.
+- Investigate a topology-aware bridge from raw STEP styled items to exact XCAF
+  subshapes only after the baseline evidence proves the direct XCAF lookup gap.
 - Add backend selection behind `CONVERTER_BACKEND=occt-xcaf` only after U843
   visual inspection proves colour and selection quality are better than the
   current `occt-import-js` output.

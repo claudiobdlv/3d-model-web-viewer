@@ -2,10 +2,10 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-space raw|srgb-to-linear]" >&2
+  echo "Usage: $0 /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear]" >&2
 }
 
-if [ "$#" -lt 2 ] || [ "$#" -gt 5 ]; then
+if [ "$#" -lt 2 ] || [ "$#" -gt 7 ]; then
   usage
   exit 2
 fi

@@ -75,6 +75,18 @@ struct ColourSpaceConfig {
   std::string name = "raw";
 };
 
+enum class ColourMode {
+  Experimental,
+  XcafBaseline
+};
+
+struct ColourModeConfig {
+  ColourMode mode = ColourMode::Experimental;
+  std::string name = "experimental";
+  bool applyRawStepStyles = true;
+  bool applyLayerColours = true;
+};
+
 struct LayerInfo {
   std::string name;
   TDF_Label label;
@@ -1252,22 +1264,44 @@ ColourSpaceConfig parseColourSpace(const std::string& value) {
   throw std::runtime_error("Unsupported colour-space mode: " + value);
 }
 
-ColourSpaceConfig parseColourSpaceArg(const int argc, char** argv, const int startIndex) {
+ColourModeConfig parseColourMode(const std::string& value) {
+  if (value == "experimental") {
+    return {ColourMode::Experimental, "experimental", true, true};
+  }
+  if (value == "xcaf-baseline") {
+    return {ColourMode::XcafBaseline, "xcaf-baseline", false, false};
+  }
+  throw std::runtime_error("Unsupported colour-mode: " + value);
+}
+
+struct CliOptions {
   ColourSpaceConfig colourSpace = parseColourSpace("raw");
+  ColourModeConfig colourMode = parseColourMode("experimental");
+};
+
+CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
+  CliOptions options;
   for (int i = startIndex; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--colour-space") {
       if (i + 1 >= argc) {
         throw std::runtime_error("--colour-space requires raw or srgb-to-linear");
       }
-      colourSpace = parseColourSpace(argv[++i]);
+      options.colourSpace = parseColourSpace(argv[++i]);
     } else if (arg.rfind("--colour-space=", 0) == 0) {
-      colourSpace = parseColourSpace(arg.substr(std::string("--colour-space=").size()));
+      options.colourSpace = parseColourSpace(arg.substr(std::string("--colour-space=").size()));
+    } else if (arg == "--colour-mode") {
+      if (i + 1 >= argc) {
+        throw std::runtime_error("--colour-mode requires experimental or xcaf-baseline");
+      }
+      options.colourMode = parseColourMode(argv[++i]);
+    } else if (arg.rfind("--colour-mode=", 0) == 0) {
+      options.colourMode = parseColourMode(arg.substr(std::string("--colour-mode=").size()));
     } else {
       throw std::runtime_error("Unknown argument: " + arg);
     }
   }
-  return colourSpace;
+  return options;
 }
 
 std::array<float, 3> normalFromTriangle(
@@ -1518,6 +1552,7 @@ void tessellateLabel(
     const Handle(XCAFDoc_ColorTool)& colourTool,
     const Handle(XCAFDoc_LayerTool)& layerTool,
     const RawStepStyleResolver* rawStepStyles,
+    const ColourModeConfig& colourMode,
     const TDF_Label& label,
     const Quality& quality,
     const std::string& instancePath,
@@ -1686,7 +1721,7 @@ void tessellateLabel(
     } else if (!labelHasColour && referredHasColour) {
       colour = referredColour;
       hasColour = true;
-    } else if (!labelHasColour && rawStepHasColour) {
+    } else if (!labelHasColour && rawStepHasColour && colourMode.applyRawStepStyles) {
       colour = rawStepColour;
       hasColour = true;
       stats.rawStepColourUses += 1;
@@ -1694,13 +1729,13 @@ void tessellateLabel(
     } else if (!labelHasColour && ancestorHasCandidateColour) {
       colour = ancestorCandidate;
       hasColour = true;
-    } else if (!labelHasColour && matchedSubshapeHasLayerColour) {
+    } else if (!labelHasColour && matchedSubshapeHasLayerColour && colourMode.applyLayerColours) {
       colour = matchedSubshapeLayerColour;
       colour.source = "subshape_layer_" + colour.source;
       colour.materialSource = "layer";
       hasColour = true;
       primitiveLayer = firstLayerName(matchedSubshapeLayers).empty() ? primitiveLayer : firstLayerName(matchedSubshapeLayers);
-    } else if (!labelHasColour && layerHasCandidateColour) {
+    } else if (!labelHasColour && layerHasCandidateColour && colourMode.applyLayerColours) {
       colour = layerCandidate;
       hasColour = true;
     }
@@ -1708,7 +1743,9 @@ void tessellateLabel(
     if (!hasColour) {
       stats.defaultMaterialUses += 1;
       colour = defaultColour(
-          "no face/subshape, label, referred-label, ancestor, or layer colour found",
+          colourMode.mode == ColourMode::XcafBaseline
+              ? "no direct XCAF face/subshape, owning label/body, referred/original label, instance/component label, or explicit inherited ancestor colour found; raw STEP styles and layer colours are diagnostic-only in xcaf-baseline"
+              : "no face/subshape, label, referred-label, ancestor, or layer colour found",
           labelPath + "/face/" + std::to_string(faceIndex));
     }
     if (!primitiveLayer.empty()) {
@@ -1831,6 +1868,7 @@ void traverse(
     const Handle(XCAFDoc_ColorTool)& colourTool,
     const Handle(XCAFDoc_LayerTool)& layerTool,
     const RawStepStyleResolver* rawStepStyles,
+    const ColourModeConfig& colourMode,
     const TDF_Label& label,
     const Quality& quality,
     const std::string& instancePath,
@@ -1890,6 +1928,7 @@ void traverse(
           colourTool,
           layerTool,
           rawStepStyles,
+          colourMode,
           children.Value(i),
           quality,
           currentInstancePath,
@@ -1910,6 +1949,7 @@ void traverse(
       colourTool,
       layerTool,
       rawStepStyles,
+      colourMode,
       label,
       quality,
       currentInstancePath,
@@ -2355,6 +2395,7 @@ void writeReport(
     const std::string& inputPath,
     const Quality& quality,
     const ColourSpaceConfig& colourSpace,
+    const ColourModeConfig& colourMode,
     const Stats& stats,
     const std::map<std::string, RawStepColourAudit>& rawStepColourAudit,
     const std::vector<MeshPrimitive>& primitives,
@@ -2408,7 +2449,17 @@ void writeReport(
   out << "    \"baseColorFactorValues\": "; writeString(out, colourSpace.mode == ColourSpaceMode::SrgbToLinear ? "sRGB STEP/XCAF display RGB converted to linear before GLB material write" : "raw STEP/XCAF RGB written directly to GLB material baseColorFactor"); out << ",\n";
   out << "    \"converted\": " << (colourSpace.mode == ColourSpaceMode::SrgbToLinear ? "true" : "false") << "\n";
   out << "  },\n";
-  out << "  \"colourPriority\": [\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"raw_step_styled_item\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"],\n";
+  out << "  \"colourMode\": {\n";
+  out << "    \"mode\": "; writeString(out, colourMode.name); out << ",\n";
+  out << "    \"applyRawStepStyles\": " << (colourMode.applyRawStepStyles ? "true" : "false") << ",\n";
+  out << "    \"applyLayerColours\": " << (colourMode.applyLayerColours ? "true" : "false") << ",\n";
+  out << "    \"description\": "; writeString(out, colourMode.mode == ColourMode::XcafBaseline
+      ? "Direct OpenCascade/XCAF metadata only: no raw STEP style material assignment, no layer-colour material assignment, no material/name/layer guessing, raw RGB written by default."
+      : "Experimental spike mode: legacy raw STEP style and layer-colour material assignment remain enabled for comparison."); out << "\n";
+  out << "  },\n";
+  out << "  \"colourPriority\": " << (colourMode.mode == ColourMode::XcafBaseline
+      ? "[\"face_surface\", \"face_generic\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"owning_label_surface\", \"owning_label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"instance_component_label_surface\", \"instance_component_label_generic\", \"explicit_inherited_ancestor_surface\", \"explicit_inherited_ancestor_generic\", \"default_neutral_grey\"]"
+      : "[\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"raw_step_styled_item\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"]") << ",\n";
   out << "  \"summary\": {\n";
   out << "    \"freeShapes\": " << stats.freeShapes << ",\n";
   out << "    \"labelsComponentsProcessed\": " << stats.labelsProcessed << ",\n";
@@ -2475,7 +2526,7 @@ void writeReport(
     out << ": " << item.second;
   }
   out << "},\n";
-  out << "    \"applicationMode\": \"strong-only raw styled items; exactly one strong styled topology/BREP target per named representation\",\n";
+  out << "    \"applicationMode\": "; writeString(out, colourMode.applyRawStepStyles ? "strong-only raw styled items; exactly one strong styled topology/BREP target per named representation" : "diagnostic-only; raw STEP styles are not active material assignment in this colour mode"); out << ",\n";
   out << "    \"ambiguousRepresentationRejects\": " << stats.rawStepAmbiguousRepresentationRejects << ",\n";
   out << "    \"broadRepresentationRejects\": " << stats.rawStepBroadRepresentationRejects << ",\n";
   out << "    \"weakMappingsOverrideXcaf\": false,\n";
@@ -2840,6 +2891,16 @@ void writeReport(
     out << "}" << (i + 1 < primitives.size() ? "," : "") << "\n";
   }
   out << "  ],\n";
+  out << "  \"simpleVsAssemblyColourComparison\": {\n";
+  out << "    \"status\": \"per-run placeholder\",\n";
+  out << "    \"method\": \"Compare this report with a second baseline report using objects, layers, candidateColours, finalGlbColourAudit, and rawStepColourAudit. The converter records the fields needed for the simple-object versus full-assembly investigation but does not know the paired report at conversion time.\",\n";
+  out << "    \"simpleTestObjectMetadata\": null,\n";
+  out << "    \"matchingCandidateComponentsInFullAssembly\": [],\n";
+  out << "    \"colourCandidates\": [],\n";
+  out << "    \"finalColours\": [],\n";
+  out << "    \"hierarchyDifferences\": [],\n";
+  out << "    \"conclusion\": \"Generated after both baseline reports are compared.\"\n";
+  out << "  },\n";
   out << "  \"limitations\": [\n";
   out << "    \"Prototype writes one GLB node per component/material bucket, with duplicated triangle vertices to preserve sharp CAD normals and face colour identity.\",\n";
   out << "    \"Assembly hierarchy is flattened to renderable nodes; label paths and stableObjectId are preserved in node extras for later selection work.\",\n";
@@ -2851,8 +2912,8 @@ void writeReport(
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3 || argc > 6) {
-    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-space raw|srgb-to-linear]\n";
+  if (argc < 3 || argc > 8) {
+    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear]\n";
     return 2;
   }
 
@@ -2860,7 +2921,9 @@ int main(int argc, char** argv) {
   const std::filesystem::path outputDir = argv[2];
   const bool hasQualityArg = argc >= 4 && std::string(argv[3]).rfind("--", 0) != 0;
   const Quality quality = parseQuality(hasQualityArg ? argv[3] : "balanced");
-  const ColourSpaceConfig colourSpace = parseColourSpaceArg(argc, argv, hasQualityArg ? 4 : 3);
+  const CliOptions cliOptions = parseCliOptions(argc, argv, hasQualityArg ? 4 : 3);
+  const ColourSpaceConfig colourSpace = cliOptions.colourSpace;
+  const ColourModeConfig colourMode = cliOptions.colourMode;
   const auto started = std::chrono::steady_clock::now();
 
   try {
@@ -2877,6 +2940,9 @@ int main(int argc, char** argv) {
             " angularDeflection=" + std::to_string(quality.angularDeflection) +
             " relative=" + (quality.relative ? "true" : "false"));
     logLine("Colour space: " + colourSpace.name);
+    logLine("Colour mode: " + colourMode.name +
+            " applyRawStepStyles=" + (colourMode.applyRawStepStyles ? "true" : "false") +
+            " applyLayerColours=" + (colourMode.applyLayerColours ? "true" : "false"));
 
     Interface_Static::SetIVal("read.step.assembly.level", 1);
 
@@ -2933,6 +2999,7 @@ int main(int argc, char** argv) {
           colourTool,
           layerTool,
           &rawStepStyles,
+          colourMode,
           freeShapes.Value(i),
           quality,
           "",
@@ -2959,7 +3026,7 @@ int main(int argc, char** argv) {
     const auto glbSize = std::filesystem::file_size(glbPath);
 
     logLine("Writing xcaf-report.json");
-    writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, stats, rawStepStyles.colourAudit(), primitives, glbSize);
+    writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, colourMode, stats, rawStepStyles.colourAudit(), primitives, glbSize);
     logLine("Done: primitives=" + std::to_string(stats.primitivesExported) +
             " triangles=" + std::to_string(stats.triangles) +
             " glbBytes=" + std::to_string(glbSize));
