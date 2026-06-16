@@ -10,8 +10,11 @@ const client = new WorkerClient(config);
 console.log(`Converter worker starting against ${config.serverUrl}`);
 console.log(`Poll interval: ${config.pollIntervalMs / 1000}s`);
 console.log(`Output dir: ${config.outputDir}`);
+console.log(`Converter backend: ${config.converterBackend}`);
 console.log(`Converter CLI: ${config.converterCli}`);
+console.log(`XCAF converter binary: ${config.xcafConverterBin}`);
 console.log(`Converter quality: ${config.quality}`);
+console.log(`Converter colour mode: ${config.converterBackend === "xcaf-baseline" ? "xcaf-baseline" : process.env.MATERIAL_RULES_MODE || "fallback"}`);
 console.log(`Keep worker output: ${config.keepWorkerOutput}`);
 console.log(`Run once: ${config.runOnce}`);
 
@@ -49,7 +52,9 @@ async function processJob(job: WorkerJob): Promise<void> {
       slug: job.modelSlug,
       sourcePath,
       outputDir: config.outputDir,
+      converterBackend: config.converterBackend,
       converterCli: config.converterCli,
+      xcafConverterBin: config.xcafConverterBin,
       quality: config.quality
     });
 

@@ -1,5 +1,21 @@
 FROM node:24-bookworm-slim
 
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    libfontconfig-dev \
+    libocct-data-exchange-dev \
+    libocct-foundation-dev \
+    libocct-modeling-algorithms-dev \
+    libocct-modeling-data-dev \
+    libocct-ocaf-dev \
+    libtbb-dev \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY apps/converter/package*.json ./apps/converter/
@@ -11,12 +27,20 @@ RUN cd apps/worker && npm ci
 COPY apps/converter ./apps/converter
 COPY apps/worker ./apps/worker
 COPY config ./config
+COPY spikes/occt-xcaf-glb ./spikes/occt-xcaf-glb
+
+RUN cmake -S /app/spikes/occt-xcaf-glb -B /app/spikes/occt-xcaf-glb/build -DCMAKE_BUILD_TYPE=Release \
+  && cmake --build /app/spikes/occt-xcaf-glb/build --parallel \
+  && mkdir -p /app/bin \
+  && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-to-glb /app/bin/xcaf-step-to-glb
 
 WORKDIR /app/apps/worker
 
 ENV SERVER_URL=http://server:3009
 ENV WORKER_OUTPUT_DIR=/app/worker-output
+ENV CONVERTER_BACKEND=occt-js
 ENV CONVERTER_CLI=/app/apps/converter/src/cli.js
+ENV XCAF_CONVERTER_BIN=/app/bin/xcaf-step-to-glb
 ENV CONVERTER_QUALITY=balanced
 ENV MATERIAL_RULES_MODE=fallback
 ENV MATERIAL_RULES_PATH=/app/config/material-rules.json

@@ -7,7 +7,7 @@ does not modify any existing Pi/OpenSprinkler Cloudflare Tunnel.
 ## What Runs
 
 - Express web/API server on local port `3009`
-- Worker container that polls the server and runs the existing converter CLI
+- Worker container that polls the server and runs the selected converter backend
 - Persistent local folders under `./data`
 - Optional separate Cloudflare Tunnel installed directly on the EliteDesk
 
@@ -46,6 +46,8 @@ SERVER_URL=http://server:3009
 POLL_INTERVAL_SECONDS=15
 WORKER_OUTPUT_DIR=/app/worker-output
 CONVERTER_CLI=/app/apps/converter/src/cli.js
+CONVERTER_BACKEND=occt-js
+XCAF_CONVERTER_BIN=/app/bin/xcaf-step-to-glb
 CONVERTER_QUALITY=high
 MATERIAL_RULES_MODE=fallback
 MATERIAL_RULES_PATH=/app/config/material-rules.json
@@ -71,6 +73,25 @@ Material rule modes:
 The default rules file is `config/material-rules.json`. It is mounted into the
 worker at `/app/config/material-rules.json`, so rule changes can be made without
 editing converter code.
+
+Converter backend options:
+
+- `CONVERTER_BACKEND=occt-js`: uses the existing JavaScript `occt-import-js`
+  converter and honours `MATERIAL_RULES_MODE`.
+- `CONVERTER_BACKEND=xcaf-baseline`: uses the native OpenCascade/XCAF baseline
+  converter built into the worker image. It writes `display.glb`,
+  `xcaf-report.json`, `stats.json`, `material-debug.json`, and `conversion.log`.
+  This backend disables material rules, name guesses, layer-name guesses, active
+  raw STEP styled-item colour assignment, layer-colour assignment, and default
+  sRGB-to-linear conversion. It calls the native converter with
+  `--colour-mode xcaf-baseline --colour-space raw`.
+
+Verify the backend used by an upload from the worker and conversion logs:
+
+```bash
+docker compose -f deploy/docker-compose.elitedesk.yml logs worker | grep 'Converter backend'
+grep 'Converter backend' data/logs/<model-id>/conversion.log
+```
 
 Start only this project:
 
@@ -188,11 +209,11 @@ curl -I https://viewer.parametricstandards.com
 
 ## MVP Limitations
 
-- STEP color accuracy depends on what `occt-import-js` exposes and may not
-  perfectly match the original CAD source. Rhino may preserve STEP
-  layer/block/instance colours that `occt-import-js` does not expose through
-  its mesh/face result, so material rules are the MVP workaround for a stable
-  visual scheme.
+- STEP color accuracy depends on the selected converter. `occt-js` depends on
+  what `occt-import-js` exposes and can use material rules as a fallback. The
+  `xcaf-baseline` backend uses direct OpenCascade/XCAF metadata only, so it may
+  leave components neutral grey when the STEP file does not expose face,
+  subshape, owning-label, referred-label, or ancestor colours through XCAF.
 - Each conversion writes `material-debug.json` beside `stats.json`. Inspect it
   to see mesh names, hierarchy paths, source colour presence, final material
   colours, and whether a rule matched. Tune `config/material-rules.json`, then

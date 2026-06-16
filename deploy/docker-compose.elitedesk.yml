@@ -32,7 +32,10 @@ services:
     environment:
       SERVER_URL: http://server:3009
       WORKER_OUTPUT_DIR: /app/worker-output
+      CONVERTER_BACKEND: ${CONVERTER_BACKEND:-occt-js}
       CONVERTER_CLI: /app/apps/converter/src/cli.js
+      XCAF_CONVERTER_BIN: /app/bin/xcaf-step-to-glb
+      CONVERTER_QUALITY: ${CONVERTER_QUALITY:-high}
       MATERIAL_RULES_MODE: ${MATERIAL_RULES_MODE:-fallback}
       MATERIAL_RULES_PATH: /app/config/material-rules.json
     volumes:

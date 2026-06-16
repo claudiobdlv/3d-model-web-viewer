@@ -35,6 +35,7 @@ export class WorkerClient {
     statsPath: string;
     materialDebugPath: string;
     conversionLogPath: string;
+    xcafReportPath?: string;
   }): Promise<void> {
     const form = new FormData();
     form.set("display.glb", await fileBlob(output.displayGlbPath), "display.glb");
@@ -42,6 +43,9 @@ export class WorkerClient {
     form.set("stats.json", await fileBlob(output.statsPath), "stats.json");
     form.set("material-debug.json", await fileBlob(output.materialDebugPath), "material-debug.json");
     form.set("conversion.log", await fileBlob(output.conversionLogPath), "conversion.log");
+    if (output.xcafReportPath) {
+      form.set("xcaf-report.json", await fileBlob(output.xcafReportPath), "xcaf-report.json");
+    }
 
     await this.request(`/api/worker/jobs/${jobId}/complete`, {
       method: "POST",

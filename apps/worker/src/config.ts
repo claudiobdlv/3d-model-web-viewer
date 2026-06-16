@@ -5,7 +5,9 @@ export type WorkerConfig = {
   token: string;
   pollIntervalMs: number;
   outputDir: string;
+  converterBackend: "occt-js" | "xcaf-baseline";
   converterCli: string;
+  xcafConverterBin: string;
   quality: string;
   runOnce: boolean;
   keepWorkerOutput: boolean;
@@ -23,12 +25,19 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     throw new Error("CONVERTER_QUALITY must be fast, balanced, high, or detailed.");
   }
 
+  const converterBackend = process.env.CONVERTER_BACKEND || "occt-js";
+  if (!["occt-js", "xcaf-baseline"].includes(converterBackend)) {
+    throw new Error("CONVERTER_BACKEND must be occt-js or xcaf-baseline.");
+  }
+
   return {
     serverUrl: trimTrailingSlash(process.env.SERVER_URL || "http://localhost:3009"),
     token,
     pollIntervalMs: Math.max(1, pollIntervalSeconds) * 1000,
     outputDir: path.resolve(process.env.WORKER_OUTPUT_DIR || "./worker-output"),
+    converterBackend: converterBackend as WorkerConfig["converterBackend"],
     converterCli: path.resolve(process.env.CONVERTER_CLI || "../converter/src/cli.js"),
+    xcafConverterBin: path.resolve(process.env.XCAF_CONVERTER_BIN || "/app/bin/xcaf-step-to-glb"),
     quality,
     runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once"),
     keepWorkerOutput: process.env.KEEP_WORKER_OUTPUT !== "false"

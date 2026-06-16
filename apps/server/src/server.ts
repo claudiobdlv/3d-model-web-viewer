@@ -85,7 +85,7 @@ app.get("/3dviewer/:slug", (req, res) => {
 
 app.get("/model-files/:slug/:file", (req, res) => {
   const { slug, file } = req.params;
-  const allowedFiles = new Set(["display.glb", "manifest.json", "stats.json"]);
+  const allowedFiles = new Set(["display.glb", "manifest.json", "stats.json", "xcaf-report.json"]);
 
   if (!isSafeSlug(slug) || !allowedFiles.has(file)) {
     res.status(404).send("Not found");
@@ -165,6 +165,22 @@ app.get("/admin/models/:slug/material-debug.json", requireAdmin, (req, res) => {
   }
 
   const filePath = path.join(getModelDir(slug), "material-debug.json");
+  if (!fs.existsSync(filePath)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  res.type("application/json").sendFile(filePath);
+});
+
+app.get("/admin/models/:slug/xcaf-report.json", requireAdmin, (req, res) => {
+  const slug = String(req.params.slug);
+  if (!isSafeSlug(slug)) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  const filePath = path.join(getModelDir(slug), "xcaf-report.json");
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;

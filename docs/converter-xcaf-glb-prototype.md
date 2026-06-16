@@ -2,14 +2,24 @@
 
 ## Purpose
 
-This prototype builds the next converter backend candidate without replacing the
-current production `occt-import-js` converter. It reads STEP/STP with native
+This prototype is now also available as the production worker backend
+`CONVERTER_BACKEND=xcaf-baseline`. The original spike remains under
+`spikes/occt-xcaf-glb/` for investigation. It reads STEP/STP with native
 OpenCascade XCAF, tessellates renderable CAD shapes, writes a GLB, and writes a
 JSON sidecar report for colour/name/hierarchy inspection.
 
-The implementation is isolated under `spikes/occt-xcaf-glb/`. It does not change
-the production server, worker, converter, Docker Compose, Cloudflare, or any
-EliteDesk services.
+The production worker image builds the same native binary into
+`/app/bin/xcaf-step-to-glb` and selects it with:
+
+```bash
+CONVERTER_BACKEND=xcaf-baseline
+```
+
+The fallback production backend remains:
+
+```bash
+CONVERTER_BACKEND=occt-js
+```
 
 ## Files
 
@@ -36,6 +46,15 @@ xcaf-report.json
 conversion.log
 ```
 
+In the worker path, the wrapper also writes compatibility files expected by the
+server:
+
+```text
+stats.json
+material-debug.json
+manifest.json
+```
+
 The runner builds `occt-xcaf-glb-spike:local` with Docker when Docker is
 available. If Docker is unavailable, it falls back to a local CMake build and
 expects OpenCascade development packages to already be installed.
@@ -53,6 +72,16 @@ unreliable visual results: raw STEP styled-item material assignment,
 sRGB-to-linear conversion as a default, layer-colour material assignment, broad
 representation graph colour application, material rules, layer/name guessing,
 and U843-specific fallback logic.
+
+For a real upload-path verification, upload a STEP/STP through `/admin`, then
+confirm:
+
+- worker logs contain `Converter backend: xcaf-baseline`
+- `data/logs/<slug>/conversion.log` contains `Converter backend: xcaf-baseline`
+- `/3dviewer/<slug>` loads
+- `/downloads/<slug>/original` returns the source file
+- `/downloads/<slug>/display.glb` returns the generated GLB
+- `/admin/models/<slug>/xcaf-report.json` is available to authenticated admin
 
 ## EliteDesk U843 run
 
