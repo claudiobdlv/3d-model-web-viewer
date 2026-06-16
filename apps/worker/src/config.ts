@@ -8,6 +8,7 @@ export type WorkerConfig = {
   converterBackend: "occt-js" | "xcaf-baseline";
   converterCli: string;
   xcafConverterBin: string;
+  xcafColourMode: "xcaf-baseline" | "step-presentation";
   quality: string;
   runOnce: boolean;
   keepWorkerOutput: boolean;
@@ -29,6 +30,10 @@ export function loadConfig(argv = process.argv): WorkerConfig {
   if (!["occt-js", "xcaf-baseline"].includes(converterBackend)) {
     throw new Error("CONVERTER_BACKEND must be occt-js or xcaf-baseline.");
   }
+  const xcafColourMode = process.env.XCAF_COLOUR_MODE || "xcaf-baseline";
+  if (!["xcaf-baseline", "step-presentation"].includes(xcafColourMode)) {
+    throw new Error("XCAF_COLOUR_MODE must be xcaf-baseline or step-presentation.");
+  }
 
   return {
     serverUrl: trimTrailingSlash(process.env.SERVER_URL || "http://localhost:3009"),
@@ -38,6 +43,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     converterBackend: converterBackend as WorkerConfig["converterBackend"],
     converterCli: path.resolve(process.env.CONVERTER_CLI || "../converter/src/cli.js"),
     xcafConverterBin: path.resolve(process.env.XCAF_CONVERTER_BIN || "/app/bin/xcaf-step-to-glb"),
+    xcafColourMode: xcafColourMode as WorkerConfig["xcafColourMode"],
     quality,
     runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once"),
     keepWorkerOutput: process.env.KEEP_WORKER_OUTPUT !== "false"

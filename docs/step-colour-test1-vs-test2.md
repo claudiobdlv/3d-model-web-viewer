@@ -249,23 +249,100 @@ colour.
 | Nested assembly/block hierarchy | Both have top-level shape representation relationships. `test 2` has two reachable representation branches, BREP and surface shell, that become separate coloured XCAF labels. `test 1` has one BREP representation with two styled BREP members that becomes one uncoloured compound label. |
 | Different STEP entity structure despite similar Rhino appearance | Confirmed. Rhino can show both as green, but the STEP topology/style attachment structure differs enough that OpenCascade/XCAF exposes direct colour for `test 2` and not for `test 1`. |
 
-## Recommended next step
+## Implemented resolver mode
 
-Do not add layer-name or object-name rules.
+The native converter now has a dedicated mode:
 
-The safest implementation path is a narrow raw STEP style fallback for otherwise
-default-grey XCAF objects, gated by strong topology/representation evidence:
+```bash
+--colour-mode step-presentation --colour-space raw
+```
 
-- only consider fallback when baseline XCAF found no direct colour candidate;
-- trace from the XCAF object's STEP representation or BREP topology to nearby
-  `STYLED_ITEM` targets;
-- require an unambiguous raw colour candidate for the exact representation,
-  BREP, shell, solid, or face set;
-- record the STEP entity path, target type, styled item id, and confidence in
-  `xcaf-report.json` and `material-debug.json`;
-- keep broad representation matches diagnostic-only when multiple colours or
-  multiple plausible targets are present.
+This mode keeps XCAF as the hierarchy, transform, and topology traversal source.
+Direct XCAF face/subshape, owning-label, and referred-label colours still win.
+When XCAF does not expose a colour for the exported topology, the converter uses
+the STEP presentation graph itself:
 
-This would allow files shaped like `test 1` to use genuine STEP presentation
-style evidence without hard-coding colours, names, layers, or Rhino-specific
-export behavior.
+- `COLOUR_RGB`
+- `FILL_AREA_STYLE_COLOUR`
+- `SURFACE_STYLE_*`
+- `PRESENTATION_STYLE_ASSIGNMENT`
+- `STYLED_ITEM`
+- `MANIFOLD_SOLID_BREP` / `SHELL_BASED_SURFACE_MODEL`
+- the containing shape representation path
+
+For `test 1`, the resolver finds two strong styled targets, `#34` and `#35`,
+under the same `ADVANCED_BREP_SHAPE_REPRESENTATION`. Because OpenCascade exports
+the XCAF object as one compound with two matching child solid groups, the GLB
+export is split by styled BREP target. The two output groups keep separate
+`stableObjectId` values and report:
+
+- `colourSource=step_presentation_styled_item`
+- `materialSource=step_presentation_styled_item`
+- `geometrySource=compound split by styled BREP`
+- the `STYLED_ITEM` id
+- the styled target id/type/scope
+- the representation path used as evidence
+
+This is not a layer-name, object-name, material-rule, or hard-coded colour path.
+It is direct STEP presentation-style colour resolution mapped to the exported
+topology.
+
+For `test 2`, the expected behaviour remains the same as baseline: OpenCascade
+promotes the green to direct XCAF owning/referred shape surface colour on two
+component labels, so XCAF colour wins before STEP presentation data is needed.
+
+Broad representation-level matches remain diagnostic-only unless the styled
+topology can be mapped to exported subshapes without ambiguity. A compound with
+multiple styled targets is not painted as one object; it must either split into
+matching styled topology groups or remain uncoloured with the rejection reason
+recorded in `xcaf-report.json`.
+
+## Live verification on 2026-06-16
+
+The implemented mode was deployed to the EliteDesk worker with:
+
+```bash
+CONVERTER_BACKEND=xcaf-baseline
+XCAF_COLOUR_MODE=step-presentation
+```
+
+Fresh uploads through `POST /api/models` produced:
+
+- `test-1-step-presentation-v2-20260616084135`
+- `test-2-step-presentation-v2-20260616084135`
+- `test-1-step-presentation-v3-20260616084735`
+- `test-2-step-presentation-v3-20260616084735`
+- `u843-step-presentation-v2-20260616084826`
+
+Worker logs for these jobs included:
+
+```text
+Converter backend: xcaf-baseline
+XCAF colour mode: step-presentation
+```
+
+Endpoint checks returned `200` for each fresh slug's viewer page, original
+download, GLB download, and authenticated `xcaf-report.json`.
+
+The final `v3` `test 1` upload exports two GLB nodes/material groups instead of
+one grey compound:
+
+- `#30 STYLED_ITEM` targeting `#34 MANIFOLD_SOLID_BREP`
+- `#31 STYLED_ITEM` targeting `#35 MANIFOLD_SOLID_BREP`
+- both report `colourSource=step_presentation_styled_item`
+- both report `geometrySource=compound split by styled BREP`
+- both write `0.000000,0.019382,0.000000,1.000000`, matching the XCAF green
+  material value from `test 2`
+- default material usage is `0`
+
+The final `v3` `test 2` upload remains green through direct XCAF colour:
+
+- both output groups report `colourSource=owning_shape_surface`
+- `materialSource=label`
+- default material usage is `0`
+
+The final full U843 fresh upload also completed in `step-presentation` mode. Its
+report showed `173` exported nodes, `1,054,456` triangles, and `0` STEP
+presentation-derived groups. It retained the direct XCAF colour result:
+`owning_shape_surface`, `referred_label_surface`, and
+`referred_subshape_label_surface`, with `14` remaining default-grey groups.

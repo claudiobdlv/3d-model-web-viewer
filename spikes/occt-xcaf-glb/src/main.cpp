@@ -77,7 +77,8 @@ struct ColourSpaceConfig {
 
 enum class ColourMode {
   Experimental,
-  XcafBaseline
+  XcafBaseline,
+  StepPresentation
 };
 
 struct ColourModeConfig {
@@ -149,6 +150,7 @@ struct MeshPrimitive {
   std::string rawStepTargetScope;
   std::string rawStepTargetPath;
   std::string rawStepRejectedReason;
+  std::string geometrySource;
   int subshapeColourCandidates = 0;
   bool ancestorHasColour = false;
   bool faceOrSubshapeHasColour = false;
@@ -228,6 +230,12 @@ struct RawStepColourAudit {
   std::vector<std::string> mappedObjectNames;
 };
 
+struct StyledTopologyColour {
+  TopoDS_Shape shape;
+  RawStepStyleMatch match;
+  std::string geometrySource;
+};
+
 struct FinalColourAudit {
   Colour colour;
   std::string hex;
@@ -259,10 +267,11 @@ struct ExportObjectKey {
   std::string materialKey;
   std::string materialSource;
   std::string colourSource;
+  std::string topologyKey;
 
   bool operator<(const ExportObjectKey& other) const {
-    return std::tie(labelPath, displayName, layer, materialKey, materialSource, colourSource) <
-           std::tie(other.labelPath, other.displayName, other.layer, other.materialKey, other.materialSource, other.colourSource);
+    return std::tie(labelPath, displayName, layer, materialKey, materialSource, colourSource, topologyKey) <
+           std::tie(other.labelPath, other.displayName, other.layer, other.materialKey, other.materialSource, other.colourSource, other.topologyKey);
   }
 };
 
@@ -385,6 +394,14 @@ Colour convertColourForGlb(const Colour& colour, const ColourSpaceConfig& colour
     converted.g = srgbComponentToLinear(colour.g);
     converted.b = srgbComponentToLinear(colour.b);
   }
+  return converted;
+}
+
+Colour linearizedStepPresentationColour(const Colour& colour) {
+  Colour converted = colour;
+  converted.r = srgbComponentToLinear(colour.r);
+  converted.g = srgbComponentToLinear(colour.g);
+  converted.b = srgbComponentToLinear(colour.b);
   return converted;
 }
 
@@ -746,6 +763,17 @@ bool isStrongRawStyleConfidence(const std::string& confidence) {
          confidence == "exact topology id";
 }
 
+int stepEntityNumericId(const std::string& id) {
+  if (id.size() < 2 || id.front() != '#') {
+    return 0;
+  }
+  try {
+    return std::stoi(id.substr(1));
+  } catch (...) {
+    return 0;
+  }
+}
+
 std::string rawStyleTargetScope(const std::string& type) {
   if (type == "ADVANCED_BREP_SHAPE_REPRESENTATION") {
     return "advanced BREP shape representation";
@@ -907,6 +935,69 @@ class RawStepStyleResolver {
       }
     }
     return false;
+  }
+
+  std::vector<RawStepStyleMatch> strongTopologyMatchesForNames(
+      const std::vector<std::string>& names,
+      RawStepStyleMatch& rejectedMatch) const {
+    std::set<std::string> checkedKeys;
+    for (const auto& name : names) {
+      const std::string normalized = normalizeStepName(name);
+      if (normalized.empty() || !checkedKeys.insert(normalized).second) {
+        continue;
+      }
+      const auto found = matchesByNormalizedRepresentationName_.find(normalized);
+      if (found == matchesByNormalizedRepresentationName_.end() || found->second.empty()) {
+        continue;
+      }
+      std::vector<RawStepStyleMatch> strongCandidates;
+      for (const auto& candidate : found->second) {
+        if (isStrongRawStyleConfidence(candidate.confidence)) {
+          strongCandidates.push_back(candidate);
+        } else if (rejectedMatch.rejectedReason.empty()) {
+          rejectedMatch = candidate;
+          rejectedMatch.rejectedReason = "broad representation-level or weak raw STEP style target";
+        }
+      }
+      if (!strongCandidates.empty()) {
+        std::sort(strongCandidates.begin(), strongCandidates.end(), [](const RawStepStyleMatch& a, const RawStepStyleMatch& b) {
+          return stepEntityNumericId(a.styledTargetId) < stepEntityNumericId(b.styledTargetId);
+        });
+        return strongCandidates;
+      }
+    }
+    return {};
+  }
+
+  std::vector<RawStepStyleMatch> uniqueStrongTopologyRepresentationGroup(
+      RawStepStyleMatch& rejectedMatch) const {
+    std::vector<RawStepStyleMatch> uniqueGroup;
+    int strongGroupCount = 0;
+    for (const auto& [name, matches] : matchesByNormalizedRepresentationName_) {
+      std::vector<RawStepStyleMatch> strongCandidates;
+      for (const auto& candidate : matches) {
+        if (isStrongRawStyleConfidence(candidate.confidence)) {
+          strongCandidates.push_back(candidate);
+        }
+      }
+      if (strongCandidates.empty()) {
+        continue;
+      }
+      strongGroupCount += 1;
+      if (strongGroupCount == 1) {
+        uniqueGroup = strongCandidates;
+      }
+    }
+    if (strongGroupCount != 1) {
+      if (strongGroupCount > 1 && !matchesByNormalizedRepresentationName_.empty()) {
+        rejectedMatch.rejectedReason = "multiple STEP representation groups have strong styled topology targets; no unique representation group was selected";
+      }
+      return {};
+    }
+    std::sort(uniqueGroup.begin(), uniqueGroup.end(), [](const RawStepStyleMatch& a, const RawStepStyleMatch& b) {
+      return stepEntityNumericId(a.styledTargetId) < stepEntityNumericId(b.styledTargetId);
+    });
+    return uniqueGroup;
   }
 
   const std::map<std::string, RawStepColourAudit>& colourAudit() const { return colourAudit_; }
@@ -1271,6 +1362,9 @@ ColourModeConfig parseColourMode(const std::string& value) {
   if (value == "xcaf-baseline") {
     return {ColourMode::XcafBaseline, "xcaf-baseline", false, false};
   }
+  if (value == "step-presentation" || value == "xcaf-step-presentation") {
+    return {ColourMode::StepPresentation, "step-presentation", true, false};
+  }
   throw std::runtime_error("Unsupported colour-mode: " + value);
 }
 
@@ -1292,7 +1386,7 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
       options.colourSpace = parseColourSpace(arg.substr(std::string("--colour-space=").size()));
     } else if (arg == "--colour-mode") {
       if (i + 1 >= argc) {
-        throw std::runtime_error("--colour-mode requires experimental or xcaf-baseline");
+        throw std::runtime_error("--colour-mode requires experimental, xcaf-baseline, or step-presentation");
       }
       options.colourMode = parseColourMode(argv[++i]);
     } else if (arg.rfind("--colour-mode=", 0) == 0) {
@@ -1547,6 +1641,109 @@ bool referredLabelColour(
   return false;
 }
 
+std::vector<TopoDS_Shape> directSubshapesOfType(const TopoDS_Shape& shape, const TopAbs_ShapeEnum type) {
+  std::vector<TopoDS_Shape> result;
+  if (shape.ShapeType() == type) {
+    result.push_back(shape);
+    return result;
+  }
+  for (TopExp_Explorer explorer(shape, type); explorer.More(); explorer.Next()) {
+    result.push_back(explorer.Current());
+  }
+  return result;
+}
+
+TopAbs_ShapeEnum preferredShapeTypeForStyledMatches(const std::vector<RawStepStyleMatch>& matches) {
+  bool hasShell = false;
+  bool hasSolid = false;
+  for (const auto& match : matches) {
+    if (match.styledTargetType.find("SHELL") != std::string::npos) {
+      hasShell = true;
+    } else if (match.styledTargetType.find("BREP") != std::string::npos ||
+               match.styledTargetType.find("SOLID") != std::string::npos) {
+      hasSolid = true;
+    }
+  }
+  if (hasShell && !hasSolid) {
+    return TopAbs_SHELL;
+  }
+  return TopAbs_SOLID;
+}
+
+std::vector<StyledTopologyColour> mapStepPresentationToSubshapes(
+    const RawStepStyleResolver* rawStepStyles,
+    const ColourModeConfig& colourMode,
+    const TopoDS_Shape& sourceShape,
+    const std::vector<std::string>& names,
+    RawStepStyleMatch& rejectedMatch) {
+  if (rawStepStyles == nullptr || colourMode.mode != ColourMode::StepPresentation) {
+    return {};
+  }
+  std::vector<RawStepStyleMatch> matches = rawStepStyles->strongTopologyMatchesForNames(names, rejectedMatch);
+  if (matches.empty()) {
+    matches = rawStepStyles->uniqueStrongTopologyRepresentationGroup(rejectedMatch);
+    for (auto& match : matches) {
+      match.confidence = match.confidence + "; unique styled representation group";
+    }
+  }
+  if (matches.empty()) {
+    return {};
+  }
+
+  TopAbs_ShapeEnum subshapeType = preferredShapeTypeForStyledMatches(matches);
+  std::vector<TopoDS_Shape> subshapes = directSubshapesOfType(sourceShape, subshapeType);
+  if (subshapes.size() != matches.size() && subshapeType == TopAbs_SOLID) {
+    subshapeType = TopAbs_SHELL;
+    subshapes = directSubshapesOfType(sourceShape, subshapeType);
+  }
+  if (subshapes.size() != matches.size()) {
+    rejectedMatch = matches.front();
+    rejectedMatch.representationCandidateCount = static_cast<int>(matches.size());
+    rejectedMatch.rejectedReason =
+        "strong STEP styled targets found, but exported topology count did not match; targetCount=" +
+        std::to_string(matches.size()) + " exportedSubshapeCount=" + std::to_string(subshapes.size());
+    return {};
+  }
+
+  std::vector<StyledTopologyColour> mapped;
+  for (std::size_t i = 0; i < matches.size(); ++i) {
+    auto match = matches[i];
+    match.colour = linearizedStepPresentationColour(match.colour);
+    match.colour.source = "step_presentation_styled_item";
+    match.colour.materialSource = "step_presentation_styled_item";
+    match.colour.lookupPath = match.path;
+    match.colour.fallbackReason = "confidence=" + match.confidence +
+        " styledItem=" + match.styledItemId +
+        " target=" + match.styledTargetId +
+        " targetType=" + match.styledTargetType +
+        " targetScope=" + match.styledTargetScope;
+    mapped.push_back({subshapes[i], match, "compound split by styled BREP"});
+  }
+  return mapped;
+}
+
+bool stepPresentationColourForFace(
+    const TopoDS_Face& face,
+    const std::vector<StyledTopologyColour>& styledTopologyColours,
+    RawStepStyleMatch& match,
+    std::string& geometrySource) {
+  for (const auto& candidate : styledTopologyColours) {
+    if (face.IsSame(candidate.shape)) {
+      match = candidate.match;
+      geometrySource = candidate.geometrySource;
+      return true;
+    }
+    for (TopExp_Explorer explorer(candidate.shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+      if (face.IsSame(TopoDS::Face(explorer.Current()))) {
+        match = candidate.match;
+        geometrySource = candidate.geometrySource;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void tessellateLabel(
     const Handle(XCAFDoc_ShapeTool)& shapeTool,
     const Handle(XCAFDoc_ColorTool)& colourTool,
@@ -1585,6 +1782,7 @@ void tessellateLabel(
   const std::string referredName = referred.IsNull() ? "" : labelName(referred);
   const std::string parentLabelPath = label.Father().IsNull() ? "" : labelEntry(label.Father());
   const std::string displayName = safeName(labelName(label), safeName(referredName, labelPath));
+  const std::vector<std::string> rawStyleNames = {displayName, referredName, labelName(label), referredPath, labelPath};
   if (!displayName.empty() && displayName != labelPath) {
     stats.namedObjects += 1;
   }
@@ -1608,11 +1806,16 @@ void tessellateLabel(
   Colour rawStepColour;
   const bool rawStepHasColour = rawStepStyles != nullptr &&
       rawStepStyles->findForNames(
-          {displayName, referredName, labelName(label), referredPath, labelPath},
+          rawStyleNames,
           rawStepMatch,
           rawStepRejectedMatch);
   if (rawStepHasColour) {
     rawStepColour = rawStepMatch.colour;
+    if (colourMode.mode == ColourMode::StepPresentation) {
+      rawStepColour = linearizedStepPresentationColour(rawStepColour);
+      rawStepColour.source = "step_presentation_styled_item";
+      rawStepColour.materialSource = "step_presentation_styled_item";
+    }
     rawStepColour.lookupPath = rawStepMatch.path;
     rawStepColour.fallbackReason = "confidence=" + rawStepMatch.confidence +
         " styledItem=" + rawStepMatch.styledItemId +
@@ -1625,6 +1828,15 @@ void tessellateLabel(
     } else {
       stats.rawStepBroadRepresentationRejects += 1;
     }
+  }
+  const auto styledTopologyColours = mapStepPresentationToSubshapes(
+      rawStepStyles,
+      colourMode,
+      sourceShape,
+      rawStyleNames,
+      rawStepRejectedMatch);
+  if (!styledTopologyColours.empty()) {
+    rawStepRejectedMatch.rejectedReason.clear();
   }
 
   std::vector<SubshapeColourCandidate> subshapeColours;
@@ -1698,6 +1910,10 @@ void tessellateLabel(
     bool matchedSubshapeHasColour = false;
     bool matchedSubshapeHasLayerColour = false;
     Colour matchedSubshapeLayerColour;
+    RawStepStyleMatch faceStepPresentationMatch;
+    std::string faceGeometrySource = "simple shape";
+    const bool faceHasStepPresentationColour =
+        stepPresentationColourForFace(sourceFace, styledTopologyColours, faceStepPresentationMatch, faceGeometrySource);
     if (firstColourForShape(colourTool, sourceFace, "face_", "face/subshape", labelPath + "/face/" + std::to_string(faceIndex), faceColour)) {
       colour = faceColour;
       hasColour = true;
@@ -1721,6 +1937,11 @@ void tessellateLabel(
     } else if (!labelHasColour && referredHasColour) {
       colour = referredColour;
       hasColour = true;
+    } else if (!labelHasColour && faceHasStepPresentationColour && colourMode.mode == ColourMode::StepPresentation) {
+      colour = faceStepPresentationMatch.colour;
+      hasColour = true;
+      stats.rawStepColourUses += 1;
+      stats.rawStepMappingConfidenceCounts[faceStepPresentationMatch.confidence] += 1;
     } else if (!labelHasColour && rawStepHasColour && colourMode.applyRawStepStyles) {
       colour = rawStepColour;
       hasColour = true;
@@ -1751,6 +1972,10 @@ void tessellateLabel(
     if (!primitiveLayer.empty()) {
       stats.layers.insert(primitiveLayer);
     }
+    const std::string topologyKey =
+        (colour.materialSource == "step_presentation_styled_item" && faceHasStepPresentationColour)
+            ? faceStepPresentationMatch.styledTargetId
+            : "";
 
     const ExportObjectKey key = {
         labelPath,
@@ -1758,7 +1983,8 @@ void tessellateLabel(
         primitiveLayer,
         colourKey(colour),
         colour.materialSource,
-        colour.source};
+        colour.source,
+        topologyKey};
     auto found = primitiveByKey.find(key);
     if (found == primitiveByKey.end()) {
       MeshPrimitive primitive;
@@ -1826,11 +2052,24 @@ void tessellateLabel(
       primitive.rawStepTargetType = rawStepHasColour ? rawStepMatch.styledTargetType : "";
       primitive.rawStepTargetScope = rawStepHasColour ? rawStepMatch.styledTargetScope : "";
       primitive.rawStepTargetPath = rawStepHasColour ? rawStepMatch.path : "";
-      primitive.rawStepRejectedReason = rawStepHasColour ? "" : rawStepRejectedMatch.rejectedReason;
+      if (colour.materialSource == "step_presentation_styled_item" && faceHasStepPresentationColour) {
+        primitive.rawStepMappingConfidence = faceStepPresentationMatch.confidence;
+        primitive.rawStepStyledItemId = faceStepPresentationMatch.styledItemId;
+        primitive.rawStepTargetId = faceStepPresentationMatch.styledTargetId;
+        primitive.rawStepTargetType = faceStepPresentationMatch.styledTargetType;
+        primitive.rawStepTargetScope = faceStepPresentationMatch.styledTargetScope;
+        primitive.rawStepTargetPath = faceStepPresentationMatch.path;
+      }
+      primitive.rawStepRejectedReason =
+          (rawStepHasColour || (colour.materialSource == "step_presentation_styled_item" && faceHasStepPresentationColour))
+              ? ""
+              : rawStepRejectedMatch.rejectedReason;
+      primitive.geometrySource = faceGeometrySource;
       primitive.subshapeColourCandidates = static_cast<int>(subshapeColours.size());
       primitive.ancestorHasColour = hasInheritedColour;
       primitive.faceOrSubshapeHasColour = faceOrSubshapeHasColour;
-      primitive.stableObjectId = effectiveInstancePath + "/material/" + colourKey(colour);
+      primitive.stableObjectId = effectiveInstancePath + "/material/" + colourKey(colour) +
+          (topologyKey.empty() ? "" : "/step-target/" + topologyKey);
       primitive.colour = colour;
       primitives.push_back(std::move(primitive));
       const std::size_t index = primitives.size() - 1;
@@ -2137,6 +2376,7 @@ void writeGlb(
     json << "\"rawStepTargetScope\":"; writeString(json, primitive.rawStepTargetScope); json << ",";
     json << "\"rawStepTargetPath\":"; writeString(json, primitive.rawStepTargetPath); json << ",";
     json << "\"rawStepRejectedReason\":"; writeString(json, primitive.rawStepRejectedReason); json << ",";
+    json << "\"geometrySource\":"; writeString(json, primitive.geometrySource); json << ",";
     json << "\"faceCount\":" << primitive.faceCount;
     json << "}}";
   }
@@ -2410,6 +2650,18 @@ void writeReport(
   const auto repeatedGroups = buildRepeatedComponentGroups(primitives);
   const auto finalColourAudit = buildFinalColourAudit(primitives, colourSpace);
   const int repeatedMismatchGroups = repeatedMismatchCount(repeatedGroups);
+  std::string colourModeDescription;
+  std::string colourPriorityJson;
+  if (colourMode.mode == ColourMode::XcafBaseline) {
+    colourModeDescription = "Direct OpenCascade/XCAF metadata only: no raw STEP style material assignment, no layer-colour material assignment, no material/name/layer guessing, raw RGB written by default.";
+    colourPriorityJson = "[\"face_surface\", \"face_generic\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"owning_label_surface\", \"owning_label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"instance_component_label_surface\", \"instance_component_label_generic\", \"explicit_inherited_ancestor_surface\", \"explicit_inherited_ancestor_generic\", \"default_neutral_grey\"]";
+  } else if (colourMode.mode == ColourMode::StepPresentation) {
+    colourModeDescription = "XCAF hierarchy, transforms, and direct colours remain primary; STEP presentation STYLED_ITEM colours are mapped to matching exported topology when the BREP/shell target evidence is exact.";
+    colourPriorityJson = "[\"face_surface\", \"face_generic\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"step_presentation_styled_item\", \"ancestor_surface\", \"ancestor_generic\", \"default_neutral_grey\"]";
+  } else {
+    colourModeDescription = "Experimental spike mode: legacy raw STEP style and layer-colour material assignment remain enabled for comparison.";
+    colourPriorityJson = "[\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"raw_step_styled_item\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"]";
+  }
   std::array<float, 3> globalMin = emptyMinBounds();
   std::array<float, 3> globalMax = emptyMaxBounds();
   for (const auto& primitive : primitives) {
@@ -2453,13 +2705,9 @@ void writeReport(
   out << "    \"mode\": "; writeString(out, colourMode.name); out << ",\n";
   out << "    \"applyRawStepStyles\": " << (colourMode.applyRawStepStyles ? "true" : "false") << ",\n";
   out << "    \"applyLayerColours\": " << (colourMode.applyLayerColours ? "true" : "false") << ",\n";
-  out << "    \"description\": "; writeString(out, colourMode.mode == ColourMode::XcafBaseline
-      ? "Direct OpenCascade/XCAF metadata only: no raw STEP style material assignment, no layer-colour material assignment, no material/name/layer guessing, raw RGB written by default."
-      : "Experimental spike mode: legacy raw STEP style and layer-colour material assignment remain enabled for comparison."); out << "\n";
+  out << "    \"description\": "; writeString(out, colourModeDescription); out << "\n";
   out << "  },\n";
-  out << "  \"colourPriority\": " << (colourMode.mode == ColourMode::XcafBaseline
-      ? "[\"face_surface\", \"face_generic\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"owning_label_surface\", \"owning_label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"instance_component_label_surface\", \"instance_component_label_generic\", \"explicit_inherited_ancestor_surface\", \"explicit_inherited_ancestor_generic\", \"default_neutral_grey\"]"
-      : "[\"face_surface\", \"face_generic\", \"face_curve\", \"subshape_label_surface\", \"subshape_label_generic\", \"subshape_shape_surface\", \"subshape_shape_generic\", \"label_surface\", \"label_generic\", \"owning_shape_surface\", \"owning_shape_generic\", \"referred_label_surface\", \"referred_label_generic\", \"raw_step_styled_item\", \"ancestor_surface\", \"ancestor_generic\", \"subshape_layer_surface\", \"subshape_layer_generic\", \"layer_surface\", \"layer_generic\", \"default_neutral_grey\"]") << ",\n";
+  out << "  \"colourPriority\": " << colourPriorityJson << ",\n";
   out << "  \"summary\": {\n";
   out << "    \"freeShapes\": " << stats.freeShapes << ",\n";
   out << "    \"labelsComponentsProcessed\": " << stats.labelsProcessed << ",\n";
@@ -2564,7 +2812,8 @@ void writeReport(
   out << "  \"rawStepDerivedComponents\": [\n";
   std::vector<std::size_t> rawDerivedIndexes;
   for (std::size_t i = 0; i < primitives.size(); ++i) {
-    if (primitives[i].materialSource == "raw_step_styled_item") {
+    if (primitives[i].materialSource == "raw_step_styled_item" ||
+        primitives[i].materialSource == "step_presentation_styled_item") {
       rawDerivedIndexes.push_back(i);
     }
   }
@@ -2584,6 +2833,7 @@ void writeReport(
     out << "\"targetScope\": "; writeString(out, primitive.rawStepTargetScope); out << ", ";
     out << "\"targetPath\": "; writeString(out, primitive.rawStepTargetPath); out << ", ";
     out << "\"confidence\": "; writeString(out, primitive.rawStepMappingConfidence); out << ", ";
+    out << "\"geometrySource\": "; writeString(out, primitive.geometrySource); out << ", ";
     out << "\"faces\": " << primitive.faceCount << ", ";
     out << "\"triangles\": " << (primitive.indices.size() / 3);
     out << "}" << (i + 1 < rawDerivedLimit ? "," : "") << "\n";
@@ -2748,6 +2998,7 @@ void writeReport(
       out << "\"rawStepTargetType\": "; writeString(out, primitive.rawStepTargetType); out << ", ";
       out << "\"rawStepTargetScope\": "; writeString(out, primitive.rawStepTargetScope); out << ", ";
       out << "\"rawStepRejectedReason\": "; writeString(out, primitive.rawStepRejectedReason); out << ", ";
+      out << "\"geometrySource\": "; writeString(out, primitive.geometrySource); out << ", ";
       out << "\"fallbackReason\": "; writeString(out, primitive.fallbackReason);
       out << "}";
     }
@@ -2788,6 +3039,7 @@ void writeReport(
     out << "\"rawStepTargetType\": "; writeString(out, primitive.rawStepTargetType); out << ", ";
     out << "\"rawStepTargetScope\": "; writeString(out, primitive.rawStepTargetScope); out << ", ";
     out << "\"rawStepRejectedReason\": "; writeString(out, primitive.rawStepRejectedReason); out << ", ";
+    out << "\"geometrySource\": "; writeString(out, primitive.geometrySource); out << ", ";
     out << "\"colourTrace\": "; writeString(out, primitive.colourTrace);
     out << "}" << (i + 1 < diagnosticLimit ? "," : "") << "\n";
   }
@@ -2880,6 +3132,7 @@ void writeReport(
     out << "\"originalStepName\": "; writeString(out, primitive.originalStepName); out << ", ";
     out << "\"parentLabelPath\": "; writeString(out, primitive.parentLabelPath); out << ", ";
     out << "\"shapeType\": "; writeString(out, primitive.shapeType); out << ", ";
+    out << "\"geometrySource\": "; writeString(out, primitive.geometrySource); out << ", ";
     out << "\"transformSource\": "; writeString(out, primitive.transformSource); out << ", ";
     out << "\"localTransform\": "; writeString(out, primitive.localTransform); out << ", ";
     out << "\"accumulatedTransform\": "; writeString(out, primitive.accumulatedTransform); out << ", ";

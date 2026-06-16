@@ -41,6 +41,7 @@ ENV WORKER_OUTPUT_DIR=/app/worker-output
 ENV CONVERTER_BACKEND=occt-js
 ENV CONVERTER_CLI=/app/apps/converter/src/cli.js
 ENV XCAF_CONVERTER_BIN=/app/bin/xcaf-step-to-glb
+ENV XCAF_COLOUR_MODE=xcaf-baseline
 ENV CONVERTER_QUALITY=balanced
 ENV MATERIAL_RULES_MODE=fallback
 ENV MATERIAL_RULES_PATH=/app/config/material-rules.json

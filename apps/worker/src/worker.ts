@@ -14,7 +14,11 @@ console.log(`Converter backend: ${config.converterBackend}`);
 console.log(`Converter CLI: ${config.converterCli}`);
 console.log(`XCAF converter binary: ${config.xcafConverterBin}`);
 console.log(`Converter quality: ${config.quality}`);
-console.log(`Converter colour mode: ${config.converterBackend === "xcaf-baseline" ? "xcaf-baseline" : process.env.MATERIAL_RULES_MODE || "fallback"}`);
+if (config.converterBackend === "xcaf-baseline") {
+  console.log(`XCAF colour mode: ${config.xcafColourMode}`);
+} else {
+  console.log(`Material rules mode: ${process.env.MATERIAL_RULES_MODE || "fallback"}`);
+}
 console.log(`Keep worker output: ${config.keepWorkerOutput}`);
 console.log(`Run once: ${config.runOnce}`);
 
@@ -55,6 +59,7 @@ async function processJob(job: WorkerJob): Promise<void> {
       converterBackend: config.converterBackend,
       converterCli: config.converterCli,
       xcafConverterBin: config.xcafConverterBin,
+      xcafColourMode: config.xcafColourMode,
       quality: config.quality
     });
 

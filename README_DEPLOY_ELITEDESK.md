@@ -48,6 +48,7 @@ WORKER_OUTPUT_DIR=/app/worker-output
 CONVERTER_CLI=/app/apps/converter/src/cli.js
 CONVERTER_BACKEND=occt-js
 XCAF_CONVERTER_BIN=/app/bin/xcaf-step-to-glb
+XCAF_COLOUR_MODE=xcaf-baseline
 CONVERTER_QUALITY=high
 MATERIAL_RULES_MODE=fallback
 MATERIAL_RULES_PATH=/app/config/material-rules.json
@@ -83,14 +84,25 @@ Converter backend options:
   `xcaf-report.json`, `stats.json`, `material-debug.json`, and `conversion.log`.
   This backend disables material rules, name guesses, layer-name guesses, active
   raw STEP styled-item colour assignment, layer-colour assignment, and default
-  sRGB-to-linear conversion. It calls the native converter with
-  `--colour-mode xcaf-baseline --colour-space raw`.
+  sRGB-to-linear conversion. The worker passes `XCAF_COLOUR_MODE` from `.env`
+  to the native converter as `--colour-mode <mode> --colour-space raw`.
+
+Native XCAF colour modes:
+
+- `XCAF_COLOUR_MODE=xcaf-baseline`: direct OpenCascade/XCAF colours only.
+- `XCAF_COLOUR_MODE=step-presentation`: direct XCAF colours still win, then
+  explicit STEP `STYLED_ITEM` presentation colours are mapped to matching
+  exported BREP/shell topology. Compound objects with multiple styled BREP
+  targets are split into matching GLB node/material groups when the exported
+  topology count is exact.
 
 Verify the backend used by an upload from the worker and conversion logs:
 
 ```bash
 docker compose -f deploy/docker-compose.elitedesk.yml logs worker | grep 'Converter backend'
+docker compose -f deploy/docker-compose.elitedesk.yml logs worker | grep 'XCAF colour mode'
 grep 'Converter backend' data/logs/<model-id>/conversion.log
+grep 'XCAF colour mode' data/logs/<model-id>/conversion.log
 ```
 
 Start only this project:
@@ -214,6 +226,9 @@ curl -I https://viewer.parametricstandards.com
   `xcaf-baseline` backend uses direct OpenCascade/XCAF metadata only, so it may
   leave components neutral grey when the STEP file does not expose face,
   subshape, owning-label, referred-label, or ancestor colours through XCAF.
+  Set `XCAF_COLOUR_MODE=step-presentation` when the STEP file carries explicit
+  presentation colours on `STYLED_ITEM` BREP/shell targets that must be mapped
+  to exported topology.
 - Each conversion writes `material-debug.json` beside `stats.json`. Inspect it
   to see mesh names, hierarchy paths, source colour presence, final material
   colours, and whether a rule matched. Tune `config/material-rules.json`, then

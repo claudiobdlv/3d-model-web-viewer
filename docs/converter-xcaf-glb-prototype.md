@@ -73,6 +73,28 @@ sRGB-to-linear conversion as a default, layer-colour material assignment, broad
 representation graph colour application, material rules, layer/name guessing,
 and U843-specific fallback logic.
 
+The production resolver for STEP presentation styles is:
+
+```bash
+--colour-mode step-presentation --colour-space raw
+```
+
+In the worker this is selected with:
+
+```bash
+CONVERTER_BACKEND=xcaf-baseline
+XCAF_COLOUR_MODE=step-presentation
+```
+
+This mode still uses XCAF for hierarchy, transforms, and topology traversal.
+Direct XCAF colours stay higher priority. When XCAF does not promote a colour
+onto the exported object, the converter maps explicit STEP `STYLED_ITEM`
+presentation colours to the matching exported topology. Compound objects are not
+painted as a whole when the STEP representation contains multiple styled BREP
+members; the exporter splits the GLB node/material buckets by the matching
+styled BREP or shell target and records `geometrySource=compound split by styled
+BREP`.
+
 For a real upload-path verification, upload a STEP/STP through `/admin`, then
 confirm:
 
@@ -124,6 +146,7 @@ fields intended for future click selection:
 - `colourLookupPath`
 - `colourType`
 - `fallbackReason`
+- `geometrySource`
 - `originalStepLabel`
 - `transformSource`
 - `faceCount`
@@ -173,6 +196,30 @@ Baseline colour priority is:
 The legacy `--colour-mode experimental` path still exists for comparison. It
 keeps the v8 strong-only raw STEP style application and layer-colour material
 assignment behaviour, but that path is not the clean baseline.
+
+`--colour-mode step-presentation` is the proper STEP presentation-style
+resolver. It parses the explicit `COLOUR_RGB` to presentation-style to
+`STYLED_ITEM` chain and maps `MANIFOLD_SOLID_BREP` or
+`SHELL_BASED_SURFACE_MODEL` targets to the corresponding exported topology.
+This is topology-based evidence, not layer-name or object-name inference. A
+single exact styled target can colour the matching exported shape after direct
+XCAF colours are checked. Multiple styled targets under one compound must map to
+the same number of exported solid/shell groups; otherwise they remain
+diagnostic-only with a rejection reason in `xcaf-report.json`.
+STEP presentation RGB values are normalized to the same linear material values
+OpenCascade exposes through XCAF, so files like `test 1` and `test 2` write the
+same green GLB material when they carry the same intended STEP display colour.
+
+Reports for STEP-presentation output include:
+
+- `colourSource=step_presentation_styled_item`
+- `materialSource=step_presentation_styled_item`
+- `rawStepStyledItemId`
+- `rawStepTargetId`
+- `rawStepTargetType`
+- `rawStepTargetScope`
+- `rawStepTargetPath`
+- `geometrySource`
 
 The v4 colour fix separates metadata lookup topology from render topology. XCAF
 colour associations are resolved on the original/unmoved shape and face labels,

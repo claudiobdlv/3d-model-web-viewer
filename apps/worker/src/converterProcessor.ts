@@ -9,6 +9,7 @@ export type ConverterProcessorInput = {
   converterBackend: "occt-js" | "xcaf-baseline";
   converterCli: string;
   xcafConverterBin: string;
+  xcafColourMode: "xcaf-baseline" | "step-presentation";
   quality: string;
 };
 
@@ -42,7 +43,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       xcafConverterBin: input.xcafConverterBin,
       sourcePath: input.sourcePath,
       outputDir: jobDir,
-      quality: input.quality
+      quality: input.quality,
+      xcafColourMode: input.xcafColourMode
     });
   }
 
@@ -142,6 +144,7 @@ async function runXcafBaselineConverter(input: {
   sourcePath: string;
   outputDir: string;
   quality: string;
+  xcafColourMode: "xcaf-baseline" | "step-presentation";
 }): Promise<void> {
   const stat = await fs.promises.stat(input.xcafConverterBin).catch(() => null);
   if (!stat || !stat.isFile()) {
@@ -154,7 +157,7 @@ async function runXcafBaselineConverter(input: {
       ? "high"
       : input.quality;
 
-  console.log("Converter colour mode: xcaf-baseline");
+  console.log(`XCAF colour mode: ${input.xcafColourMode}`);
   console.log("Converter colour space: raw");
   console.log(`Native XCAF binary: ${input.xcafConverterBin}`);
   console.log(`Native XCAF quality: ${nativeQuality}`);
@@ -164,7 +167,7 @@ async function runXcafBaselineConverter(input: {
     input.outputDir,
     nativeQuality,
     "--colour-mode",
-    "xcaf-baseline",
+    input.xcafColourMode,
     "--colour-space",
     "raw"
   ]);
@@ -177,7 +180,7 @@ async function runXcafBaselineConverter(input: {
     `Output path: ${input.outputDir}`,
     `Quality: ${input.quality}`,
     `Native quality: ${nativeQuality}`,
-    `Colour mode: xcaf-baseline`,
+    `XCAF colour mode: ${input.xcafColourMode}`,
     `Colour space: raw`,
     `Material rules: disabled for xcaf-baseline`,
     ""
