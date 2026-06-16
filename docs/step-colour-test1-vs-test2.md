@@ -80,6 +80,109 @@ inspector found:
 - `2` `PRESENTATION_LAYER_ASSIGNMENT` entities
 - green RGB values of `0.0, 0.149019607843137, 0.0`
 
+## Exact colour attachment difference
+
+```text
+test 1:
+Rhino visible colour = green
+STEP colour exists at:
+  #15 COLOUR_RGB('',0.,0.149019607843137,0.)
+    -> #17 FILL_AREA_STYLE_COLOUR
+    -> #19 FILL_AREA_STYLE
+    -> #21 SURFACE_STYLE_FILL_AREA
+    -> #23 SURFACE_SIDE_STYLE
+    -> #25 SURFACE_STYLE_USAGE
+    -> #28 PRESENTATION_STYLE_ASSIGNMENT
+    -> #30 STYLED_ITEM('',(#28),#34)
+    -> #34 MANIFOLD_SOLID_BREP('brep_1',#37)
+  #16 COLOUR_RGB('',0.,0.149019607843137,0.)
+    -> #18 FILL_AREA_STYLE_COLOUR
+    -> #20 FILL_AREA_STYLE
+    -> #22 SURFACE_STYLE_FILL_AREA
+    -> #24 SURFACE_SIDE_STYLE
+    -> #26 SURFACE_STYLE_USAGE
+    -> #29 PRESENTATION_STYLE_ASSIGNMENT
+    -> #31 STYLED_ITEM('',(#29),#35)
+    -> #35 MANIFOLD_SOLID_BREP('brep_2',#38)
+STEP target reachability = yes, but only through the representation graph:
+  #3137 SHAPE_REPRESENTATION(...)
+    -> #14 SHAPE_REPRESENTATION_RELATIONSHIP('', '', #3137, #36)
+    -> #36 ADVANCED_BREP_SHAPE_REPRESENTATION('brep_rep_0',(#34,#35,#3468),#3135)
+    -> #34/#35 MANIFOLD_SOLID_BREP targets
+STEP layer membership:
+  #32 PRESENTATION_LAYER_ASSIGNMENT('PIPE SUPPORTS','',(#34))
+  #33 PRESENTATION_LAYER_ASSIGNMENT('3D PRINTED','',(#35))
+XCAF direct colour = no
+XCAF label path = 0:1:1:1:1
+XCAF display name = 3D PRINTED BRACKET + 3 x 1/2", 37mm OFFSET, TYPE A
+XCAF layer membership = none exposed
+XCAF direct face/subshape colour = no
+XCAF owning label/shape colour = no
+XCAF referred/original label colour = no
+XCAF instance/component colour = no
+XCAF ancestor colour = no
+converter baseline output = grey/default_neutral_grey
+reason = OpenCascade imports the two styled BREP items as one COMPOUND XCAF
+  object and does not promote either raw BREP STYLED_ITEM into a direct XCAF
+  label, shape, face, subshape, ancestor, instance, referred-label, or layer
+  colour candidate. The green exists in the raw STEP presentation graph, but
+  xcaf-baseline treats raw STEP styles as diagnostic-only.
+
+test 2:
+Rhino visible colour = green
+STEP colour exists at:
+  #19 COLOUR_RGB('',0.,0.149019607843137,0.)
+    -> #21 FILL_AREA_STYLE_COLOUR
+    -> #23 FILL_AREA_STYLE
+    -> #25 SURFACE_STYLE_FILL_AREA
+    -> #27 SURFACE_SIDE_STYLE
+    -> #29 SURFACE_STYLE_USAGE
+    -> #32 PRESENTATION_STYLE_ASSIGNMENT
+    -> #34 STYLED_ITEM('',(#32),#38)
+    -> #38 SHELL_BASED_SURFACE_MODEL('shell_1',(#40))
+  #20 COLOUR_RGB('',0.,0.149019607843137,0.)
+    -> #22 FILL_AREA_STYLE_COLOUR
+    -> #24 FILL_AREA_STYLE
+    -> #26 SURFACE_STYLE_FILL_AREA
+    -> #28 SURFACE_SIDE_STYLE
+    -> #30 SURFACE_STYLE_USAGE
+    -> #33 PRESENTATION_STYLE_ASSIGNMENT
+    -> #35 STYLED_ITEM('',(#33),#16)
+    -> #16 MANIFOLD_SOLID_BREP('brep_1',#18)
+STEP target reachability = yes, through two representation relationships:
+  #3728 SHAPE_REPRESENTATION(...)
+    -> #14 SHAPE_REPRESENTATION_RELATIONSHIP('', '', #3728, #17)
+    -> #17 ADVANCED_BREP_SHAPE_REPRESENTATION('brep_rep_0',(#16,#4114),#3726)
+    -> #16 MANIFOLD_SOLID_BREP target
+  #3728 SHAPE_REPRESENTATION(...)
+    -> #15 SHAPE_REPRESENTATION_RELATIONSHIP('', '', #3728, #39)
+    -> #39 MANIFOLD_SURFACE_SHAPE_REPRESENTATION('shell_rep_0',(#38,#4115),#3726)
+    -> #38 SHELL_BASED_SURFACE_MODEL target
+STEP layer membership:
+  #36 PRESENTATION_LAYER_ASSIGNMENT('3D PRINTED','',(#38))
+  #37 PRESENTATION_LAYER_ASSIGNMENT('PIPE SUPPORTS','',(#16))
+XCAF direct colour = yes
+XCAF label path = 0:1:1:2:1, display name =>[0:1:1:3], shape type SOLID
+  layer membership = referred layer PIPE SUPPORTS
+  direct face/subshape colour = no
+  owning label/shape colour = yes, owning_shape_surface
+  referred/original label colour = yes, referred_label_surface at 0:1:1:3
+  instance/component colour = no
+  ancestor colour = no
+XCAF label path = 0:1:1:2:2, display name =>[0:1:1:4], shape type SHELL
+  layer membership = referred layer 3D PRINTED
+  direct face/subshape colour = no
+  owning label/shape colour = yes, owning_shape_surface
+  referred/original label colour = yes, referred_label_surface at 0:1:1:4
+  instance/component colour = no
+  ancestor colour = no
+converter baseline output = green/owning_shape_surface
+reason = OpenCascade imports the styled solid and shell as separate XCAF
+  component labels and promotes the same green to direct XCAF surface colour
+  metadata on the owning component shapes and their referred/original labels.
+  xcaf-baseline trusts those direct XCAF candidates, so the output is green.
+```
+
 The difference is where that style data lands after OpenCascade imports the file
 into XCAF.
 
@@ -134,6 +237,17 @@ Layer membership alone is not enough here. `test 1` has raw presentation layers,
 but XCAF reports no layers. `test 2` reports layer names through XCAF, but not
 layer colours; its material comes from XCAF shape surface colour, not layer
 colour.
+
+## Hypotheses checked
+
+| Possible cause | Finding |
+| --- | --- |
+| Direct polysurface vs block/reference | Both files have context-dependent/reference structure. The difference is that `test 2` decomposes into two XCAF component labels with referred/original labels, while `test 1` collapses to one compound output object. |
+| Object colour vs by-layer colour | Not enough evidence to call this a layer-colour issue. Both files contain explicit raw `COLOUR_RGB` and `STYLED_ITEM` presentation styles. XCAF exposes layer names for `test 2` only, and exposes no layer colour values for either file. |
+| Face/subshape style vs presentation style only | Neither baseline report shows direct face/subshape XCAF colour. The relevant raw styles are STEP presentation `STYLED_ITEM`s. |
+| Solid/body vs representation item colour | This is the strongest structural difference. `test 1` styles two `MANIFOLD_SOLID_BREP` targets inside one `ADVANCED_BREP_SHAPE_REPRESENTATION`, but OCCT does not expose them as XCAF colours. `test 2` styles one `MANIFOLD_SOLID_BREP` and one `SHELL_BASED_SURFACE_MODEL`; OCCT promotes both resulting component shapes to XCAF `owning_shape_surface` colour. |
+| Nested assembly/block hierarchy | Both have top-level shape representation relationships. `test 2` has two reachable representation branches, BREP and surface shell, that become separate coloured XCAF labels. `test 1` has one BREP representation with two styled BREP members that becomes one uncoloured compound label. |
+| Different STEP entity structure despite similar Rhino appearance | Confirmed. Rhino can show both as green, but the STEP topology/style attachment structure differs enough that OpenCascade/XCAF exposes direct colour for `test 2` and not for `test 1`. |
 
 ## Recommended next step
 
