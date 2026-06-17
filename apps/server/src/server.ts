@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import express from "express";
 import { initDb } from "./db.js";
+import { foldersRouter } from "./routes/folders.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { modelsRouter } from "./routes/models.js";
 import { workerRouter } from "./routes/worker.js";
@@ -68,8 +69,10 @@ app.get("/", (_req, res) => {
 
 app.get("/api/models", requireAdmin);
 app.post("/api/models", requireAdmin);
+app.patch("/api/models/:slug/folder", requireAdmin);
 app.delete("/api/models/:slug", requireAdmin);
 app.use("/api/models", modelsRouter);
+app.use("/api/folders", requireAdmin, foldersRouter);
 app.use("/api/jobs", requireAdmin, jobsRouter);
 app.use("/api/worker", workerRouter);
 

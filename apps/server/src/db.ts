@@ -11,8 +11,19 @@ export type ModelRecord = {
   source_ext: string;
   status: string;
   has_display_glb: number;
+  folder_id: number | null;
   created_at: string;
   updated_at: string;
+};
+
+export type FolderRecord = {
+  id: number;
+  name: string;
+  slug: string;
+  parent_id: number | null;
+  created_at: string;
+  updated_at: string;
+  model_count?: number;
 };
 
 export type JobRecord = {
@@ -44,8 +55,20 @@ export function initDb(): void {
       source_ext TEXT NOT NULL,
       status TEXT NOT NULL,
       has_display_glb INTEGER NOT NULL DEFAULT 0,
+      folder_id INTEGER,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (folder_id) REFERENCES folders(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS folders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      parent_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (parent_id) REFERENCES folders(id)
     );
 
     CREATE TABLE IF NOT EXISTS jobs (
@@ -67,6 +90,7 @@ export function initDb(): void {
   ensureColumn("jobs", "started_at", "TEXT");
   ensureColumn("jobs", "completed_at", "TEXT");
   ensureColumn("jobs", "failed_at", "TEXT");
+  ensureColumn("models", "folder_id", "INTEGER REFERENCES folders(id)");
 }
 
 function ensureColumn(table: string, column: string, definition: string): void {
@@ -76,7 +100,19 @@ function ensureColumn(table: string, column: string, definition: string): void {
   }
 }
 
-export function listModels(): ModelRecord[] {
+export function listModels(filter: { folderId?: number | null; unsortedOnly?: boolean } = {}): ModelRecord[] {
+  if (filter.unsortedOnly) {
+    return db
+      .prepare("SELECT * FROM models WHERE folder_id IS NULL ORDER BY created_at DESC, id DESC")
+      .all() as ModelRecord[];
+  }
+
+  if (typeof filter.folderId === "number") {
+    return db
+      .prepare("SELECT * FROM models WHERE folder_id = ? ORDER BY created_at DESC, id DESC")
+      .all(filter.folderId) as ModelRecord[];
+  }
+
   return db.prepare("SELECT * FROM models ORDER BY created_at DESC, id DESC").all() as ModelRecord[];
 }
 
@@ -101,11 +137,12 @@ export function createModel(input: {
   sourceExt: string;
   status: string;
   hasDisplayGlb: boolean;
+  folderId?: number | null;
 }): ModelRecord {
   const result = db
     .prepare(
-      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb, folder_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.slug,
@@ -113,7 +150,8 @@ export function createModel(input: {
       input.sourceFilename,
       input.sourceExt,
       input.status,
-      input.hasDisplayGlb ? 1 : 0
+      input.hasDisplayGlb ? 1 : 0,
+      input.folderId ?? null
     );
 
   return db.prepare("SELECT * FROM models WHERE id = ?").get(result.lastInsertRowid) as ModelRecord;
@@ -138,6 +176,98 @@ export function createJob(input: {
 
 export function listJobs(): JobRecord[] {
   return db.prepare("SELECT * FROM jobs ORDER BY created_at DESC, id DESC").all() as JobRecord[];
+}
+
+export function listFolders(): FolderRecord[] {
+  return db
+    .prepare(
+      `SELECT folders.*,
+              COUNT(models.id) AS model_count
+       FROM folders
+       LEFT JOIN models ON models.folder_id = folders.id
+       GROUP BY folders.id
+       ORDER BY lower(folders.name) ASC, folders.id ASC`
+    )
+    .all() as FolderRecord[];
+}
+
+export function getFolderById(folderId: number): FolderRecord | undefined {
+  return db.prepare("SELECT * FROM folders WHERE id = ?").get(folderId) as FolderRecord | undefined;
+}
+
+export function createFolder(input: { name: string; parentId?: number | null }): FolderRecord {
+  const name = normalizeFolderName(input.name);
+  const slug = nextFolderSlug(name);
+  const parentId = input.parentId ?? null;
+
+  const result = db
+    .prepare("INSERT INTO folders (name, slug, parent_id) VALUES (?, ?, ?)")
+    .run(name, slug, parentId);
+
+  return db.prepare("SELECT * FROM folders WHERE id = ?").get(result.lastInsertRowid) as FolderRecord;
+}
+
+export function renameFolder(folderId: number, nameInput: string): FolderRecord | undefined {
+  const existing = getFolderById(folderId);
+  if (!existing) return undefined;
+
+  const name = normalizeFolderName(nameInput);
+  db.prepare(
+    `UPDATE folders
+     SET name = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).run(name, folderId);
+
+  return getFolderById(folderId);
+}
+
+export function deleteFolderIfEmpty(folderId: number): { deleted: boolean; modelCount: number; childCount: number } {
+  const modelCount = (db.prepare("SELECT COUNT(*) AS count FROM models WHERE folder_id = ?").get(folderId) as { count: number }).count;
+  const childCount = (db.prepare("SELECT COUNT(*) AS count FROM folders WHERE parent_id = ?").get(folderId) as { count: number }).count;
+  if (modelCount > 0 || childCount > 0) {
+    return { deleted: false, modelCount, childCount };
+  }
+
+  const result = db.prepare("DELETE FROM folders WHERE id = ?").run(folderId);
+  return { deleted: Number(result.changes || 0) > 0, modelCount, childCount };
+}
+
+export function moveModelToFolder(slug: string, folderId: number | null): ModelRecord | undefined {
+  db.prepare(
+    `UPDATE models
+     SET folder_id = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE slug = ?`
+  ).run(folderId, slug);
+
+  return getModelBySlug(slug);
+}
+
+function normalizeFolderName(value: string): string {
+  const name = value.trim().replace(/\s+/g, " ").slice(0, 80);
+  if (!name) {
+    throw new Error("Folder name is required.");
+  }
+
+  return name;
+}
+
+function nextFolderSlug(name: string): string {
+  const base = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50) || "folder";
+
+  let slug = base;
+  let suffix = 2;
+  while (db.prepare("SELECT id FROM folders WHERE slug = ?").get(slug)) {
+    slug = `${base}-${suffix}`;
+    suffix += 1;
+  }
+
+  return slug;
 }
 
 export type WorkerJobRecord = JobRecord & {

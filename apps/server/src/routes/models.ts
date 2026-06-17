@@ -6,8 +6,10 @@ import {
   createJob,
   createModel,
   deleteModelBySlug,
+  getFolderById,
   getModelBySlug,
-  listModels
+  listModels,
+  moveModelToFolder
 } from "../db.js";
 import {
   createSlug,
@@ -37,7 +39,23 @@ const upload = multer({
 
 export const modelsRouter = express.Router();
 
-modelsRouter.get("/", (_req, res) => {
+modelsRouter.get("/", (req, res) => {
+  const folder = typeof req.query.folder === "string" ? req.query.folder : undefined;
+  if (folder === "unsorted") {
+    res.json(listModels({ unsortedOnly: true }));
+    return;
+  }
+
+  if (folder) {
+    const folderId = Number(folder);
+    if (!Number.isInteger(folderId) || folderId < 1) {
+      res.status(400).json({ error: "Invalid folder id." });
+      return;
+    }
+    res.json(listModels({ folderId }));
+    return;
+  }
+
   res.json(listModels());
 });
 
@@ -65,6 +83,11 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
 
   const sourceFilename = path.basename(req.file.originalname);
   const sourceExt = path.extname(sourceFilename).toLowerCase();
+  const folderId = parseOptionalFolderId(req.body?.folderId);
+  if (folderId !== null && !getFolderById(folderId)) {
+    res.status(400).send("Selected folder was not found.");
+    return;
+  }
   const slug = createSlug(sourceFilename);
   const uploadDir = getUploadDir(slug);
   const modelDir = getModelDir(slug);
@@ -88,6 +111,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
     sourceExt,
     status,
     displayFile: isGlb ? "display.glb" : null,
+    folderId,
     createdAt: new Date().toISOString()
   };
   fs.writeFileSync(path.join(modelDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -98,7 +122,8 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
     sourceFilename,
     sourceExt,
     status,
-    hasDisplayGlb: isGlb
+    hasDisplayGlb: isGlb,
+    folderId
   });
 
   createJob({
@@ -112,6 +137,28 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
   });
 
   res.redirect(303, "/admin");
+});
+
+modelsRouter.patch("/:slug/folder", (req, res) => {
+  const { slug } = req.params;
+  if (!isSafeSlug(slug)) {
+    res.status(400).json({ error: "Invalid model slug." });
+    return;
+  }
+
+  const model = getModelBySlug(slug);
+  if (!model) {
+    res.status(404).json({ error: "Model not found." });
+    return;
+  }
+
+  const folderId = parseOptionalFolderId(req.body?.folderId);
+  if (folderId !== null && !getFolderById(folderId)) {
+    res.status(400).json({ error: "Folder not found." });
+    return;
+  }
+
+  res.json(moveModelToFolder(slug, folderId));
 });
 
 modelsRouter.delete("/:slug", async (req, res, next) => {
@@ -160,4 +207,17 @@ async function removeModelFiles(slug: string): Promise<string[]> {
   }
 
   return removedPaths;
+}
+
+function parseOptionalFolderId(value: unknown): number | null {
+  if (value === undefined || value === null || value === "" || value === "null") {
+    return null;
+  }
+
+  const folderId = Number(value);
+  if (!Number.isInteger(folderId) || folderId < 1) {
+    throw new Error("Invalid folder id.");
+  }
+
+  return folderId;
 }
