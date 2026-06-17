@@ -1065,6 +1065,22 @@ class RawStepStyleResolver {
           continue;
         }
         std::vector<std::string> neighbours = currentEntity->second.refs;
+        const auto reverseFound = reverseRefs_.find(current);
+        if (reverseFound != reverseRefs_.end()) {
+          for (const auto& reverseRef : reverseFound->second) {
+            const auto reverseEntity = entities_.find(reverseRef);
+            if (reverseEntity == entities_.end()) {
+              continue;
+            }
+            const bool isRepresentationBridge =
+                reverseEntity->second.type.find("SHAPE_REPRESENTATION_RELATIONSHIP") != std::string::npos ||
+                reverseEntity->second.type == "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION";
+            if (!isRepresentationBridge) {
+              continue;
+            }
+            neighbours.push_back(reverseRef);
+          }
+        }
         for (const auto& neighbour : neighbours) {
           if (!seen.insert(neighbour).second) {
             continue;
@@ -1822,12 +1838,6 @@ void tessellateLabel(
         " target=" + rawStepMatch.styledTargetId +
         " targetType=" + rawStepMatch.styledTargetType +
         " targetScope=" + rawStepMatch.styledTargetScope;
-  } else if (!rawStepRejectedMatch.rejectedReason.empty()) {
-    if (rawStepRejectedMatch.rejectedReason.find("ambiguous") != std::string::npos) {
-      stats.rawStepAmbiguousRepresentationRejects += 1;
-    } else {
-      stats.rawStepBroadRepresentationRejects += 1;
-    }
   }
   const auto styledTopologyColours = mapStepPresentationToSubshapes(
       rawStepStyles,
@@ -1837,6 +1847,14 @@ void tessellateLabel(
       rawStepRejectedMatch);
   if (!styledTopologyColours.empty()) {
     rawStepRejectedMatch.rejectedReason.clear();
+  }
+  if (!rawStepHasColour && !rawStepRejectedMatch.rejectedReason.empty()) {
+    if (rawStepRejectedMatch.rejectedReason.find("ambiguous") != std::string::npos ||
+        rawStepRejectedMatch.rejectedReason.find("multiple STEP representation groups") != std::string::npos) {
+      stats.rawStepAmbiguousRepresentationRejects += 1;
+    } else {
+      stats.rawStepBroadRepresentationRejects += 1;
+    }
   }
 
   std::vector<SubshapeColourCandidate> subshapeColours;
@@ -1976,6 +1994,7 @@ void tessellateLabel(
         (colour.materialSource == "step_presentation_styled_item" && faceHasStepPresentationColour)
             ? faceStepPresentationMatch.styledTargetId
             : "";
+    const std::string selectableId = effectiveInstancePath;
 
     const ExportObjectKey key = {
         labelPath,
@@ -2068,7 +2087,7 @@ void tessellateLabel(
       primitive.subshapeColourCandidates = static_cast<int>(subshapeColours.size());
       primitive.ancestorHasColour = hasInheritedColour;
       primitive.faceOrSubshapeHasColour = faceOrSubshapeHasColour;
-      primitive.stableObjectId = effectiveInstancePath + "/material/" + colourKey(colour) +
+      primitive.stableObjectId = selectableId + "/material/" + colourKey(colour) +
           (topologyKey.empty() ? "" : "/step-target/" + topologyKey);
       primitive.colour = colour;
       primitives.push_back(std::move(primitive));
@@ -2352,16 +2371,23 @@ void writeGlb(
     writeString(json, primitive.displayName);
     json << ",\"mesh\":" << i << ",\"extras\":{";
     json << "\"stableObjectId\":"; writeString(json, primitive.stableObjectId); json << ",";
+    json << "\"selectableId\":"; writeString(json, primitive.instancePath); json << ",";
+    json << "\"parentObjectId\":"; writeString(json, primitive.instancePath); json << ",";
     json << "\"labelPath\":"; writeString(json, primitive.labelPath); json << ",";
+    json << "\"xcafLabelPath\":"; writeString(json, primitive.labelPath); json << ",";
     json << "\"instancePath\":"; writeString(json, primitive.instancePath); json << ",";
     json << "\"displayName\":"; writeString(json, primitive.displayName); json << ",";
+    json << "\"blockName\":"; writeString(json, primitive.displayName); json << ",";
+    json << "\"componentName\":"; writeString(json, primitive.originalStepName); json << ",";
     json << "\"layer\":"; writeString(json, primitive.layer); json << ",";
+    json << "\"layerNames\":"; writeString(json, primitive.layer); json << ",";
     json << "\"colourSource\":"; writeString(json, primitive.colourSource); json << ",";
     json << "\"materialSource\":"; writeString(json, primitive.materialSource); json << ",";
     json << "\"colourLookupPath\":"; writeString(json, primitive.colourLookupPath); json << ",";
     json << "\"colourType\":"; writeString(json, primitive.colourType); json << ",";
     json << "\"fallbackReason\":"; writeString(json, primitive.fallbackReason); json << ",";
     json << "\"originalStepLabel\":"; writeString(json, primitive.originalStepLabel); json << ",";
+    json << "\"referredLabelPath\":"; writeString(json, primitive.originalStepLabel); json << ",";
     json << "\"transformSource\":"; writeString(json, primitive.transformSource); json << ",";
     json << "\"labelRole\":"; writeString(json, primitive.labelRole); json << ",";
     json << "\"parentChain\":"; writeString(json, primitive.parentChain); json << ",";
@@ -2371,7 +2397,9 @@ void writeGlb(
     json << "\"matchedSubshapeLayers\":"; writeString(json, primitive.matchedSubshapeLayers); json << ",";
     json << "\"rawStepMappingConfidence\":"; writeString(json, primitive.rawStepMappingConfidence); json << ",";
     json << "\"rawStepStyledItemId\":"; writeString(json, primitive.rawStepStyledItemId); json << ",";
+    json << "\"stepStyledItemId\":"; writeString(json, primitive.rawStepStyledItemId); json << ",";
     json << "\"rawStepTargetId\":"; writeString(json, primitive.rawStepTargetId); json << ",";
+    json << "\"stepEntityIds\":["; writeString(json, primitive.rawStepTargetId); json << "],";
     json << "\"rawStepTargetType\":"; writeString(json, primitive.rawStepTargetType); json << ",";
     json << "\"rawStepTargetScope\":"; writeString(json, primitive.rawStepTargetScope); json << ",";
     json << "\"rawStepTargetPath\":"; writeString(json, primitive.rawStepTargetPath); json << ",";
@@ -2403,7 +2431,15 @@ void writeGlb(
          << ",\"NORMAL\":" << refs[i].normalAccessor
          << "},\"indices\":" << refs[i].indexAccessor
          << ",\"material\":" << refs[i].material
-         << ",\"mode\":4}]}";
+         << ",\"mode\":4,\"extras\":{";
+    json << "\"selectableId\":"; writeString(json, primitives[i].instancePath); json << ",";
+    json << "\"parentObjectId\":"; writeString(json, primitives[i].instancePath); json << ",";
+    json << "\"displayName\":"; writeString(json, primitives[i].displayName); json << ",";
+    json << "\"stepEntityIds\":["; writeString(json, primitives[i].rawStepTargetId); json << "],";
+    json << "\"stepStyledItemId\":"; writeString(json, primitives[i].rawStepStyledItemId); json << ",";
+    json << "\"colourSource\":"; writeString(json, primitives[i].colourSource); json << ",";
+    json << "\"geometrySource\":"; writeString(json, primitives[i].geometrySource);
+    json << "}}]}";
   }
   json << "],";
 

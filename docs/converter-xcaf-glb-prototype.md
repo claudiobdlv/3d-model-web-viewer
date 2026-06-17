@@ -137,10 +137,16 @@ Each node has a meaningful name when XCAF exposes one and includes `extras`
 fields intended for future click selection:
 
 - `stableObjectId`
+- `selectableId`
+- `parentObjectId`
 - `labelPath`
+- `xcafLabelPath`
 - `instancePath`
 - `displayName`
+- `blockName`
+- `componentName`
 - `layer`
+- `layerNames`
 - `colourSource`
 - `materialSource`
 - `colourLookupPath`
@@ -148,8 +154,17 @@ fields intended for future click selection:
 - `fallbackReason`
 - `geometrySource`
 - `originalStepLabel`
+- `referredLabelPath`
+- `stepEntityIds`
+- `stepStyledItemId`
 - `transformSource`
 - `faceCount`
+
+Split mesh primitives also carry `extras` with the selectable parent id,
+display name, STEP target ids, styled-item id, colour source, and geometry
+source. This lets future click-selection resolve an internally split render
+group back to the same component/block instance instead of treating it as an
+anonymous coloured chunk.
 
 The JSON sidecar also includes summary counts for free shapes, processed
 labels/components, named objects, coloured objects, layers, unique colours,
@@ -206,6 +221,14 @@ single exact styled target can colour the matching exported shape after direct
 XCAF colours are checked. Multiple styled targets under one compound must map to
 the same number of exported solid/shell groups; otherwise they remain
 diagnostic-only with a rejection reason in `xcaf-report.json`.
+Named shape representations can also be linked to their actual styled BREP
+representation through `SHAPE_REPRESENTATION_RELATIONSHIP` or
+`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` bridge entities. The resolver crosses
+those bridges before applying the conservative topology-count check. This is
+important for multi-component files where each component has its own named
+shape representation and its own BREP representation; the older
+single-component fallback could only safely work when there was one global
+styled representation group.
 STEP presentation RGB values are normalized to the same linear material values
 OpenCascade exposes through XCAF, so files like `test 1` and `test 2` write the
 same green GLB material when they carry the same intended STEP display colour.

@@ -346,3 +346,23 @@ report showed `173` exported nodes, `1,054,456` triangles, and `0` STEP
 presentation-derived groups. It retained the direct XCAF colour result:
 `owning_shape_surface`, `referred_label_surface`, and
 `referred_subshape_label_surface`, with `14` remaining default-grey groups.
+
+## Follow-up: multi-component hierarchy bridge
+
+On 2026-06-17, a related but distinct failure appeared in
+`test-6-20260616085916`. The single-component uploads
+`test-4-20260616085828` and `test-5-20260616085832` both coloured correctly, but
+the combined two-component upload stayed default grey.
+
+The cause was not missing `COLOUR_RGB` or `STYLED_ITEM` data. The raw STEP graph
+connected each component's named `SHAPE_REPRESENTATION` to its styled
+`ADVANCED_BREP_SHAPE_REPRESENTATION` through a
+`SHAPE_REPRESENTATION_RELATIONSHIP`. The resolver did not cross that bridge, so
+single-component files only worked through the old "one unique styled
+representation group" fallback. With two groups in the same file, that fallback
+correctly refused to guess.
+
+The resolver now indexes those representation bridge entities and maps each
+component to its own exact styled BREP targets before splitting render geometry
+by target. See `docs/step-presentation-hierarchy-investigation.md` for the
+slug-by-slug evidence and metadata proof.
