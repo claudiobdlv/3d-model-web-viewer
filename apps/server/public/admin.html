@@ -1,464 +1,98 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>3D Viewer Admin</title>
+    <title>3D CAD Asset Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Material+Symbols+Outlined:wght,FILL@300..600,0..1&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/admin.js" defer></script>
   </head>
-  <body>
-    <main class="page">
-      <section class="header">
+  <body class="admin-body">
+    <header class="app-topbar">
+      <div class="brand-lockup">
+        <span class="brand-mark material-symbols-outlined" aria-hidden="true">deployed_code</span>
         <div>
-          <h1>3D Viewer Admin</h1>
-          <p>Protected upload, conversion status, and model management.</p>
+          <strong>3D CAD Asset Manager</strong>
+          <span>Technical review workspace</span>
         </div>
-        <button id="themeToggle" class="icon-button" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">Theme</button>
-      </section>
+      </div>
 
-      <section class="workspace-layout">
-        <aside class="folder-panel">
-          <div class="section-title">
-            <h2>Projects</h2>
-            <button id="createFolderButton" class="small-button" type="button">New</button>
-          </div>
-          <div id="folderList" class="folder-list">Loading...</div>
-        </aside>
+      <div class="topbar-actions">
+        <label class="search-field">
+          <span class="material-symbols-outlined" aria-hidden="true">search</span>
+          <input id="modelSearch" type="search" placeholder="Search models" autocomplete="off" />
+        </label>
+        <button id="topUploadButton" class="primary-button" type="button">
+          <span class="material-symbols-outlined" aria-hidden="true">upload_file</span>
+          Upload
+        </button>
+        <button id="themeToggle" class="icon-button" type="button" aria-label="Toggle theme" title="Toggle theme">
+          <span class="material-symbols-outlined" aria-hidden="true">dark_mode</span>
+        </button>
+      </div>
+    </header>
 
-        <div class="workspace-main">
-          <section id="dropZone" class="panel upload-panel">
+    <main class="admin-shell">
+      <aside class="sidebar">
+        <section class="sidebar-section">
+          <div class="sidebar-heading">
             <div>
-              <h2>Upload model</h2>
-              <p id="selectedFolderLabel">Uploading to All models.</p>
+              <span class="eyebrow">File Manager</span>
+              <h1>Projects</h1>
             </div>
-            <form id="uploadForm" action="/api/models" method="post" enctype="multipart/form-data">
-              <input id="uploadFolderId" type="hidden" name="folderId" />
-              <input
-                type="file"
-                name="modelFile"
-                accept=".step,.stp,.glb,.gltf"
-                required
-              />
-              <button type="submit">Upload</button>
-            </form>
-          </section>
+            <button id="createFolderButton" class="icon-button" type="button" aria-label="Create folder" title="Create folder">
+              <span class="material-symbols-outlined" aria-hidden="true">create_new_folder</span>
+            </button>
+          </div>
+          <nav id="folderList" class="folder-list" aria-label="Project folders">Loading...</nav>
+        </section>
 
-          <section class="panel">
-            <div class="section-title">
-              <div>
-                <h2 id="modelListTitle">Uploaded models</h2>
-                <p id="refreshStatus" class="fine-print">Live refresh is starting.</p>
-              </div>
-              <button id="refreshButton" type="button">Refresh</button>
+        <section class="sidebar-section sidebar-meter">
+          <div class="meter-row">
+            <span>Ready assets</span>
+            <strong id="readyMeterLabel">0%</strong>
+          </div>
+          <div class="meter-track"><span id="readyMeterBar"></span></div>
+          <p id="sidebarSummary">Waiting for model inventory.</p>
+        </section>
+      </aside>
+
+      <section class="admin-content">
+        <section id="dropZone" class="upload-zone" tabindex="0">
+          <input id="modelFileInput" class="visually-hidden" type="file" name="modelFile" accept=".step,.stp,.glb,.gltf" />
+          <form id="uploadForm" action="/api/models" method="post" enctype="multipart/form-data">
+            <input id="uploadFolderId" type="hidden" name="folderId" />
+          </form>
+          <div class="upload-icon material-symbols-outlined" aria-hidden="true">upload_file</div>
+          <div>
+            <h2>Drag and drop 3D files</h2>
+            <p id="selectedFolderLabel">Uploading to Unsorted.</p>
+          </div>
+          <button id="browseButton" class="primary-button" type="button">
+            <span class="material-symbols-outlined" aria-hidden="true">folder_open</span>
+            Browse files
+          </button>
+        </section>
+
+        <section class="asset-panel">
+          <div class="panel-toolbar">
+            <div>
+              <span class="eyebrow">Asset Library</span>
+              <h2 id="modelListTitle">All models</h2>
+              <p id="refreshStatus">Live refresh is starting.</p>
             </div>
-            <div id="modelList" class="model-list">Loading...</div>
-          </section>
-        </div>
+            <div class="toolbar-actions">
+              <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh models" title="Refresh models">
+                <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
+              </button>
+            </div>
+          </div>
+          <div id="modelList" class="model-list">Loading...</div>
+        </section>
       </section>
     </main>
-
-    <script>
-      const modelList = document.querySelector("#modelList");
-      const folderList = document.querySelector("#folderList");
-      const refreshButton = document.querySelector("#refreshButton");
-      const createFolderButton = document.querySelector("#createFolderButton");
-      const uploadFolderId = document.querySelector("#uploadFolderId");
-      const selectedFolderLabel = document.querySelector("#selectedFolderLabel");
-      const modelListTitle = document.querySelector("#modelListTitle");
-      const refreshStatus = document.querySelector("#refreshStatus");
-      const dropZone = document.querySelector("#dropZone");
-      const themeToggle = document.querySelector("#themeToggle");
-
-      const state = {
-        folders: [],
-        models: [],
-        selectedFolder: "all",
-        pollTimer: null
-      };
-
-      initTheme();
-
-      function escapeHtml(value) {
-        return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#039;"
-        })[char]);
-      }
-
-      function formatDate(value) {
-        const date = new Date(value);
-        if (Number.isNaN(date.getTime())) return "";
-        return date.toLocaleString(undefined, {
-          year: "numeric",
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit"
-        });
-      }
-
-      function initTheme() {
-        const stored = localStorage.getItem("viewer-theme");
-        const preferred = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        setTheme(stored || preferred);
-        themeToggle.addEventListener("click", () => {
-          const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-          localStorage.setItem("viewer-theme", next);
-          setTheme(next);
-        });
-      }
-
-      function setTheme(theme) {
-        document.documentElement.dataset.theme = theme;
-        themeToggle.textContent = theme === "dark" ? "Light" : "Dark";
-        themeToggle.setAttribute("aria-label", theme === "dark" ? "Use light mode" : "Use dark mode");
-      }
-
-      function selectedFolderId() {
-        return Number.isInteger(state.selectedFolder) ? state.selectedFolder : null;
-      }
-
-      function selectedFolderName() {
-        if (state.selectedFolder === "all") return "All models";
-        if (state.selectedFolder === "unsorted") return "Unsorted";
-        return state.folders.find((folder) => folder.id === state.selectedFolder)?.name || "Project";
-      }
-
-      function modelCountFor(folderId) {
-        if (folderId === "all") return state.models.length;
-        if (folderId === "unsorted") return state.models.filter((model) => model.folder_id === null).length;
-        return state.folders.find((folder) => folder.id === folderId)?.model_count || 0;
-      }
-
-      function renderFolders() {
-        const items = [
-          { id: "all", name: "All models", count: modelCountFor("all") },
-          { id: "unsorted", name: "Unsorted", count: modelCountFor("unsorted") },
-          ...state.folders.map((folder) => ({ id: folder.id, name: folder.name, count: folder.model_count || 0 }))
-        ];
-
-        folderList.innerHTML = items.map((item) => `
-          <div class="folder-row ${state.selectedFolder === item.id ? "active" : ""}" data-folder-id="${escapeHtml(item.id)}">
-            <button class="folder-button" type="button" data-select-folder="${escapeHtml(item.id)}">
-              <span>${escapeHtml(item.name)}</span>
-              <strong>${item.count}</strong>
-            </button>
-            ${Number.isInteger(item.id) ? `
-              <div class="folder-actions">
-                <button class="mini-button" type="button" data-rename-folder="${item.id}" title="Rename project">Rename</button>
-                <button class="mini-button danger-text" type="button" data-delete-folder="${item.id}" title="Delete empty project">Delete</button>
-              </div>
-            ` : ""}
-          </div>
-        `).join("");
-
-        folderList.querySelectorAll("[data-select-folder]").forEach((button) => {
-          button.addEventListener("click", () => {
-            const raw = button.dataset.selectFolder;
-            state.selectedFolder = raw === "all" || raw === "unsorted" ? raw : Number(raw);
-            updateSelectedFolderUi();
-            loadModels();
-          });
-        });
-
-        folderList.querySelectorAll("[data-rename-folder]").forEach((button) => {
-          button.addEventListener("click", () => renameFolder(Number(button.dataset.renameFolder)));
-        });
-
-        folderList.querySelectorAll("[data-delete-folder]").forEach((button) => {
-          button.addEventListener("click", () => deleteFolder(Number(button.dataset.deleteFolder)));
-        });
-      }
-
-      function updateSelectedFolderUi() {
-        const name = selectedFolderName();
-        modelListTitle.textContent = name;
-        const folderId = selectedFolderId();
-        uploadFolderId.value = folderId ? String(folderId) : "";
-        selectedFolderLabel.textContent = `Uploading to ${folderId ? name : "Unsorted"}.`;
-        renderFolders();
-      }
-
-      async function createFolder() {
-        const name = window.prompt("Project name");
-        if (!name) return;
-        const response = await fetch("/api/folders", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name })
-        });
-        if (!response.ok) {
-          window.alert(`Create failed: ${await response.text()}`);
-          return;
-        }
-        const folder = await response.json();
-        state.selectedFolder = folder.id;
-        await loadFolders();
-        await loadModels();
-      }
-
-      async function renameFolder(folderId) {
-        const folder = state.folders.find((item) => item.id === folderId);
-        const name = window.prompt("New project name", folder?.name || "");
-        if (!name) return;
-        const response = await fetch(`/api/folders/${folderId}`, {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name })
-        });
-        if (!response.ok) {
-          window.alert(`Rename failed: ${await response.text()}`);
-          return;
-        }
-        await loadFolders();
-        updateSelectedFolderUi();
-      }
-
-      async function deleteFolder(folderId) {
-        const folder = state.folders.find((item) => item.id === folderId);
-        const confirmed = window.confirm(`Delete empty project "${folder?.name || "Project"}"?`);
-        if (!confirmed) return;
-        const response = await fetch(`/api/folders/${folderId}`, { method: "DELETE" });
-        if (!response.ok) {
-          window.alert(`Delete failed: ${await response.text()}`);
-          return;
-        }
-        state.selectedFolder = "all";
-        await loadFolders();
-        await loadModels();
-      }
-
-      async function deleteModel(slug, name) {
-        const confirmed = window.confirm(`Delete this model and all files? This cannot be undone.\n\n${name}`);
-        if (!confirmed) return;
-
-        const response = await fetch(`/api/models/${encodeURIComponent(slug)}`, {
-          method: "DELETE"
-        });
-
-        if (!response.ok) {
-          window.alert(`Delete failed: ${await response.text()}`);
-          return;
-        }
-
-        await loadFolders();
-        await loadModels();
-      }
-
-      async function moveModel(slug, folderId) {
-        const response = await fetch(`/api/models/${encodeURIComponent(slug)}/folder`, {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ folderId: folderId || null })
-        });
-        if (!response.ok) {
-          window.alert(`Move failed: ${await response.text()}`);
-          return;
-        }
-
-        await loadFolders();
-        await loadModels();
-      }
-
-      async function loadFolders() {
-        const response = await fetch("/api/folders");
-        if (!response.ok) {
-          folderList.textContent = "Could not load projects.";
-          return;
-        }
-
-        state.folders = await response.json();
-        renderFolders();
-      }
-
-      async function loadModels() {
-        const query = state.selectedFolder === "unsorted"
-          ? "?folder=unsorted"
-          : Number.isInteger(state.selectedFolder)
-            ? `?folder=${state.selectedFolder}`
-            : "";
-
-        modelList.textContent = "Loading...";
-        const response = await fetch(`/api/models${query}`);
-        if (!response.ok) {
-          modelList.textContent = "Could not load uploaded models.";
-          return;
-        }
-
-        const models = await response.json();
-        if (state.selectedFolder === "all") {
-          state.models = models;
-        }
-        renderModelList(models);
-        schedulePolling(models);
-      }
-
-      function renderModelList(models) {
-        refreshStatus.textContent = `Updated ${new Date().toLocaleTimeString()}.`;
-        if (models.length === 0) {
-          modelList.innerHTML = '<p class="empty">No models in this view yet.</p>';
-          return;
-        }
-
-        const folderOptions = [
-          '<option value="">Unsorted</option>',
-          ...state.folders.map((folder) => `<option value="${folder.id}">${escapeHtml(folder.name)}</option>`)
-        ].join("");
-
-        modelList.innerHTML = `
-          <table>
-            <colgroup>
-              <col class="col-date" />
-              <col class="col-name" />
-              <col class="col-status" />
-              <col class="col-folder" />
-              <col class="col-action" />
-              <col class="col-action" />
-              <col class="col-action" />
-              <col class="col-action" />
-              <col class="col-delete" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Project</th>
-                <th>Viewer</th>
-                <th>Original</th>
-                <th>GLB</th>
-                <th>Log</th>
-                <th>Delete</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${models.map((model) => `
-                <tr>
-                  <td class="date-cell">${escapeHtml(formatDate(model.created_at))}</td>
-                  <td class="name-cell">
-                    <strong>${escapeHtml(model.name)}</strong>
-                    <span>${escapeHtml(model.source_filename)}</span>
-                    <code>${escapeHtml(model.slug)}</code>
-                  </td>
-                  <td class="status-cell">${renderStatus(model.status)}</td>
-                  <td class="folder-cell">
-                    <select data-move-model="${escapeHtml(model.slug)}" aria-label="Move ${escapeHtml(model.name)} to project">
-                      ${folderOptions}
-                    </select>
-                  </td>
-                  <td class="action-cell"><a class="table-button" href="/3dviewer/${encodeURIComponent(model.slug)}">Viewer</a></td>
-                  <td class="action-cell"><a class="table-button secondary" href="/downloads/${encodeURIComponent(model.slug)}/original">Original</a></td>
-                  <td class="action-cell">
-                    ${model.has_display_glb ? `<a class="table-button secondary" href="/downloads/${encodeURIComponent(model.slug)}/display.glb">GLB</a>` : '<span class="muted">Not ready</span>'}
-                  </td>
-                  <td class="action-cell action-stack">
-                    <a class="table-button secondary" href="/admin/logs/${encodeURIComponent(model.slug)}/conversion.log">Log</a>
-                    <a class="text-link" href="/admin/models/${encodeURIComponent(model.slug)}/material-debug.json">Debug</a>
-                    <a class="text-link" href="/admin/models/${encodeURIComponent(model.slug)}/xcaf-report.json">XCAF</a>
-                  </td>
-                  <td class="delete-cell">
-                    <button
-                      class="danger-button"
-                      type="button"
-                      data-delete-slug="${escapeHtml(model.slug)}"
-                      data-delete-name="${escapeHtml(model.name)}"
-                    >Delete</button>
-                  </td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        `;
-
-        modelList.querySelectorAll("[data-move-model]").forEach((select) => {
-          const model = models.find((item) => item.slug === select.dataset.moveModel);
-          select.value = model?.folder_id ? String(model.folder_id) : "";
-          select.addEventListener("change", () => moveModel(select.dataset.moveModel, select.value));
-        });
-
-        modelList.querySelectorAll("[data-delete-slug]").forEach((button) => {
-          button.addEventListener("click", () => {
-            deleteModel(button.dataset.deleteSlug, button.dataset.deleteName);
-          });
-        });
-      }
-
-      function renderStatus(status) {
-        const stage = statusStage(status);
-        return `
-          <div class="status-wrap">
-            <span class="status status-${escapeHtml(stage.kind)}">${escapeHtml(status)}</span>
-            <div class="progress ${stage.indeterminate ? "indeterminate" : ""}" aria-label="${escapeHtml(stage.label)}">
-              <span style="width: ${stage.percent}%"></span>
-            </div>
-            <small>${escapeHtml(stage.label)}</small>
-          </div>
-        `;
-      }
-
-      function statusStage(status) {
-        if (status === "ready") return { kind: "ready", percent: 100, label: "ready", indeterminate: false };
-        if (status === "failed") return { kind: "failed", percent: 100, label: "failed", indeterminate: false };
-        if (status === "processing") return { kind: "processing", percent: 55, label: "converting", indeterminate: true };
-        if (status === "queued" || status === "uploaded") return { kind: "queued", percent: 25, label: "queued", indeterminate: false };
-        return { kind: "queued", percent: 15, label: "waiting", indeterminate: true };
-      }
-
-      function schedulePolling(models) {
-        window.clearTimeout(state.pollTimer);
-        const active = models.some((model) => ["uploaded", "queued", "processing"].includes(model.status));
-        const delay = active ? 3000 : 15000;
-        refreshStatus.textContent += active ? " Watching active conversions." : " Next quiet refresh in 15s.";
-        state.pollTimer = window.setTimeout(async () => {
-          await loadFolders();
-          await loadModels();
-        }, delay);
-      }
-
-      dropZone.addEventListener("dragover", (event) => {
-        event.preventDefault();
-        dropZone.classList.add("drag-over");
-      });
-
-      dropZone.addEventListener("dragleave", () => {
-        dropZone.classList.remove("drag-over");
-      });
-
-      dropZone.addEventListener("drop", async (event) => {
-        event.preventDefault();
-        dropZone.classList.remove("drag-over");
-        const file = event.dataTransfer.files?.[0];
-        if (!file) return;
-
-        const form = new FormData();
-        form.set("modelFile", file);
-        const folderId = selectedFolderId();
-        if (folderId) form.set("folderId", String(folderId));
-
-        selectedFolderLabel.textContent = `Uploading ${file.name} to ${folderId ? selectedFolderName() : "Unsorted"}...`;
-        const response = await fetch("/api/models", { method: "POST", body: form, redirect: "manual" });
-        if (!response.ok && response.status !== 0) {
-          window.alert(`Upload failed: ${await response.text()}`);
-        }
-        await loadFolders();
-        await loadModels();
-        updateSelectedFolderUi();
-      });
-
-      createFolderButton.addEventListener("click", createFolder);
-      refreshButton.addEventListener("click", async () => {
-        await loadFolders();
-        await loadModels();
-      });
-
-      (async function start() {
-        await loadFolders();
-        await loadModels();
-        updateSelectedFolderUi();
-      })();
-    </script>
   </body>
 </html>
