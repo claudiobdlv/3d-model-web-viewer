@@ -1,11 +1,12 @@
 # 3D Model Web Viewer
 
-MVP Express + TypeScript server, worker, and STEP/STP converter for uploading
-and viewing 3D models in the browser.
+Express + TypeScript server, Vite/React/Tailwind frontend, worker, and STEP/STP
+converter for uploading and viewing 3D models in the browser.
 
 The MVP supports:
 
-- Public model list and read-only `<model-viewer>` pages.
+- Admin-only ModelBase file manager.
+- Fullscreen Three.js GLB viewer with object metadata picking.
 - Protected admin upload page using `ADMIN_PASSWORD` in deployed environments.
 - GLB uploads, copied into viewer-ready storage and displayed immediately.
 - STEP/STP uploads, queued for the worker and converted to GLB by `apps/converter`.
@@ -17,6 +18,10 @@ The app currently runs on port `3009`.
 ## Local Setup
 
 ```powershell
+cd apps/web
+npm install
+npm run build
+
 cd apps/server
 npm install
 npm run typecheck

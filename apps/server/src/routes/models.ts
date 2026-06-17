@@ -9,7 +9,8 @@ import {
   getFolderById,
   getModelBySlug,
   listModels,
-  moveModelToFolder
+  moveModelToFolder,
+  renameModel
 } from "../db.js";
 import {
   createSlug,
@@ -136,7 +137,33 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
       : "Uploaded source model is queued for conversion."
   });
 
+  if (req.accepts(["json", "html"]) === "json") {
+    res.status(201).json(model);
+    return;
+  }
+
   res.redirect(303, "/admin");
+});
+
+modelsRouter.patch("/:slug", (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    if (!isSafeSlug(slug)) {
+      res.status(400).json({ error: "Invalid model slug." });
+      return;
+    }
+
+    const name = typeof req.body?.name === "string" ? req.body.name : "";
+    const model = renameModel(slug, name);
+    if (!model) {
+      res.status(404).json({ error: "Model not found." });
+      return;
+    }
+
+    res.json(model);
+  } catch (error) {
+    next(error);
+  }
 });
 
 modelsRouter.patch("/:slug/folder", (req, res) => {

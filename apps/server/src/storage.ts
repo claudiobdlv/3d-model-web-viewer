@@ -13,6 +13,7 @@ export const modelsRoot = path.join(storageRoot, "models");
 export const logsRoot = path.join(storageRoot, "logs");
 export const workerOutputRoot = path.resolve(process.env.WORKER_OUTPUT_DIR || path.join(storageRoot, "worker-output"));
 export const publicRoot = path.join(appRoot, "public");
+export const webRoot = path.resolve(process.env.WEB_ROOT || path.join(appRoot, "..", "web", "dist"));
 
 export function ensureStorage(): void {
   fs.mkdirSync(dbRoot, { recursive: true });

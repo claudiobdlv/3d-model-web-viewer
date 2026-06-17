@@ -12,7 +12,8 @@ import {
   getModelDir,
   getUploadDir,
   isSafeSlug,
-  publicRoot
+  publicRoot,
+  webRoot
 } from "./storage.js";
 
 const port = Number(process.env.PORT || 3009);
@@ -22,7 +23,11 @@ ensureStorage();
 initDb();
 
 app.use(express.json());
-app.use(express.static(publicRoot, { index: false }));
+const frontendRoot = fs.existsSync(path.join(webRoot, "index.html")) ? webRoot : publicRoot;
+app.use(express.static(frontendRoot, { index: false }));
+if (frontendRoot !== publicRoot) {
+  app.use(express.static(publicRoot, { index: false }));
+}
 
 if (!process.env.ADMIN_PASSWORD) {
   console.warn("ADMIN_PASSWORD is not set. Admin upload routes are unprotected in this local/development process.");
@@ -60,7 +65,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.get("/admin", requireAdmin, (_req, res) => {
-  res.sendFile(path.join(publicRoot, "admin.html"));
+  res.sendFile(path.join(frontendRoot, frontendRoot === webRoot ? "index.html" : "admin.html"));
 });
 
 app.get("/", (_req, res) => {
@@ -70,6 +75,7 @@ app.get("/", (_req, res) => {
 app.get("/api/models", requireAdmin);
 app.post("/api/models", requireAdmin);
 app.patch("/api/models/:slug/folder", requireAdmin);
+app.patch("/api/models/:slug", requireAdmin);
 app.delete("/api/models/:slug", requireAdmin);
 app.use("/api/models", modelsRouter);
 app.use("/api/folders", requireAdmin, foldersRouter);
@@ -83,7 +89,7 @@ app.get("/3dviewer/:slug", (req, res) => {
     return;
   }
 
-  res.sendFile(path.join(publicRoot, "model.html"));
+  res.sendFile(path.join(frontendRoot, frontendRoot === webRoot ? "index.html" : "model.html"));
 });
 
 app.get("/model-files/:slug/:file", (req, res) => {

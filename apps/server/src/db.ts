@@ -244,6 +244,30 @@ export function moveModelToFolder(slug: string, folderId: number | null): ModelR
   return getModelBySlug(slug);
 }
 
+export function renameModel(slug: string, nameInput: string): ModelRecord | undefined {
+  const existing = getModelBySlug(slug);
+  if (!existing) return undefined;
+
+  const name = normalizeModelName(nameInput);
+  db.prepare(
+    `UPDATE models
+     SET name = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE slug = ?`
+  ).run(name, slug);
+
+  return getModelBySlug(slug);
+}
+
+function normalizeModelName(value: string): string {
+  const name = value.trim().replace(/\s+/g, " ").slice(0, 120);
+  if (!name) {
+    throw new Error("Model name is required.");
+  }
+
+  return name;
+}
+
 function normalizeFolderName(value: string): string {
   const name = value.trim().replace(/\s+/g, " ").slice(0, 80);
   if (!name) {

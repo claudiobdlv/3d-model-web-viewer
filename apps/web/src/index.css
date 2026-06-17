@@ -1,0 +1,167 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0b0d10;
+  --panel: #12161b;
+  --panel-soft: #171c22;
+  --panel-strong: #20262f;
+  --text: #e8edf5;
+  --muted: #a5b0bf;
+  --subtle: #778292;
+  --line: #303946;
+  --line-soft: rgb(48 57 70 / 0.65);
+  --accent: #a8c7ff;
+  --accent-strong: #5796ff;
+  --accent-text: #06172d;
+  --ready: #42d392;
+  --queued: #9ca8b8;
+  --processing: #7db2ff;
+  --failed: #ffb4a9;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --panel-soft: #eef3f8;
+  --panel-strong: #dce5ef;
+  --text: #17202e;
+  --muted: #536176;
+  --subtle: #6f7d90;
+  --line: #cbd5e1;
+  --line-soft: #dde5ef;
+  --accent: #0f5fb8;
+  --accent-strong: #2368d2;
+  --accent-text: #ffffff;
+  --ready: #047857;
+  --queued: #667085;
+  --processing: #0f5fb8;
+  --failed: #b42318;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, Geist, ui-sans-serif, system-ui, sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a,
+select,
+input {
+  outline-color: var(--accent);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@layer components {
+  .surface {
+    background: var(--panel);
+    border-color: var(--line);
+  }
+
+  .icon-button {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border transition;
+    border-color: var(--line);
+    color: var(--muted);
+    background: transparent;
+  }
+
+  .icon-button:hover {
+    background: var(--panel-strong);
+    color: var(--text);
+  }
+
+  .primary-button {
+    @apply inline-flex h-9 items-center justify-center gap-2 rounded px-4 text-sm font-bold transition;
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+
+  .primary-button:hover {
+    opacity: 0.88;
+  }
+
+  .secondary-button {
+    @apply inline-flex h-9 items-center justify-center gap-2 rounded border px-3 text-sm font-bold transition;
+    border-color: var(--line);
+    background: transparent;
+    color: var(--muted);
+  }
+
+  .secondary-button:hover {
+    background: var(--panel-strong);
+    color: var(--text);
+  }
+
+  .field {
+    @apply h-9 rounded border px-3 text-sm;
+    border-color: var(--line);
+    background: var(--panel-soft);
+    color: var(--text);
+  }
+
+  .eyebrow {
+    @apply font-display text-[10px] font-extrabold uppercase tracking-[0.08em];
+    color: var(--subtle);
+  }
+
+  .status-pill {
+    @apply inline-flex h-7 w-[112px] items-center justify-center gap-2 rounded-full border px-3 font-display text-[11px] font-extrabold uppercase tracking-[0.04em];
+  }
+
+  .status-dot {
+    @apply h-1.5 w-1.5 rounded-full;
+    background: currentColor;
+  }
+}
+
+.menu-enter {
+  animation: menu-enter 150ms ease-out both;
+}
+
+@keyframes menu-enter {
+  from {
+    opacity: 0;
+    transform: translateX(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.progress-sweep {
+  animation: progress-sweep 1.35s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
