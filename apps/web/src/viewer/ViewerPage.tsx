@@ -16,6 +16,7 @@ export function ViewerPage() {
   const canvasHost = useRef<HTMLDivElement | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
   const rotateXRef = useRef<(() => void) | null>(null);
+  const rotateYRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     void getModel(slug)
@@ -60,6 +61,8 @@ export function ViewerPage() {
 
     let root: THREE.Group | null = null;
     let xQuarterTurns = 0;
+    let yQuarterTurns = 0;
+    let rotationAnimation: { from: THREE.Quaternion; to: THREE.Quaternion; startedAt: number } | null = null;
     let selectable: THREE.Object3D[] = [];
     let pointerStart: { x: number; y: number } | null = null;
     let disposed = false;
@@ -86,12 +89,32 @@ export function ViewerPage() {
       controls.update();
     };
     fitRef.current = frame;
+
+    const rotationTarget = () => new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      -Math.PI / 2 + xQuarterTurns * Math.PI / 2,
+      yQuarterTurns * Math.PI / 2,
+      0,
+      "XYZ"
+    ));
+
+    const animateToQuarterTurns = () => {
+      if (!root) return;
+      rotationAnimation = {
+        from: root.quaternion.clone(),
+        to: rotationTarget(),
+        startedAt: performance.now()
+      };
+    };
+
     rotateXRef.current = () => {
       if (!root) return;
       xQuarterTurns = (xQuarterTurns + 1) % 4;
-      root.rotation.x = -Math.PI / 2 + xQuarterTurns * Math.PI / 2;
-      root.updateMatrixWorld(true);
-      frame();
+      animateToQuarterTurns();
+    };
+    rotateYRef.current = () => {
+      if (!root) return;
+      yQuarterTurns = (yQuarterTurns + 1) % 4;
+      animateToQuarterTurns();
     };
 
     const onPointerDown = (event: PointerEvent) => {
@@ -118,6 +141,16 @@ export function ViewerPage() {
     const animate = () => {
       if (disposed) return;
       requestAnimationFrame(animate);
+      if (root && rotationAnimation) {
+        const progress = Math.min((performance.now() - rotationAnimation.startedAt) / 240, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        root.quaternion.slerpQuaternions(rotationAnimation.from, rotationAnimation.to, eased);
+        root.updateMatrixWorld(true);
+        if (progress === 1) {
+          rotationAnimation = null;
+          frame();
+        }
+      }
       controls.update();
       renderer.render(scene, camera);
     };
@@ -153,6 +186,7 @@ export function ViewerPage() {
       disposed = true;
       fitRef.current = null;
       rotateXRef.current = null;
+      rotateYRef.current = null;
       window.removeEventListener("resize", resize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
@@ -218,7 +252,10 @@ export function ViewerPage() {
             <Focus size={17} />
           </button>
           <button className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2 hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Rotate model 90 degrees around X" aria-label="Rotate X 90 degrees" onClick={() => rotateXRef.current?.()}>
-            <RotateCw size={17} /><span className="hidden text-xs font-bold sm:inline">Rotate X 90°</span>
+            <RotateCw size={17} /><span className="text-xs font-bold"><span className="sm:hidden">X</span><span className="hidden sm:inline">Rotate X 90°</span></span>
+          </button>
+          <button className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2 hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Rotate model 90 degrees around Y" aria-label="Rotate Y 90 degrees" onClick={() => rotateYRef.current?.()}>
+            <RotateCw size={17} /><span className="text-xs font-bold"><span className="sm:hidden">Y</span><span className="hidden sm:inline">Rotate Y 90°</span></span>
           </button>
           <div className="h-5 w-px shrink-0" style={{ background: "var(--line)" }} />
           <span className="min-w-0 max-w-[46vw] truncate text-xs" title={selectedName === "none" ? undefined : selectedName}>
