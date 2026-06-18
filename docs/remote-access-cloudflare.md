@@ -82,12 +82,15 @@ use and test the existing integration. Otherwise:
 
 ### 4. Install and start the connector
 
-After the Access application and allow policy are saved, SSH to the EliteDesk
-and run the one-time command copied from the tunnel's connector setup page:
+After the Access application and allow policy are saved, copy only the token
+from the tunnel's connector setup command. SSH to the EliteDesk and enter the
+token at the silent prompt so it is not stored in shell history:
 
 ```bash
 ssh elitedesk
-sudo cloudflared service install <TOKEN_FROM_CLOUDFLARE_DASHBOARD>
+read -rsp "Cloudflare tunnel token: " CF_TUNNEL_TOKEN; echo
+sudo cloudflared service install "$CF_TUNNEL_TOKEN"
+unset CF_TUNNEL_TOKEN
 ```
 
 Do not save that command in a script or the repository. After installation,
