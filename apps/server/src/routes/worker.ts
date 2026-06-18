@@ -157,7 +157,7 @@ workerRouter.post(
       fs.writeFileSync(path.join(logDir, "conversion.log"), conversionLog.buffer);
     }
 
-    markJobReady(job.id, "Worker completed STEP/STP conversion.");
+    markJobReady(job.id, "Worker completed STEP/STP conversion.", displayGlb.size);
     res.json({ ok: true, status: "ready" });
   }
 );

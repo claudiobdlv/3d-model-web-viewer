@@ -6,6 +6,7 @@ export type ModelRecord = {
   source_ext: string;
   status: "uploaded" | "queued" | "processing" | "ready" | "failed" | string;
   has_display_glb: number;
+  glb_size_bytes: number | null;
   folder_id: number | null;
   created_at: string;
   updated_at: string;

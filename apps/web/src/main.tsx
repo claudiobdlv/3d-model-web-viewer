@@ -34,6 +34,7 @@ import type { FolderRecord, FolderSelection, ModelRecord } from "./types";
 import {
   activeStatuses,
   fileKind,
+  formatFileSize,
   folderName,
   folderNameForModel,
   formatDate,
@@ -113,7 +114,6 @@ function AdminPage() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setOpenMenu(null);
-        setUploadOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -339,20 +339,22 @@ function ModelTable({ models, folders, loading, openMenu, setOpenMenu, onMove, o
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[840px] table-fixed border-collapse">
+      <table className="w-full min-w-[940px] table-fixed border-collapse">
         <colgroup>
-          <col className="w-[30%]" />
+          <col className="w-[26%]" />
           <col className="w-[14%]" />
-          <col className="w-[16%]" />
-          <col className="w-[18%]" />
+          <col className="w-[14%]" />
           <col className="w-[12%]" />
+          <col className="w-[16%]" />
           <col className="w-[10%]" />
+          <col className="w-[8%]" />
         </colgroup>
         <thead>
           <tr className="border-b text-left font-display text-[11px] font-extrabold uppercase tracking-[0.06em]" style={{ borderColor: "var(--line)", background: "var(--panel-soft)", color: "var(--muted)" }}>
             <th className="px-4 py-3">Name</th>
             <th className="px-4 py-3">Status</th>
             <th className="px-4 py-3">Created</th>
+            <th className="px-4 py-3">GLB size</th>
             <th className="px-4 py-3">Folder</th>
             <th className="px-4 py-3 text-right">View</th>
             <th className="px-4 py-3 text-right">More</th>
@@ -375,6 +377,7 @@ function ModelTable({ models, folders, loading, openMenu, setOpenMenu, onMove, o
               </td>
               <td className="px-4 py-3"><StatusCell status={model.status} /></td>
               <td className="px-4 py-3 text-xs" style={{ color: "var(--subtle)" }}>{formatDate(model.created_at)}</td>
+              <td className="px-4 py-3 text-xs tabular-nums" style={{ color: "var(--subtle)" }}>{formatFileSize(model.glb_size_bytes)}</td>
               <td className="px-4 py-3">
                 <select className="field w-36" value={model.folder_id ?? ""} aria-label={`Move ${model.name} to folder`} onChange={(event) => onMove(model.slug, event.target.value ? Number(event.target.value) : null)}>
                   <option value="">Unsorted</option>
@@ -487,24 +490,32 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
   const [dragging, setDragging] = useState(false);
   const [target, setTarget] = useState<number | null>(targetFolderId);
   const [quality, setQuality] = useState<"low" | "medium" | "high">("medium");
-  const [queue, setQueue] = useState<Array<{ name: string; state: "selected" | "uploading" | "done" | "failed"; error?: string }>>([]);
+  const [queue, setQueue] = useState<Array<{ id: string; file: File; state: "selected" | "uploading" | "done" | "failed"; error?: string }>>([]);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const resolvedTargetName = target ? folders.find((folder) => folder.id === target)?.name ?? "Folder" : selection === "all" ? "Unsorted" : targetFolderName;
 
-  const submitFiles = async (files: FileList | File[]) => {
+  const stageFiles = (files: FileList | File[]) => {
     const accepted = Array.from(files).filter((file) => /\.(step|stp|glb|gltf)$/i.test(file.name));
-    setQueue(accepted.map((file) => ({ name: file.name, state: "selected" })));
-    for (const file of accepted) {
-      setQueue((items) => items.map((item) => item.name === file.name ? { ...item, state: "uploading" } : item));
+    setQueue(accepted.map((file, index) => ({ id: `${file.name}-${file.lastModified}-${index}`, file, state: "selected" })));
+  };
+
+  const uploading = queue.some((item) => item.state === "uploading");
+  const pending = queue.filter((item) => item.state !== "done");
+  const canUpload = pending.length > 0 && !uploading;
+
+  const submitFiles = async () => {
+    if (!canUpload) return;
+    for (const queued of pending) {
+      setQueue((items) => items.map((item) => item.id === queued.id ? { ...item, state: "uploading", error: undefined } : item));
       try {
-        await uploadModel(file, target, quality);
-        setQueue((items) => items.map((item) => item.name === file.name ? { ...item, state: "done" } : item));
+        await uploadModel(queued.file, target, quality);
+        setQueue((items) => items.map((item) => item.id === queued.id ? { ...item, state: "done" } : item));
       } catch (error) {
-        setQueue((items) => items.map((item) => item.name === file.name ? { ...item, state: "failed", error: error instanceof Error ? error.message : "Upload failed" } : item));
+        setQueue((items) => items.map((item) => item.id === queued.id ? { ...item, state: "failed", error: error instanceof Error ? error.message : "Upload failed" } : item));
         return;
       }
     }
-    if (accepted.length > 0) await onUploaded();
+    await onUploaded();
   };
 
   return (
@@ -515,7 +526,7 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
             <h2 id="upload-title" className="font-display text-lg font-bold">Upload model</h2>
             <p className="mt-1 text-sm" style={{ color: "var(--subtle)" }}>STEP, STP, GLB, GLTF</p>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close upload modal"><X size={18} /></button>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close upload modal" disabled={uploading}><X size={18} /></button>
         </div>
         <div className="grid gap-4 p-4">
           <label className="grid gap-2 text-sm font-bold">
@@ -526,7 +537,7 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
             </select>
           </label>
           <fieldset className="grid gap-2">
-            <legend className="text-sm font-bold">STEP conversion quality</legend>
+            <legend className="text-sm font-bold">Conversion quality</legend>
             <div className="grid grid-cols-3 gap-1 rounded border p-1" style={{ borderColor: "var(--line)", background: "var(--panel-soft)" }}>
               {(["low", "medium", "high"] as const).map((value) => (
                 <button
@@ -556,24 +567,24 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
             onDrop={(event) => {
               event.preventDefault();
               setDragging(false);
-              void submitFiles(event.dataTransfer.files);
+              stageFiles(event.dataTransfer.files);
             }}
           >
             <div className="grid place-items-center gap-3">
               <div className="grid h-12 w-12 place-items-center rounded border text-[var(--accent)]" style={{ borderColor: "var(--line)" }}><Upload size={22} /></div>
               <div>
                 <p className="font-bold">Drop files here</p>
-                <p className="mt-1 text-sm" style={{ color: "var(--subtle)" }}>Uploading into {resolvedTargetName}</p>
+                <p className="mt-1 text-sm" style={{ color: "var(--subtle)" }}>Files will upload into {resolvedTargetName}</p>
               </div>
               <button className="primary-button" type="button" onClick={() => inputRef.current?.click()}>Browse files</button>
-              <input ref={inputRef} className="hidden" type="file" accept=".step,.stp,.glb,.gltf" multiple onChange={(event) => event.target.files && submitFiles(event.target.files)} />
+              <input ref={inputRef} className="hidden" type="file" accept=".step,.stp,.glb,.gltf" multiple onChange={(event) => event.target.files && stageFiles(event.target.files)} />
             </div>
           </div>
           {queue.length ? (
             <div className="grid gap-2">
               {queue.map((item) => (
-                <div key={item.name} className="flex items-center justify-between gap-3 rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--line)", background: "var(--panel-soft)" }}>
-                  <span className="truncate">{item.name}</span>
+                <div key={item.id} className="flex items-center justify-between gap-3 rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--line)", background: "var(--panel-soft)" }}>
+                  <span className="truncate">{item.file.name}</span>
                   <span className="flex shrink-0 items-center gap-2 text-xs font-bold uppercase" style={{ color: item.state === "failed" ? "var(--failed)" : item.state === "done" ? "var(--ready)" : "var(--muted)" }}>
                     {item.state === "uploading" ? <Loader2 className="animate-spin" size={14} /> : item.state === "done" ? <CheckCircle2 size={14} /> : null}
                     {item.error ?? item.state}
@@ -584,7 +595,10 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
           ) : null}
         </div>
         <div className="flex justify-end gap-2 border-t p-4" style={{ borderColor: "var(--line)" }}>
-          <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" type="button" onClick={() => void submitFiles()} disabled={!canUpload}>
+            {uploading ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
+            Upload
+          </button>
         </div>
       </div>
     </div>

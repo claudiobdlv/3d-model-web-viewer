@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { ArrowLeft, Box, Download, Focus, MousePointer2, Move3D, RotateCw, ZoomIn } from "lucide-react";
+import { ArrowLeft, Box, Download, RotateCw } from "lucide-react";
 import { getModel } from "../api";
 import type { ModelRecord } from "../types";
 
@@ -14,7 +14,6 @@ export function ViewerPage() {
   const [error, setError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState("none");
   const canvasHost = useRef<HTMLDivElement | null>(null);
-  const fitRef = useRef<(() => void) | null>(null);
   const rotateXRef = useRef<(() => void) | null>(null);
   const rotateYRef = useRef<(() => void) | null>(null);
 
@@ -88,7 +87,6 @@ export function ViewerPage() {
       camera.updateProjectionMatrix();
       controls.update();
     };
-    fitRef.current = frame;
 
     const rotationTarget = () => new THREE.Quaternion().setFromEuler(new THREE.Euler(
       -Math.PI / 2 + xQuarterTurns * Math.PI / 2,
@@ -191,7 +189,6 @@ export function ViewerPage() {
 
     return () => {
       disposed = true;
-      fitRef.current = null;
       rotateXRef.current = null;
       rotateYRef.current = null;
       window.removeEventListener("resize", resize);
@@ -252,12 +249,6 @@ export function ViewerPage() {
         <div ref={canvasHost} className="h-full w-full" />
 
         <div className="absolute bottom-4 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 shadow-panel backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 88%, transparent)", color: "var(--muted)" }}>
-          <MousePointer2 size={17} />
-          <Move3D size={17} />
-          <ZoomIn size={17} />
-          <button className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Fit model" aria-label="Fit model" onClick={() => fitRef.current?.()}>
-            <Focus size={17} />
-          </button>
           <button className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2 hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Rotate model 90 degrees around X" aria-label="Rotate X 90 degrees" onClick={() => rotateXRef.current?.()}>
             <RotateCw size={17} /><span className="text-xs font-bold"><span className="sm:hidden">X</span><span className="hidden sm:inline">Rotate X 90°</span></span>
           </button>

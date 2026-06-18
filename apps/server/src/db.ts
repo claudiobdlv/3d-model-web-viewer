@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { dbRoot } from "./storage.js";
+import { dbRoot, getModelDir } from "./storage.js";
 import { parseConversionQuality, type ConversionQuality } from "./quality.js";
 
 export type ModelRecord = {
@@ -12,6 +12,7 @@ export type ModelRecord = {
   source_ext: string;
   status: string;
   has_display_glb: number;
+  glb_size_bytes: number | null;
   folder_id: number | null;
   created_at: string;
   updated_at: string;
@@ -57,6 +58,7 @@ export function initDb(): void {
       source_ext TEXT NOT NULL,
       status TEXT NOT NULL,
       has_display_glb INTEGER NOT NULL DEFAULT 0,
+      glb_size_bytes INTEGER,
       folder_id INTEGER,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -95,6 +97,23 @@ export function initDb(): void {
   ensureColumn("jobs", "failed_at", "TEXT");
   ensureColumn("jobs", "quality", "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn("models", "folder_id", "INTEGER REFERENCES folders(id)");
+  ensureColumn("models", "glb_size_bytes", "INTEGER");
+  backfillGlbSizes();
+}
+
+function backfillGlbSizes(): void {
+  const models = db
+    .prepare("SELECT id, slug FROM models WHERE has_display_glb = 1 AND glb_size_bytes IS NULL")
+    .all() as Array<{ id: number; slug: string }>;
+  const update = db.prepare("UPDATE models SET glb_size_bytes = ? WHERE id = ?");
+
+  for (const model of models) {
+    try {
+      update.run(fs.statSync(path.join(getModelDir(model.slug), "display.glb")).size, model.id);
+    } catch {
+      // Keep unavailable artifact sizes nullable; list requests remain filesystem-free.
+    }
+  }
 }
 
 function ensureColumn(table: string, column: string, definition: string): void {
@@ -141,12 +160,13 @@ export function createModel(input: {
   sourceExt: string;
   status: string;
   hasDisplayGlb: boolean;
+  glbSizeBytes?: number | null;
   folderId?: number | null;
 }): ModelRecord {
   const result = db
     .prepare(
-      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb, folder_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb, glb_size_bytes, folder_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.slug,
@@ -155,6 +175,7 @@ export function createModel(input: {
       input.sourceExt,
       input.status,
       input.hasDisplayGlb ? 1 : 0,
+      input.glbSizeBytes ?? null,
       input.folderId ?? null
     );
 
@@ -351,7 +372,7 @@ export function markJobProcessing(jobId: number): void {
   ).run(jobId);
 }
 
-export function markJobReady(jobId: number, message = "Worker completed fake processing."): void {
+export function markJobReady(jobId: number, message = "Worker completed fake processing.", glbSizeBytes?: number): void {
   db.prepare(
     `UPDATE jobs
      SET status = 'ready',
@@ -366,9 +387,10 @@ export function markJobReady(jobId: number, message = "Worker completed fake pro
     `UPDATE models
      SET status = 'ready',
          has_display_glb = 1,
+         glb_size_bytes = COALESCE(?, glb_size_bytes),
          updated_at = CURRENT_TIMESTAMP
      WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
-  ).run(jobId);
+  ).run(glbSizeBytes ?? null, jobId);
 }
 
 export function markJobFailed(jobId: number, message: string): void {

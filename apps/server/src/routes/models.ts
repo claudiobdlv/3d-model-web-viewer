@@ -128,6 +128,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
     sourceExt,
     status,
     hasDisplayGlb: isGlb,
+    glbSizeBytes: isGlb ? req.file.size : null,
     folderId
   });
 
