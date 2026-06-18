@@ -359,6 +359,12 @@ std::string safeName(const std::string& value, const std::string& fallback) {
 bool isRawLabelName(const std::string& value) {
   if (value.empty()) return true;
   if (value.rfind("=>[", 0) == 0 && value.back() == ']') return true;
+  std::string upper = value;
+  std::transform(upper.begin(), upper.end(), upper.begin(), [](const unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  if (upper == "DOCUMENT" || upper == "COMPOUND" || upper == "COMPSOLID" ||
+      upper == "SOLID" || upper == "SHELL" || upper == "SHAPE") return true;
   return std::all_of(value.begin(), value.end(), [](const unsigned char c) {
     return std::isdigit(c) || c == ':';
   });

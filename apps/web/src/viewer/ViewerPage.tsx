@@ -288,5 +288,6 @@ function readableName(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const name = value.trim();
   if (!name || /^=>\s*\[[\d:]+\]$/.test(name) || /^\d+(?::\d+)+$/.test(name)) return undefined;
+  if (["document", "compound", "compsolid", "solid", "shell", "shape"].includes(name.toLowerCase())) return undefined;
   return name;
 }
