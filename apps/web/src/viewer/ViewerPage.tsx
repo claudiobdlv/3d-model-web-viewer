@@ -232,7 +232,7 @@ export function ViewerPage() {
 
 function selectedDisplayName(object: THREE.Object3D): string {
   const sources = metadataSources(object);
-  for (const key of ["displayName", "objectName", "blockName", "componentName"]) {
+  for (const key of ["resolvedObjectName", "blockName", "componentName", "productName", "objectName", "displayName"]) {
     for (const source of sources) {
       const name = readableName(source.value[key]);
       if (name) return name;

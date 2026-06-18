@@ -116,9 +116,12 @@ struct MeshPrimitive {
   std::string labelPath;
   std::string instancePath;
   std::string displayName;
+  std::string resolvedObjectName;
   std::string objectName;
   std::string blockName;
   std::string componentName;
+  std::string productName;
+  std::vector<std::string> nameCandidates;
   std::string layer;
   std::string colourSource;
   std::string materialSource;
@@ -329,6 +332,8 @@ void writeString(std::ostream& out, const std::string& value) {
   out << '"' << jsonEscape(value) << '"';
 }
 
+void writeStringVector(std::ostream& out, const std::vector<std::string>& values, std::size_t limit);
+
 std::string labelEntry(const TDF_Label& label) {
   TCollection_AsciiString entry;
   TDF_Tool::Entry(label, entry);
@@ -356,6 +361,8 @@ std::string safeName(const std::string& value, const std::string& fallback) {
   return value.empty() ? fallback : value;
 }
 
+std::string normalizeDisplayWhitespace(const std::string& value);
+
 bool isRawLabelName(const std::string& value) {
   if (value.empty()) return true;
   if (value.rfind("=>[", 0) == 0 && value.back() == ']') return true;
@@ -364,7 +371,9 @@ bool isRawLabelName(const std::string& value) {
     return static_cast<char>(std::toupper(c));
   });
   if (upper == "DOCUMENT" || upper == "COMPOUND" || upper == "COMPSOLID" ||
-      upper == "SOLID" || upper == "SHELL" || upper == "SHAPE") return true;
+      upper == "SOLID" || upper == "SHELL" || upper == "FACE" || upper == "SHAPE" ||
+      upper == "OPEN CASCADE STEP TRANSLATOR") return true;
+  if (upper.rfind("BREP_REP_", 0) == 0 || upper.rfind("SHELL_REP_", 0) == 0) return true;
   return std::all_of(value.begin(), value.end(), [](const unsigned char c) {
     return std::isdigit(c) || c == ':';
   });
@@ -372,7 +381,7 @@ bool isRawLabelName(const std::string& value) {
 
 std::string readableLabelName(const TDF_Label& label) {
   const std::string value = label.IsNull() ? "" : labelName(label);
-  return isRawLabelName(value) ? "" : value;
+  return isRawLabelName(value) ? "" : normalizeDisplayWhitespace(value);
 }
 
 std::string shapeTypeName(const TopAbs_ShapeEnum type) {
@@ -541,6 +550,24 @@ std::string normalizeStepName(const std::string& value) {
   }
   if (!result.empty() && result.back() == ' ') {
     result.pop_back();
+  }
+  return result;
+}
+
+std::string normalizeDisplayWhitespace(const std::string& value) {
+  std::string result;
+  bool pendingSpace = false;
+  for (const unsigned char c : value) {
+    if (c == '\r' || c == '\n') {
+      continue;
+    }
+    if (std::isspace(c)) {
+      pendingSpace = !result.empty();
+    } else {
+      if (pendingSpace) result.push_back(' ');
+      result.push_back(static_cast<char>(c));
+      pendingSpace = false;
+    }
   }
   return result;
 }
@@ -903,12 +930,15 @@ class RawStepStyleResolver {
     reverseRefs_ = buildReverseStepRefs(entities_);
     buildStyledItemIndex();
     buildRepresentationIndex();
+    buildProductNameIndex();
   }
 
   int entityCount() const { return static_cast<int>(entities_.size()); }
   int styledItemCount() const { return styledItemCount_; }
   int colourCount() const { return colourCount_; }
   int representationColourCount() const { return representationColourCount_; }
+  const std::string& uniqueProductName() const { return uniqueProductName_; }
+  const std::vector<std::string>& productNameCandidates() const { return productNameCandidates_; }
 
   bool findForNames(
       const std::vector<std::string>& names,
@@ -1025,6 +1055,27 @@ class RawStepStyleResolver {
   const std::map<std::string, RawStepColourAudit>& colourAudit() const { return colourAudit_; }
 
  private:
+  void buildProductNameIndex() {
+    std::set<std::string> names;
+    for (const auto& [id, entity] : entities_) {
+      if (entity.type != "PRODUCT") {
+        continue;
+      }
+      const auto parts = splitTopLevel(entity.args);
+      for (std::size_t i = 0; i < std::min<std::size_t>(2, parts.size()); ++i) {
+        const std::string name = normalizeDisplayWhitespace(unquoteStepString(parts[i]));
+        if (!isRawLabelName(name)) {
+          names.insert(name);
+          break;
+        }
+      }
+    }
+    productNameCandidates_.assign(names.begin(), names.end());
+    if (productNameCandidates_.size() == 1) {
+      uniqueProductName_ = productNameCandidates_.front();
+    }
+  }
+
   void buildStyledItemIndex() {
     for (const auto& [id, entity] : entities_) {
       if (entity.type == "COLOUR_RGB") {
@@ -1151,6 +1202,8 @@ class RawStepStyleResolver {
   std::map<std::string, std::vector<RawStepStyleMatch>> styledByTarget_;
   std::map<std::string, std::vector<RawStepStyleMatch>> matchesByNormalizedRepresentationName_;
   std::map<std::string, RawStepColourAudit> colourAudit_;
+  std::vector<std::string> productNameCandidates_;
+  std::string uniqueProductName_;
   int styledItemCount_ = 0;
   int colourCount_ = 0;
   int representationColourCount_ = 0;
@@ -1798,6 +1851,7 @@ void tessellateLabel(
     const std::vector<LayerInfo>& inheritedLayers,
     const std::string& parentChain,
     const std::string& parentDisplayName,
+    const std::string& parentProductName,
   std::vector<MeshPrimitive>& primitives,
   Stats& stats) {
   stats.labelsProcessed += 1;
@@ -1825,9 +1879,14 @@ void tessellateLabel(
   const auto referredLayers = referred.IsNull() ? std::vector<LayerInfo>() : collectLayerInfos(layerTool, referred);
   const auto layers = mergeLayers(mergeLayers(instanceLayers, referredLayers), inheritedLayers);
   const std::string layer = firstLayerName(layers);
-  const std::string displayName = safeName(
+  const std::string resolvedObjectName = safeName(
       objectName,
-      safeName(parentDisplayName, safeName(referredName, safeName(layer, "Unnamed object"))));
+      safeName(parentProductName,
+          safeName(referredName, safeName(parentDisplayName, safeName(layer, "Unnamed object")))));
+  const std::string displayName = resolvedObjectName;
+  const std::vector<std::string> nameCandidates = {
+      objectName, referredName, parentDisplayName, parentProductName, layer,
+      labelName(label), referred.IsNull() ? "" : labelName(referred)};
   const std::vector<std::string> rawStyleNames = {
       displayName, referredName, objectName, labelName(label), referredPath, labelPath};
   if (displayName != "Unnamed object") {
@@ -2038,9 +2097,12 @@ void tessellateLabel(
       primitive.labelPath = labelPath;
       primitive.instancePath = effectiveInstancePath;
       primitive.displayName = displayName;
+      primitive.resolvedObjectName = resolvedObjectName;
       primitive.objectName = objectName;
       primitive.blockName = parentDisplayName;
-      primitive.componentName = referredName;
+      primitive.componentName = safeName(parentProductName, referredName);
+      primitive.productName = parentProductName;
+      primitive.nameCandidates = nameCandidates;
       primitive.layer = primitiveLayer;
       primitive.colourSource = colour.source;
       primitive.materialSource = colour.materialSource;
@@ -2167,6 +2229,7 @@ void traverse(
     const std::vector<LayerInfo>& inheritedLayers,
     const std::string& parentChain,
     const std::string& parentDisplayName,
+    const std::string& parentProductName,
     std::vector<MeshPrimitive>& primitives,
     Stats& stats) {
   TDF_LabelSequence children;
@@ -2179,9 +2242,6 @@ void traverse(
   const auto currentLayers = collectLabelAndReferredLayers(layerTool, label, currentReferred);
   const auto childInheritedLayers = mergeLayers(inheritedLayers, currentLayers);
   const std::string currentParentChain = appendChain(parentChain, labelPath);
-  const std::string currentDisplayName = safeName(
-      readableLabelName(label),
-      safeName(readableLabelName(currentReferred), parentDisplayName));
   bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
   TopLoc_Location childAccumulatedLocation = accumulatedLocation;
   std::string childTransformSource = transformSource;
@@ -2194,6 +2254,11 @@ void traverse(
       childTransformSource = "referred_assembly_instance";
     }
   }
+  const std::string rawProductName = rawStepStyles == nullptr ? "" : rawStepStyles->uniqueProductName();
+  const std::string currentProductName = safeName(parentProductName, hasChildren ? rawProductName : "");
+  const std::string currentDisplayName = safeName(
+      readableLabelName(label),
+      safeName(currentProductName, safeName(readableLabelName(currentReferred), parentDisplayName)));
 
   if (hasChildren && children.Length() > 0) {
     stats.labelsProcessed += 1;
@@ -2231,6 +2296,7 @@ void traverse(
           childInheritedLayers,
           currentParentChain,
           currentDisplayName,
+          currentProductName,
           primitives,
           stats);
     }
@@ -2253,6 +2319,7 @@ void traverse(
       inheritedLayers,
       parentChain,
       parentDisplayName,
+      parentProductName,
       primitives,
       stats);
 }
@@ -2413,9 +2480,12 @@ void writeGlb(
     json << "\"xcafLabelPath\":"; writeString(json, primitive.labelPath); json << ",";
     json << "\"instancePath\":"; writeString(json, primitive.instancePath); json << ",";
     json << "\"displayName\":"; writeString(json, primitive.displayName); json << ",";
+    json << "\"resolvedObjectName\":"; writeString(json, primitive.resolvedObjectName); json << ",";
     json << "\"objectName\":"; writeString(json, primitive.objectName); json << ",";
     json << "\"blockName\":"; writeString(json, primitive.blockName); json << ",";
     json << "\"componentName\":"; writeString(json, primitive.componentName); json << ",";
+    json << "\"productName\":"; writeString(json, primitive.productName); json << ",";
+    json << "\"nameCandidates\":"; writeStringVector(json, primitive.nameCandidates, 20); json << ",";
     json << "\"layer\":"; writeString(json, primitive.layer); json << ",";
     json << "\"layerNames\":"; writeString(json, primitive.layer); json << ",";
     json << "\"colourSource\":"; writeString(json, primitive.colourSource); json << ",";
@@ -2472,9 +2542,12 @@ void writeGlb(
     json << "\"selectableId\":"; writeString(json, primitives[i].instancePath); json << ",";
     json << "\"parentObjectId\":"; writeString(json, primitives[i].instancePath); json << ",";
     json << "\"displayName\":"; writeString(json, primitives[i].displayName); json << ",";
+    json << "\"resolvedObjectName\":"; writeString(json, primitives[i].resolvedObjectName); json << ",";
     json << "\"objectName\":"; writeString(json, primitives[i].objectName); json << ",";
     json << "\"blockName\":"; writeString(json, primitives[i].blockName); json << ",";
     json << "\"componentName\":"; writeString(json, primitives[i].componentName); json << ",";
+    json << "\"productName\":"; writeString(json, primitives[i].productName); json << ",";
+    json << "\"nameCandidates\":"; writeStringVector(json, primitives[i].nameCandidates, 20); json << ",";
     json << "\"layerNames\":"; writeString(json, primitives[i].layer); json << ",";
     json << "\"xcafLabelPath\":"; writeString(json, primitives[i].labelPath); json << ",";
     json << "\"referredLabelPath\":"; writeString(json, primitives[i].originalStepLabel); json << ",";
@@ -2663,6 +2736,9 @@ void writeStringVector(std::ostream& out, const std::vector<std::string>& values
   std::set<std::string> seen;
   std::size_t written = 0;
   for (const auto& value : values) {
+    if (value.empty()) {
+      continue;
+    }
     if (!seen.insert(value).second) {
       continue;
     }
@@ -3098,6 +3174,12 @@ void writeReport(
     out << "    {";
     out << "\"stableObjectId\": "; writeString(out, primitive.stableObjectId); out << ", ";
     out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+    out << "\"resolvedObjectName\": "; writeString(out, primitive.resolvedObjectName); out << ", ";
+    out << "\"objectName\": "; writeString(out, primitive.objectName); out << ", ";
+    out << "\"blockName\": "; writeString(out, primitive.blockName); out << ", ";
+    out << "\"componentName\": "; writeString(out, primitive.componentName); out << ", ";
+    out << "\"productName\": "; writeString(out, primitive.productName); out << ", ";
+    out << "\"nameCandidates\": "; writeStringVector(out, primitive.nameCandidates, 20); out << ", ";
     out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
     out << "\"originalStepLabel\": "; writeString(out, primitive.originalStepLabel); out << ", ";
     out << "\"originalStepName\": "; writeString(out, primitive.originalStepName); out << ", ";
@@ -3178,6 +3260,12 @@ void writeReport(
     out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
     out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
     out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+    out << "\"resolvedObjectName\": "; writeString(out, primitive.resolvedObjectName); out << ", ";
+    out << "\"objectName\": "; writeString(out, primitive.objectName); out << ", ";
+    out << "\"blockName\": "; writeString(out, primitive.blockName); out << ", ";
+    out << "\"componentName\": "; writeString(out, primitive.componentName); out << ", ";
+    out << "\"productName\": "; writeString(out, primitive.productName); out << ", ";
+    out << "\"nameCandidates\": "; writeStringVector(out, primitive.nameCandidates, 20); out << ", ";
     out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
     out << "\"finalColour\": "; writeString(out, colourKey(primitive.colour)); out << ", ";
     out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
@@ -3340,6 +3428,7 @@ int main(int argc, char** argv) {
           false,
           noInheritedColour,
           noInheritedLayers,
+          "",
           "",
           "",
           primitives,
