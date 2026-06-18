@@ -1,4 +1,4 @@
-import type { ConversionQuality, FolderRecord, FolderSelection, JobRecord, ModelRecord } from "./types";
+import type { ConversionQuality, FolderRecord, FolderSelection, JobRecord, ModelRecord, PublicModel, PublicShareResponse } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -30,6 +30,19 @@ export function listModels(selection: FolderSelection): Promise<ModelRecord[]> {
 
 export function getModel(slug: string): Promise<ModelRecord> {
   return request<ModelRecord>(`/api/models/${encodeURIComponent(slug)}`);
+}
+
+export function getPublicModel(token: string): Promise<PublicModel> {
+  return request<PublicModel>(`/public/${encodeURIComponent(token)}/model.json`);
+}
+
+export function createPublicShare(modelId: number): Promise<PublicShareResponse> {
+  return request<PublicShareResponse>(`/api/models/${modelId}/share`, { method: "POST" });
+}
+
+export async function revokePublicShare(modelId: number): Promise<number> {
+  const result = await request<{ ok: true; revoked: number }>(`/api/models/${modelId}/share`, { method: "DELETE" });
+  return result.revoked;
 }
 
 export function createFolder(name: string): Promise<FolderRecord> {

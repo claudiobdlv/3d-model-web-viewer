@@ -3,14 +3,14 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { ArrowLeft, Box, Download, RotateCw } from "lucide-react";
-import { getModel } from "../api";
-import type { ModelRecord } from "../types";
+import { getModel, getPublicModel } from "../api";
+import type { ModelRecord, PublicModel } from "../types";
 
 type MetadataSource = { source: string; name: string; value: Record<string, unknown> };
 
-export function ViewerPage() {
+export function ViewerPage({ publicToken }: { publicToken?: string }) {
   const slug = useMemo(() => window.location.pathname.split("/").filter(Boolean).pop() ?? "", []);
-  const [model, setModel] = useState<ModelRecord | null>(null);
+  const [model, setModel] = useState<ModelRecord | PublicModel | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState("none");
   const canvasHost = useRef<HTMLDivElement | null>(null);
@@ -18,13 +18,18 @@ export function ViewerPage() {
   const rotateYRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    void getModel(slug)
+    void (publicToken ? getPublicModel(publicToken) : getModel(slug))
       .then(setModel)
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Model not found."));
-  }, [slug]);
+  }, [publicToken, slug]);
+
+  const hasDisplayGlb = model ? ("glb_url" in model || Boolean(model.has_display_glb)) : false;
+  const glbUrl = model
+    ? ("glb_url" in model ? model.glb_url : `/model-files/${encodeURIComponent(slug)}/display.glb`)
+    : "";
 
   useEffect(() => {
-    if (!model?.has_display_glb || !canvasHost.current) return undefined;
+    if (!hasDisplayGlb || !glbUrl || !canvasHost.current) return undefined;
 
     const host = canvasHost.current;
     const scene = new THREE.Scene();
@@ -158,7 +163,7 @@ export function ViewerPage() {
     renderer.domElement.addEventListener("pointerup", onPointerUp);
 
     new GLTFLoader().load(
-      `/model-files/${encodeURIComponent(slug)}/display.glb`,
+      glbUrl,
       (gltf) => {
         if (disposed) return;
         // Three.js is Y-up. Keep source/GLB data untouched and rotate the
@@ -204,21 +209,20 @@ export function ViewerPage() {
         materials.forEach((material) => material.dispose());
       });
     };
-  }, [model?.has_display_glb, slug]);
+  }, [glbUrl, hasDisplayGlb]);
 
   return (
     <div className="h-screen overflow-hidden" style={{ background: "var(--bg)", color: "var(--text)" }}>
       <header className="relative z-20 flex min-h-14 items-center justify-between gap-3 border-b px-3 md:px-4" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
         <div className="flex min-w-0 items-center gap-3">
-          <a className="secondary-button" href="/admin"><ArrowLeft size={16} /> Admin</a>
-          <div className="h-6 w-px" style={{ background: "var(--line)" }} />
+          {!publicToken ? <><a className="secondary-button" href="/admin"><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
           <div className="min-w-0">
             <h1 className="truncate font-display text-lg font-bold text-[var(--accent)]">{model?.name ?? "Model viewer"}</h1>
-            <p className="truncate text-xs" style={{ color: "var(--subtle)" }}>{model ? `${model.source_filename} / ${model.status}` : slug}</p>
+            <p className="truncate text-xs" style={{ color: "var(--subtle)" }}>{model ? ("source_filename" in model ? `${model.source_filename} / ${model.status}` : "Public read-only viewer") : (publicToken ? "Public read-only viewer" : slug)}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {model ? (
+          {model && !publicToken && "source_filename" in model ? (
             <>
               <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/original`}>STEP</a>
               {model.has_display_glb ? <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/display.glb`}><Download size={15} /> GLB</a> : null}
@@ -236,7 +240,7 @@ export function ViewerPage() {
               <p className="text-sm" style={{ color: "var(--subtle)" }}>{error}</p>
             </div>
           </div>
-        ) : !model?.has_display_glb ? (
+        ) : !hasDisplayGlb ? (
           <div className="absolute inset-0 grid place-items-center p-6">
             <div className="grid max-w-md place-items-center gap-3 rounded border p-8 text-center" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
               <Box className="text-[var(--accent)]" size={38} />

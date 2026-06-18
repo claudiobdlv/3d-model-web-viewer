@@ -43,10 +43,30 @@ export type JobRecord = {
   failed_at: string | null;
 };
 
+export type PublicShareRecord = {
+  id: string;
+  model_id: number;
+  token_hash: string;
+  token_prefix: string;
+  created_at: string;
+  revoked_at: string | null;
+  last_accessed_at: string | null;
+  access_count: number;
+};
+
+export type PublicShareModelRecord = ModelRecord & {
+  share_id: string;
+  token_prefix: string;
+  share_created_at: string;
+  last_accessed_at: string | null;
+  access_count: number;
+};
+
 const dbPath = path.join(dbRoot, "app.sqlite");
 fs.mkdirSync(dbRoot, { recursive: true });
 export const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA journal_mode = WAL");
+db.exec("PRAGMA foreign_keys = ON");
 
 export function initDb(): void {
   db.exec(`
@@ -90,6 +110,21 @@ export function initDb(): void {
       failed_at TEXT,
       FOREIGN KEY (model_id) REFERENCES models(id)
     );
+
+    CREATE TABLE IF NOT EXISTS public_shares (
+      id TEXT PRIMARY KEY,
+      model_id INTEGER NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      token_prefix TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      revoked_at TEXT,
+      last_accessed_at TEXT,
+      access_count INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS public_shares_model_active_idx
+      ON public_shares (model_id, revoked_at);
   `);
 
   ensureColumn("jobs", "started_at", "TEXT");
@@ -141,6 +176,75 @@ export function listModels(filter: { folderId?: number | null; unsortedOnly?: bo
 
 export function getModelBySlug(slug: string): ModelRecord | undefined {
   return db.prepare("SELECT * FROM models WHERE slug = ?").get(slug) as ModelRecord | undefined;
+}
+
+export function getModelById(id: number): ModelRecord | undefined {
+  return db.prepare("SELECT * FROM models WHERE id = ?").get(id) as ModelRecord | undefined;
+}
+
+export function createPublicShare(input: {
+  id: string;
+  modelId: number;
+  tokenHash: string;
+  tokenPrefix: string;
+}): PublicShareRecord {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      `UPDATE public_shares
+       SET revoked_at = CURRENT_TIMESTAMP
+       WHERE model_id = ? AND revoked_at IS NULL`
+    ).run(input.modelId);
+    db.prepare(
+      `INSERT INTO public_shares (id, model_id, token_hash, token_prefix)
+       VALUES (?, ?, ?, ?)`
+    ).run(input.id, input.modelId, input.tokenHash, input.tokenPrefix);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return db.prepare("SELECT * FROM public_shares WHERE id = ?").get(input.id) as PublicShareRecord;
+}
+
+export function getActivePublicShareForModel(modelId: number): PublicShareRecord | undefined {
+  return db.prepare(
+    `SELECT * FROM public_shares
+     WHERE model_id = ? AND revoked_at IS NULL
+     ORDER BY created_at DESC LIMIT 1`
+  ).get(modelId) as PublicShareRecord | undefined;
+}
+
+export function revokePublicSharesForModel(modelId: number): number {
+  const result = db.prepare(
+    `UPDATE public_shares
+     SET revoked_at = CURRENT_TIMESTAMP
+     WHERE model_id = ? AND revoked_at IS NULL`
+  ).run(modelId);
+  return Number(result.changes || 0);
+}
+
+export function getPublicShareModelByHash(tokenHash: string): PublicShareModelRecord | undefined {
+  return db.prepare(
+    `SELECT models.*,
+            public_shares.id AS share_id,
+            public_shares.token_prefix,
+            public_shares.created_at AS share_created_at,
+            public_shares.last_accessed_at,
+            public_shares.access_count
+     FROM public_shares
+     JOIN models ON models.id = public_shares.model_id
+     WHERE public_shares.token_hash = ? AND public_shares.revoked_at IS NULL`
+  ).get(tokenHash) as PublicShareModelRecord | undefined;
+}
+
+export function recordPublicShareAccess(shareId: string): void {
+  db.prepare(
+    `UPDATE public_shares
+     SET last_accessed_at = CURRENT_TIMESTAMP,
+         access_count = access_count + 1
+     WHERE id = ? AND revoked_at IS NULL`
+  ).run(shareId);
 }
 
 export function deleteModelBySlug(slug: string): { deletedJobs: number; deletedModels: number } {

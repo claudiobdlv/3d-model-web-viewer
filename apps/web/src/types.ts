@@ -40,3 +40,16 @@ export type JobRecord = {
 export type ConversionQuality = "low" | "medium" | "high";
 
 export type FolderSelection = "all" | "unsorted" | number;
+
+export type PublicShareResponse = {
+  token: string;
+  url: string;
+  model: Pick<ModelRecord, "id" | "slug" | "name">;
+  rotated: boolean;
+};
+
+export type PublicModel = {
+  name: string;
+  slug: string;
+  glb_url: string;
+};

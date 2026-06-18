@@ -13,6 +13,7 @@ import {
   MoreVertical,
   Pencil,
   Plus,
+  QrCode,
   RefreshCw,
   Search,
   Trash2,
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 import {
   createFolder as createFolderApi,
+  createPublicShare,
   deleteFolder as deleteFolderApi,
   deleteModel as deleteModelApi,
   listFolders,
@@ -28,6 +30,7 @@ import {
   moveModel as moveModelApi,
   renameFolder as renameFolderApi,
   renameModel as renameModelApi,
+  revokePublicShare,
   uploadModel
 } from "./api";
 import type { FolderRecord, FolderSelection, ModelRecord } from "./types";
@@ -44,12 +47,17 @@ import {
   statusLabel
 } from "./utils";
 import { ViewerPage } from "./viewer/ViewerPage";
+import { downloadPublicShareQr } from "./qr";
 import "./index.css";
 
 const root = createRoot(document.getElementById("root") as HTMLElement);
 type OpenMenu = { slug: string; x: number; y: number } | null;
 
 function App() {
+  if (window.location.pathname.startsWith("/public/")) {
+    const token = window.location.pathname.split("/").filter(Boolean)[1] ?? "";
+    return <ViewerPage publicToken={token} />;
+  }
   if (window.location.pathname.startsWith("/3dviewer/")) {
     return <ViewerPage />;
   }
@@ -426,6 +434,28 @@ function RowMenu({ menuRef, menu, model, onRename, onDelete }: {
 }) {
   if (!model) return null;
 
+  const canShare = ["ready", "viewer-ready"].includes(model.status) && Boolean(model.has_display_glb);
+
+  const generateQr = async () => {
+    try {
+      const share = await createPublicShare(model.id);
+      await downloadPublicShareQr(share.url, model.slug);
+      console.info(share.rotated ? "Public QR link rotated." : "Public QR link created.", share.url);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not generate public QR code.");
+    }
+  };
+
+  const revokeQr = async () => {
+    if (!window.confirm(`Revoke the active public QR link for "${model.name}"?`)) return;
+    try {
+      const revoked = await revokePublicShare(model.id);
+      window.alert(revoked ? "Public QR link revoked." : "No active public QR link was found.");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not revoke public QR link.");
+    }
+  };
+
   return (
     <div
       ref={menuRef}
@@ -440,6 +470,16 @@ function RowMenu({ menuRef, menu, model, onRename, onDelete }: {
       <MenuLink href={`/downloads/${encodeURIComponent(model.slug)}/display.glb`} disabled={!model.has_display_glb} icon={<Download size={15} />} label="Download GLB" />
       <MenuLink href={`/downloads/${encodeURIComponent(model.slug)}/original`} icon={<FileText size={15} />} label="Download STEP" />
       <MenuLink href={`/admin/logs/${encodeURIComponent(model.slug)}/conversion.log`} icon={<List size={15} />} label="Log" />
+      {canShare ? (
+        <>
+          <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-sm hover:bg-[var(--panel-strong)]" type="button" onClick={() => void generateQr()}>
+            <QrCode size={15} /> Generate QR code
+          </button>
+          <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-sm hover:bg-[var(--panel-strong)]" type="button" onClick={() => void revokeQr()}>
+            <QrCode size={15} /> Revoke public QR link
+          </button>
+        </>
+      ) : null}
       <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-sm hover:bg-[var(--panel-strong)]" type="button" onClick={() => onRename(model)}>
         <Pencil size={15} /> Rename
       </button>
