@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { WorkerClient, type WorkerJob } from "./client.js";
 import { loadConfig } from "./config.js";
 import { convertStepJob } from "./converterProcessor.js";
+import { nativeQualityPreset, resolveSemanticQuality } from "./quality.js";
 
 const config = loadConfig();
 const client = new WorkerClient(config);
@@ -44,7 +45,10 @@ async function pollOnce(): Promise<boolean> {
 }
 
 async function processJob(job: WorkerJob): Promise<void> {
+  const quality = resolveSemanticQuality(job.quality, config.quality);
+  const nativePreset = nativeQualityPreset(quality);
   console.log(`Processing job ${job.id} for ${job.modelSlug}`);
+  console.log(`Job quality: ${quality}; native XCAF preset: ${nativePreset}`);
   try {
     await client.startJob(job.id);
 
@@ -61,7 +65,7 @@ async function processJob(job: WorkerJob): Promise<void> {
       converterCli: config.converterCli,
       xcafConverterBin: config.xcafConverterBin,
       xcafColourMode: config.xcafColourMode,
-      quality: config.quality
+      quality
     });
 
     await client.completeJob(job.id, output);

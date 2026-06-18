@@ -28,11 +28,14 @@ export type JobRecord = {
   type: string;
   status: string;
   message: string | null;
+  quality: ConversionQuality;
   created_at: string;
   updated_at: string;
   started_at: string | null;
   completed_at: string | null;
   failed_at: string | null;
 };
+
+export type ConversionQuality = "low" | "medium" | "high";
 
 export type FolderSelection = "all" | "unsorted" | number;

@@ -10,6 +10,7 @@ import {
   markJobReady
 } from "../db.js";
 import { getLogDir, getModelDir, getUploadDir, isSafeSlug } from "../storage.js";
+import { workerJobPayload } from "../workerPayload.js";
 
 const developmentWorkerToken = "dev-worker-token";
 const workerToken = process.env.WORKER_API_TOKEN || developmentWorkerToken;
@@ -61,12 +62,7 @@ workerRouter.get("/jobs/next", (_req, res) => {
   }
 
   res.json({
-    job: {
-      id: job.id,
-      modelSlug: job.model_slug,
-      sourceFilename: job.source_filename,
-      downloadUrl: `/api/worker/jobs/${job.id}/source`
-    }
+    job: workerJobPayload(job)
   });
 });
 

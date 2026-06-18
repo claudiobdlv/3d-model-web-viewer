@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/*.test.ts",
     "dev": "tsx src/worker.ts",
     "start": "tsx src/worker.ts"
   },

@@ -6,6 +6,7 @@ export type WorkerJob = {
   id: number;
   modelSlug: string;
   sourceFilename: string;
+  quality?: "low" | "medium" | "high";
   downloadUrl: string;
 };
 

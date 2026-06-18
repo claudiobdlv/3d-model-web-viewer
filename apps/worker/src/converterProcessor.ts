@@ -1,6 +1,13 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  nativeDeflections,
+  nativeQualityPreset,
+  occtJsQualityPreset,
+  type ConversionQuality,
+  type NativeQualityPreset
+} from "./quality.js";
 
 export type ConverterProcessorInput = {
   slug: string;
@@ -10,7 +17,7 @@ export type ConverterProcessorInput = {
   converterCli: string;
   xcafConverterBin: string;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
-  quality: string;
+  quality: ConversionQuality;
 };
 
 export type ConverterProcessorOutput = {
@@ -29,14 +36,16 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   console.log(`Converter backend: ${input.converterBackend}`);
   console.log(`Converter input path: ${input.sourcePath}`);
   console.log(`Converter output path: ${jobDir}`);
-  console.log(`Converter quality: ${input.quality}`);
+  const nativePreset = nativeQualityPreset(input.quality);
+  console.log(`Semantic quality: ${input.quality}`);
+  console.log(`Native preset: ${nativePreset}`);
 
   if (input.converterBackend === "occt-js") {
     await runOcctJsConverter({
       converterCli: input.converterCli,
       sourcePath: input.sourcePath,
       outputDir: jobDir,
-      quality: input.quality
+      quality: occtJsQualityPreset(input.quality)
     });
   } else {
     await runXcafBaselineConverter({
@@ -55,6 +64,13 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   const conversionLogPath = path.join(jobDir, "conversion.log");
   const xcafReportPath = path.join(jobDir, "xcaf-report.json");
 
+  let nativeQualityDetails: NativeQualityDetails = {
+    preset: nativePreset,
+    linearDeflection: nativeDeflections[nativePreset].linear,
+    angularDeflection: nativeDeflections[nativePreset].angular,
+    relative: true
+  };
+
   if (input.converterBackend === "occt-js") {
     await assertFile(rawGlbPath, "occt-js converter did not produce display.raw.glb");
     await fs.promises.copyFile(rawGlbPath, displayGlbPath);
@@ -62,7 +78,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   } else {
     await assertFile(displayGlbPath, "xcaf-baseline converter did not produce display.glb");
     await assertFile(xcafReportPath, "xcaf-baseline converter did not produce xcaf-report.json");
-    await writeXcafCompatibilityFiles({
+    nativeQualityDetails = await writeXcafCompatibilityFiles({
       reportPath: xcafReportPath,
       statsPath,
       materialDebugPath,
@@ -87,6 +103,12 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
         generatedBy: "converter-worker",
         generatedAt: now,
         quality: input.quality,
+        nativeQualityPreset: nativeQualityDetails.preset,
+        nativeDeflection: {
+          linear: nativeQualityDetails.linearDeflection,
+          angular: nativeQualityDetails.angularDeflection,
+          relative: nativeQualityDetails.relative
+        },
         converterBackend: input.converterBackend
       },
       null,
@@ -143,7 +165,7 @@ async function runXcafBaselineConverter(input: {
   xcafConverterBin: string;
   sourcePath: string;
   outputDir: string;
-  quality: string;
+  quality: ConversionQuality;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
 }): Promise<void> {
   const stat = await fs.promises.stat(input.xcafConverterBin).catch(() => null);
@@ -151,16 +173,15 @@ async function runXcafBaselineConverter(input: {
     throw new Error(`xcaf-baseline converter binary is missing: ${input.xcafConverterBin}`);
   }
 
-  const nativeQuality = input.quality === "fast"
-    ? "preview"
-    : input.quality === "detailed"
-      ? "high"
-      : input.quality;
+  const nativeQuality = nativeQualityPreset(input.quality);
+  const deflection = nativeDeflections[nativeQuality];
 
   console.log(`XCAF colour mode: ${input.xcafColourMode}`);
   console.log("Converter colour space: raw");
   console.log(`Native XCAF binary: ${input.xcafConverterBin}`);
+  console.log(`Semantic quality: ${input.quality}`);
   console.log(`Native XCAF quality: ${nativeQuality}`);
+  console.log(`Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`);
 
   await spawnProcess(input.xcafConverterBin, [
     input.sourcePath,
@@ -178,8 +199,9 @@ async function runXcafBaselineConverter(input: {
     `Converter backend: xcaf-baseline`,
     `Input path: ${input.sourcePath}`,
     `Output path: ${input.outputDir}`,
-    `Quality: ${input.quality}`,
-    `Native quality: ${nativeQuality}`,
+    `Semantic quality: ${input.quality}`,
+    `Native preset: ${nativeQuality}`,
+    `Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`,
     `XCAF colour mode: ${input.xcafColourMode}`,
     `Colour space: raw`,
     `Material rules: disabled for xcaf-baseline`,
@@ -212,12 +234,17 @@ async function writeXcafCompatibilityFiles(input: {
   materialDebugPath: string;
   sourcePath: string;
   displayGlbPath: string;
-  quality: string;
-}): Promise<void> {
+  quality: ConversionQuality;
+}): Promise<NativeQualityDetails> {
   const report = JSON.parse(await fs.promises.readFile(input.reportPath, "utf8")) as {
     openCascadeVersion?: string;
     summary?: Record<string, unknown>;
-    quality?: { preset?: string };
+    quality?: {
+      preset?: NativeQualityPreset;
+      linearDeflection?: number;
+      angularDeflection?: number;
+      relative?: boolean;
+    };
     colourMode?: { mode?: string };
     colourSpace?: { mode?: string };
     finalGlbColourAudit?: unknown;
@@ -234,8 +261,12 @@ async function writeXcafCompatibilityFiles(input: {
     sourceFileName: path.basename(input.sourcePath),
     sourceFileSizeBytes: sourceStat.size,
     outputGlbSizeBytes: glbStat.size,
+    semanticQuality: input.quality,
     qualityPreset: input.quality,
     nativeQualityPreset: report.quality?.preset,
+    nativeLinearDeflection: report.quality?.linearDeflection,
+    nativeAngularDeflection: report.quality?.angularDeflection,
+    nativeRelativeDeflection: report.quality?.relative,
     openCascadeVersion: report.openCascadeVersion,
     colourMode: report.colourMode?.mode,
     colourSpace: report.colourSpace?.mode,
@@ -263,7 +294,22 @@ async function writeXcafCompatibilityFiles(input: {
 
   await fs.promises.writeFile(input.statsPath, `${JSON.stringify(stats, null, 2)}\n`);
   await fs.promises.writeFile(input.materialDebugPath, `${JSON.stringify(materialDebug, null, 2)}\n`);
+
+  const fallbackPreset = nativeQualityPreset(input.quality);
+  return {
+    preset: report.quality?.preset ?? fallbackPreset,
+    linearDeflection: report.quality?.linearDeflection ?? nativeDeflections[fallbackPreset].linear,
+    angularDeflection: report.quality?.angularDeflection ?? nativeDeflections[fallbackPreset].angular,
+    relative: report.quality?.relative ?? true
+  };
 }
+
+type NativeQualityDetails = {
+  preset: NativeQualityPreset;
+  linearDeflection: number;
+  angularDeflection: number;
+  relative: boolean;
+};
 
 async function assertFile(filePath: string, message: string): Promise<void> {
   const stat = await fs.promises.stat(filePath).catch(() => null);

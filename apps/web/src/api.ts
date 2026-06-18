@@ -1,4 +1,4 @@
-import type { FolderRecord, FolderSelection, JobRecord, ModelRecord } from "./types";
+import type { ConversionQuality, FolderRecord, FolderSelection, JobRecord, ModelRecord } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -68,10 +68,15 @@ export async function deleteModel(slug: string): Promise<void> {
   await request<{ ok: true }>(`/api/models/${encodeURIComponent(slug)}`, { method: "DELETE" });
 }
 
-export async function uploadModel(file: File, folderId: number | null): Promise<ModelRecord> {
+export async function uploadModel(
+  file: File,
+  folderId: number | null,
+  quality: ConversionQuality = "medium"
+): Promise<ModelRecord> {
   const form = new FormData();
   form.set("modelFile", file);
   if (folderId) form.set("folderId", String(folderId));
+  if (/\.(step|stp)$/i.test(file.name)) form.set("quality", quality);
 
   const response = await fetch("/api/models", {
     method: "POST",

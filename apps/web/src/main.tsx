@@ -486,6 +486,7 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
 }) {
   const [dragging, setDragging] = useState(false);
   const [target, setTarget] = useState<number | null>(targetFolderId);
+  const [quality, setQuality] = useState<"low" | "medium" | "high">("medium");
   const [queue, setQueue] = useState<Array<{ name: string; state: "selected" | "uploading" | "done" | "failed"; error?: string }>>([]);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const resolvedTargetName = target ? folders.find((folder) => folder.id === target)?.name ?? "Folder" : selection === "all" ? "Unsorted" : targetFolderName;
@@ -496,7 +497,7 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
     for (const file of accepted) {
       setQueue((items) => items.map((item) => item.name === file.name ? { ...item, state: "uploading" } : item));
       try {
-        await uploadModel(file, target);
+        await uploadModel(file, target, quality);
         setQueue((items) => items.map((item) => item.name === file.name ? { ...item, state: "done" } : item));
       } catch (error) {
         setQueue((items) => items.map((item) => item.name === file.name ? { ...item, state: "failed", error: error instanceof Error ? error.message : "Upload failed" } : item));
@@ -524,6 +525,26 @@ function UploadModal({ folders, selection, targetFolderId, targetFolderName, onC
               {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
             </select>
           </label>
+          <fieldset className="grid gap-2">
+            <legend className="text-sm font-bold">STEP conversion quality</legend>
+            <div className="grid grid-cols-3 gap-1 rounded border p-1" style={{ borderColor: "var(--line)", background: "var(--panel-soft)" }}>
+              {(["low", "medium", "high"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={quality === value}
+                  className="rounded px-3 py-2 text-sm font-bold capitalize transition"
+                  style={quality === value
+                    ? { color: "var(--panel)", background: "var(--accent)" }
+                    : { color: "var(--subtle)", background: "transparent" }}
+                  onClick={() => setQuality(value)}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs" style={{ color: "var(--subtle)" }}>Applies to STEP/STP conversion only. Medium is recommended.</p>
+          </fieldset>
           <div
             className="grid min-h-48 place-items-center rounded border-2 border-dashed p-6 text-center transition"
             style={{ borderColor: dragging ? "var(--accent)" : "var(--line)", background: dragging ? "var(--panel-strong)" : "var(--panel-soft)" }}

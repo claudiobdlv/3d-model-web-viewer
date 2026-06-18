@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { dbRoot } from "./storage.js";
+import { parseConversionQuality, type ConversionQuality } from "./quality.js";
 
 export type ModelRecord = {
   id: number;
@@ -33,6 +34,7 @@ export type JobRecord = {
   type: string;
   status: string;
   message: string | null;
+  quality: ConversionQuality;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -78,6 +80,7 @@ export function initDb(): void {
       type TEXT NOT NULL,
       status TEXT NOT NULL,
       message TEXT,
+      quality TEXT NOT NULL DEFAULT 'medium' CHECK (quality IN ('low', 'medium', 'high')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       started_at TEXT,
@@ -90,6 +93,7 @@ export function initDb(): void {
   ensureColumn("jobs", "started_at", "TEXT");
   ensureColumn("jobs", "completed_at", "TEXT");
   ensureColumn("jobs", "failed_at", "TEXT");
+  ensureColumn("jobs", "quality", "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn("models", "folder_id", "INTEGER REFERENCES folders(id)");
 }
 
@@ -163,13 +167,15 @@ export function createJob(input: {
   type: string;
   status: string;
   message?: string;
+  quality?: ConversionQuality;
 }): JobRecord {
+  const quality = parseConversionQuality(input.quality);
   const result = db
     .prepare(
-      `INSERT INTO jobs (model_id, model_slug, type, status, message)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO jobs (model_id, model_slug, type, status, message, quality)
+       VALUES (?, ?, ?, ?, ?, ?)`
     )
-    .run(input.modelId, input.modelSlug, input.type, input.status, input.message ?? null);
+    .run(input.modelId, input.modelSlug, input.type, input.status, input.message ?? null, quality);
 
   return db.prepare("SELECT * FROM jobs WHERE id = ?").get(result.lastInsertRowid) as JobRecord;
 }

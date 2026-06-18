@@ -20,6 +20,7 @@ import {
   getWorkerOutputDir,
   isSafeSlug
 } from "../storage.js";
+import { parseConversionQuality } from "../quality.js";
 
 const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
 
@@ -84,6 +85,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
 
   const sourceFilename = path.basename(req.file.originalname);
   const sourceExt = path.extname(sourceFilename).toLowerCase();
+  const quality = parseConversionQuality(req.body?.quality);
   const folderId = parseOptionalFolderId(req.body?.folderId);
   if (folderId !== null && !getFolderById(folderId)) {
     res.status(400).send("Selected folder was not found.");
@@ -100,6 +102,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
   fs.writeFileSync(sourcePath, req.file.buffer);
 
   const isGlb = sourceExt === ".glb";
+  const isStep = sourceExt === ".step" || sourceExt === ".stp";
   if (isGlb) {
     fs.copyFileSync(sourcePath, path.join(modelDir, "display.glb"));
   }
@@ -112,6 +115,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
     sourceExt,
     status,
     displayFile: isGlb ? "display.glb" : null,
+    quality: isStep ? quality : undefined,
     folderId,
     createdAt: new Date().toISOString()
   };
@@ -130,11 +134,14 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
   createJob({
     modelId: model.id,
     modelSlug: model.slug,
-    type: sourceExt === ".glb" ? "viewer-ready" : "step-to-glb",
+    type: isStep ? "step-to-glb" : "viewer-ready",
     status,
+    quality,
     message: isGlb
       ? "Uploaded GLB is ready for viewing."
-      : "Uploaded source model is queued for conversion."
+      : isStep
+        ? "Uploaded source model is queued for conversion."
+        : "Uploaded GLTF source is stored without conversion."
   });
 
   if (req.accepts(["json", "html"]) === "json") {
