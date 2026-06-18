@@ -148,7 +148,6 @@ export function ViewerPage() {
         root.updateMatrixWorld(true);
         if (progress === 1) {
           rotationAnimation = null;
-          frame();
         }
       }
       controls.update();
@@ -165,10 +164,18 @@ export function ViewerPage() {
       (gltf) => {
         if (disposed) return;
         // Three.js is Y-up. Keep source/GLB data untouched and rotate the
-        // displayed CAD root so its native Z axis is visually up.
+        // displayed CAD root so its native Z axis is visually up. Position
+        // the root at the model centre so user rotations stay visually fixed
+        // around the model instead of orbiting around the GLB origin.
+        const content = new THREE.Group();
+        content.add(gltf.scene);
+        content.updateMatrixWorld(true);
+        const pivot = new THREE.Box3().setFromObject(content).getCenter(new THREE.Vector3());
         root = new THREE.Group();
+        root.position.copy(pivot);
         root.rotation.x = -Math.PI / 2;
-        root.add(gltf.scene);
+        content.position.sub(pivot);
+        root.add(content);
         scene.add(root);
         selectable = [];
         root.traverse((object) => {
