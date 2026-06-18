@@ -12,6 +12,7 @@ export type WorkerConfig = {
   quality: string;
   runOnce: boolean;
   keepWorkerOutput: boolean;
+  maxModelArtifactBytes: number;
 };
 
 export function loadConfig(argv = process.argv): WorkerConfig {
@@ -46,8 +47,22 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     xcafColourMode: xcafColourMode as WorkerConfig["xcafColourMode"],
     quality,
     runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once"),
-    keepWorkerOutput: process.env.KEEP_WORKER_OUTPUT !== "false"
+    keepWorkerOutput: process.env.KEEP_WORKER_OUTPUT !== "false",
+    maxModelArtifactBytes: positiveInteger(
+      process.env.MAX_MODEL_ARTIFACT_BYTES,
+      1024 * 1024 * 1024,
+      "MAX_MODEL_ARTIFACT_BYTES"
+    )
   };
+}
+
+function positiveInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer number of bytes.`);
+  }
+  return parsed;
 }
 
 function trimTrailingSlash(value: string): string {

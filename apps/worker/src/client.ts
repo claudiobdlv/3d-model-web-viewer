@@ -37,6 +37,13 @@ export class WorkerClient {
     conversionLogPath: string;
     xcafReportPath?: string;
   }): Promise<void> {
+    const displayGlbBytes = (await fs.promises.stat(output.displayGlbPath)).size;
+    if (displayGlbBytes > this.config.maxModelArtifactBytes) {
+      throw new Error(
+        `Converted GLB is ${displayGlbBytes} bytes, exceeding MAX_MODEL_ARTIFACT_BYTES=${this.config.maxModelArtifactBytes} bytes.`
+      );
+    }
+
     const form = new FormData();
     form.set("display.glb", await fileBlob(output.displayGlbPath), "display.glb");
     form.set("manifest.json", await fileBlob(output.manifestPath), "manifest.json");

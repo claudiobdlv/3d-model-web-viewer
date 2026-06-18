@@ -2,24 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { ArrowLeft, Box, Download, Focus, MousePointer2, Move3D, X, ZoomIn } from "lucide-react";
+import { ArrowLeft, Box, Download, Focus, MousePointer2, Move3D, RotateCw, ZoomIn } from "lucide-react";
 import { getModel } from "../api";
 import type { ModelRecord } from "../types";
 
-type SelectedInfo = {
-  title: string;
-  subtitle: string;
-  merged: Record<string, unknown>;
-  sources: Array<{ source: string; name: string; value: Record<string, unknown> }>;
-};
+type MetadataSource = { source: string; name: string; value: Record<string, unknown> };
 
 export function ViewerPage() {
   const slug = useMemo(() => window.location.pathname.split("/").filter(Boolean).pop() ?? "", []);
   const [model, setModel] = useState<ModelRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<SelectedInfo | null>(null);
+  const [selectedName, setSelectedName] = useState("none");
   const canvasHost = useRef<HTMLDivElement | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
+  const rotateXRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     void getModel(slug)
@@ -62,7 +58,8 @@ export function ViewerPage() {
     fill.position.set(-5, 3, -4);
     scene.add(fill);
 
-    let root: THREE.Object3D | null = null;
+    let root: THREE.Group | null = null;
+    let xQuarterTurns = 0;
     let selectable: THREE.Object3D[] = [];
     let pointerStart: { x: number; y: number } | null = null;
     let disposed = false;
@@ -89,6 +86,13 @@ export function ViewerPage() {
       controls.update();
     };
     fitRef.current = frame;
+    rotateXRef.current = () => {
+      if (!root) return;
+      xQuarterTurns = (xQuarterTurns + 1) % 4;
+      root.rotation.x = -Math.PI / 2 + xQuarterTurns * Math.PI / 2;
+      root.updateMatrixWorld(true);
+      frame();
+    };
 
     const onPointerDown = (event: PointerEvent) => {
       pointerStart = { x: event.clientX, y: event.clientY };
@@ -108,7 +112,7 @@ export function ViewerPage() {
       const raycaster = new THREE.Raycaster();
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObjects(selectable, true)[0];
-      if (hit) setSelected(toSelectedInfo(hit.object));
+      setSelectedName(hit ? selectedDisplayName(hit.object) : "none");
     };
 
     const animate = () => {
@@ -127,7 +131,11 @@ export function ViewerPage() {
       `/model-files/${encodeURIComponent(slug)}/display.glb`,
       (gltf) => {
         if (disposed) return;
-        root = gltf.scene;
+        // Three.js is Y-up. Keep source/GLB data untouched and rotate the
+        // displayed CAD root so its native Z axis is visually up.
+        root = new THREE.Group();
+        root.rotation.x = -Math.PI / 2;
+        root.add(gltf.scene);
         scene.add(root);
         selectable = [];
         root.traverse((object) => {
@@ -144,6 +152,7 @@ export function ViewerPage() {
     return () => {
       disposed = true;
       fitRef.current = null;
+      rotateXRef.current = null;
       window.removeEventListener("resize", resize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
@@ -201,74 +210,43 @@ export function ViewerPage() {
 
         <div ref={canvasHost} className="h-full w-full" />
 
-        <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 shadow-panel backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 88%, transparent)", color: "var(--muted)" }}>
+        <div className="absolute bottom-4 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 shadow-panel backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 88%, transparent)", color: "var(--muted)" }}>
           <MousePointer2 size={17} />
           <Move3D size={17} />
           <ZoomIn size={17} />
           <button className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Fit model" aria-label="Fit model" onClick={() => fitRef.current?.()}>
             <Focus size={17} />
           </button>
+          <button className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2 hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Rotate model 90 degrees around X" aria-label="Rotate X 90 degrees" onClick={() => rotateXRef.current?.()}>
+            <RotateCw size={17} /><span className="hidden text-xs font-bold sm:inline">Rotate X 90°</span>
+          </button>
+          <div className="h-5 w-px shrink-0" style={{ background: "var(--line)" }} />
+          <span className="min-w-0 max-w-[46vw] truncate text-xs" title={selectedName === "none" ? undefined : selectedName}>
+            <strong className="text-[var(--text)]">Selected:</strong> {selectedName}
+          </span>
         </div>
-
-        {selected ? <ObjectInfo info={selected} onClose={() => setSelected(null)} /> : null}
       </main>
     </div>
   );
 }
 
-function ObjectInfo({ info, onClose }: { info: SelectedInfo; onClose: () => void }) {
-  const fields: Array<[string, unknown]> = [
-    ["Object/block/component name", firstValue(info.merged, ["displayName", "name", "blockName", "componentName"]) ?? info.title],
-    ["Layer", firstValue(info.merged, ["layerNames", "layers", "layerName", "layer"])],
-    ["Colour source", firstValue(info.merged, ["colourSource", "colorSource", "materialSource"])],
-    ["Geometry source", firstValue(info.merged, ["geometrySource"])],
-    ["STEP IDs", firstValue(info.merged, ["stepEntityIds", "stepEntityId", "stepStyledItemId"])],
-    ["XCAF label path", firstValue(info.merged, ["xcafLabelPath", "labelPath"])],
-    ["Referred label path", firstValue(info.merged, ["referredLabelPath"])]
-  ];
-
-  return (
-    <aside className="absolute right-3 top-3 max-h-[calc(100%-1.5rem)] w-[min(390px,calc(100%-1.5rem))] overflow-auto rounded border shadow-panel backdrop-blur md:right-5 md:top-5" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 92%, transparent)" }}>
-      <div className="flex items-start justify-between gap-3 border-b p-4" style={{ borderColor: "var(--line)", background: "var(--panel-strong)" }}>
-        <div className="min-w-0">
-          <span className="eyebrow">Object info</span>
-          <h2 className="mt-1 truncate font-display text-lg font-bold text-[var(--accent)]">{info.title}</h2>
-          <p className="truncate text-xs" style={{ color: "var(--subtle)" }}>{info.subtitle}</p>
-        </div>
-        <button className="icon-button" type="button" aria-label="Close object info" onClick={onClose}><X size={17} /></button>
-      </div>
-      <div className="grid gap-3 p-4">
-        {fields.map(([label, value]) => (
-          <div key={label} className="grid grid-cols-1 gap-1 border-b pb-3" style={{ borderColor: "var(--line-soft)" }}>
-            <dt className="font-display text-[10px] font-extrabold uppercase tracking-[0.06em]" style={{ color: "var(--subtle)" }}>{label}</dt>
-            <dd className="min-w-0 break-words text-xs">{formatValue(value)}</dd>
-          </div>
-        ))}
-        <details>
-          <summary className="cursor-pointer font-display text-xs font-extrabold uppercase tracking-[0.06em] text-[var(--accent)]">Advanced raw metadata</summary>
-          <pre className="mt-3 max-h-72 overflow-auto rounded border p-3 font-mono text-[11px]" style={{ borderColor: "var(--line)", background: "var(--bg)", color: "var(--muted)" }}>
-            {JSON.stringify({ merged: info.merged, sources: info.sources }, null, 2)}
-          </pre>
-        </details>
-      </div>
-    </aside>
-  );
-}
-
-function toSelectedInfo(object: THREE.Object3D): SelectedInfo {
+function selectedDisplayName(object: THREE.Object3D): string {
   const sources = metadataSources(object);
-  const merged = Object.assign({}, ...sources.map((source) => source.value)) as Record<string, unknown>;
-  const title = String(firstValue(merged, ["displayName", "name", "blockName", "componentName"]) ?? object.name ?? "Selected object");
-  return {
-    title,
-    subtitle: object.name || object.type || "",
-    merged,
-    sources
-  };
+  for (const key of ["displayName", "objectName", "blockName", "componentName"]) {
+    for (const source of sources) {
+      const name = readableName(source.value[key]);
+      if (name) return name;
+    }
+  }
+  for (const source of sources) {
+    const layer = readableName(firstValue(source.value, ["layerNames", "layerName", "layer"]));
+    if (layer) return layer;
+  }
+  return readableName(object.name) ?? "Unnamed object";
 }
 
-function metadataSources(object: THREE.Object3D): SelectedInfo["sources"] {
-  const sources: SelectedInfo["sources"] = [];
+function metadataSources(object: THREE.Object3D): MetadataSource[] {
+  const sources: MetadataSource[] = [];
   let current: THREE.Object3D | null = object;
   while (current) {
     if (hasMetadata(current.userData)) {
@@ -305,9 +283,10 @@ function firstValue(object: Record<string, unknown>, keys: string[]): unknown {
   return undefined;
 }
 
-function formatValue(value: unknown): React.ReactNode {
-  if (value === undefined || value === null || value === "") return <span style={{ color: "var(--subtle)" }}>Not available</span>;
-  if (Array.isArray(value)) return value.join(", ");
-  if (typeof value === "object") return <code className="break-words font-mono text-[11px]" style={{ color: "var(--muted)" }}>{JSON.stringify(value)}</code>;
-  return String(value);
+function readableName(value: unknown): string | undefined {
+  if (Array.isArray(value)) value = value.find((item) => readableName(item));
+  if (typeof value !== "string") return undefined;
+  const name = value.trim();
+  if (!name || /^=>\s*\[[\d:]+\]$/.test(name) || /^\d+(?::\d+)+$/.test(name)) return undefined;
+  return name;
 }

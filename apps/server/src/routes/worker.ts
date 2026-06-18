@@ -13,6 +13,12 @@ import { getLogDir, getModelDir, getUploadDir, isSafeSlug } from "../storage.js"
 
 const developmentWorkerToken = "dev-worker-token";
 const workerToken = process.env.WORKER_API_TOKEN || developmentWorkerToken;
+const defaultMaxModelArtifactBytes = 1024 * 1024 * 1024;
+const maxModelArtifactBytes = readPositiveInteger(
+  process.env.MAX_MODEL_ARTIFACT_BYTES,
+  defaultMaxModelArtifactBytes,
+  "MAX_MODEL_ARTIFACT_BYTES"
+);
 
 if (!process.env.WORKER_API_TOKEN) {
   console.warn(
@@ -24,7 +30,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     // Converted GLBs can be substantially larger than their STEP sources.
-    fileSize: 512 * 1024 * 1024
+    fileSize: maxModelArtifactBytes
   }
 });
 
@@ -208,4 +214,13 @@ function getValidStepJob(jobId: number) {
   }
 
   return job;
+}
+
+function readPositiveInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer number of bytes.`);
+  }
+  return parsed;
 }

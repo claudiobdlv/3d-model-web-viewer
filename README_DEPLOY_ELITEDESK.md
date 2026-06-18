@@ -45,6 +45,7 @@ DATA_DIR=/app/data
 SERVER_URL=http://server:3009
 POLL_INTERVAL_SECONDS=15
 WORKER_OUTPUT_DIR=/app/worker-output
+MAX_MODEL_ARTIFACT_BYTES=1073741824
 CONVERTER_CLI=/app/apps/converter/src/cli.js
 CONVERTER_BACKEND=occt-js
 XCAF_CONVERTER_BIN=/app/bin/xcaf-step-to-glb
@@ -53,6 +54,10 @@ CONVERTER_QUALITY=high
 MATERIAL_RULES_MODE=fallback
 MATERIAL_RULES_PATH=/app/config/material-rules.json
 ```
+
+`MAX_MODEL_ARTIFACT_BYTES` controls only the converted model artifact handoff
+from worker to server. It defaults to 1 GiB; the original admin upload limit is
+configured separately.
 
 Converter quality presets:
 
@@ -122,6 +127,11 @@ Open:
 
 - Protected admin/upload: `http://192.168.1.200:3009/admin`
 - Shared read-only viewer link: `http://192.168.1.200:3009/3dviewer/<slug>`
+
+The browser viewer keeps converted GLBs unchanged. It wraps the loaded scene in
+a Three.js group rotated `-90°` around X so source CAD Z is visually up in the
+Y-up viewer. The bottom-toolbar `Rotate X 90°` control adds quarter turns to
+that wrapper; picking and embedded object metadata remain on the GLB children.
 
 The admin page uses HTTP Basic Auth. The username can be anything; the password
 must match `ADMIN_PASSWORD`.

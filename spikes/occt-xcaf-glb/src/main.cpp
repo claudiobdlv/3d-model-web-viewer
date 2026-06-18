@@ -116,6 +116,9 @@ struct MeshPrimitive {
   std::string labelPath;
   std::string instancePath;
   std::string displayName;
+  std::string objectName;
+  std::string blockName;
+  std::string componentName;
   std::string layer;
   std::string colourSource;
   std::string materialSource;
@@ -351,6 +354,19 @@ std::string labelName(const TDF_Label& label) {
 
 std::string safeName(const std::string& value, const std::string& fallback) {
   return value.empty() ? fallback : value;
+}
+
+bool isRawLabelName(const std::string& value) {
+  if (value.empty()) return true;
+  if (value.rfind("=>[", 0) == 0 && value.back() == ']') return true;
+  return std::all_of(value.begin(), value.end(), [](const unsigned char c) {
+    return std::isdigit(c) || c == ':';
+  });
+}
+
+std::string readableLabelName(const TDF_Label& label) {
+  const std::string value = label.IsNull() ? "" : labelName(label);
+  return isRawLabelName(value) ? "" : value;
 }
 
 std::string shapeTypeName(const TopAbs_ShapeEnum type) {
@@ -1775,6 +1791,7 @@ void tessellateLabel(
     const Colour& inheritedColour,
     const std::vector<LayerInfo>& inheritedLayers,
     const std::string& parentChain,
+    const std::string& parentDisplayName,
   std::vector<MeshPrimitive>& primitives,
   Stats& stats) {
   stats.labelsProcessed += 1;
@@ -1795,17 +1812,21 @@ void tessellateLabel(
   const std::string labelPath = labelEntry(label);
   const std::string effectiveInstancePath = instancePath.empty() ? labelPath : instancePath;
   const std::string referredPath = referred.IsNull() ? "" : labelEntry(referred);
-  const std::string referredName = referred.IsNull() ? "" : labelName(referred);
+  const std::string objectName = readableLabelName(label);
+  const std::string referredName = readableLabelName(referred);
   const std::string parentLabelPath = label.Father().IsNull() ? "" : labelEntry(label.Father());
-  const std::string displayName = safeName(labelName(label), safeName(referredName, labelPath));
-  const std::vector<std::string> rawStyleNames = {displayName, referredName, labelName(label), referredPath, labelPath};
-  if (!displayName.empty() && displayName != labelPath) {
-    stats.namedObjects += 1;
-  }
   const auto instanceLayers = collectLayerInfos(layerTool, label);
   const auto referredLayers = referred.IsNull() ? std::vector<LayerInfo>() : collectLayerInfos(layerTool, referred);
   const auto layers = mergeLayers(mergeLayers(instanceLayers, referredLayers), inheritedLayers);
   const std::string layer = firstLayerName(layers);
+  const std::string displayName = safeName(
+      objectName,
+      safeName(parentDisplayName, safeName(referredName, safeName(layer, "Unnamed object"))));
+  const std::vector<std::string> rawStyleNames = {
+      displayName, referredName, objectName, labelName(label), referredPath, labelPath};
+  if (displayName != "Unnamed object") {
+    stats.namedObjects += 1;
+  }
   if (!layer.empty()) {
     stats.layers.insert(layer);
   }
@@ -2011,6 +2032,9 @@ void tessellateLabel(
       primitive.labelPath = labelPath;
       primitive.instancePath = effectiveInstancePath;
       primitive.displayName = displayName;
+      primitive.objectName = objectName;
+      primitive.blockName = parentDisplayName;
+      primitive.componentName = referredName;
       primitive.layer = primitiveLayer;
       primitive.colourSource = colour.source;
       primitive.materialSource = colour.materialSource;
@@ -2136,6 +2160,7 @@ void traverse(
     const Colour& inheritedColour,
     const std::vector<LayerInfo>& inheritedLayers,
     const std::string& parentChain,
+    const std::string& parentDisplayName,
     std::vector<MeshPrimitive>& primitives,
     Stats& stats) {
   TDF_LabelSequence children;
@@ -2148,6 +2173,9 @@ void traverse(
   const auto currentLayers = collectLabelAndReferredLayers(layerTool, label, currentReferred);
   const auto childInheritedLayers = mergeLayers(inheritedLayers, currentLayers);
   const std::string currentParentChain = appendChain(parentChain, labelPath);
+  const std::string currentDisplayName = safeName(
+      readableLabelName(label),
+      safeName(readableLabelName(currentReferred), parentDisplayName));
   bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
   TopLoc_Location childAccumulatedLocation = accumulatedLocation;
   std::string childTransformSource = transformSource;
@@ -2196,6 +2224,7 @@ void traverse(
           childInherited,
           childInheritedLayers,
           currentParentChain,
+          currentDisplayName,
           primitives,
           stats);
     }
@@ -2217,6 +2246,7 @@ void traverse(
       inheritedColour,
       inheritedLayers,
       parentChain,
+      parentDisplayName,
       primitives,
       stats);
 }
@@ -2377,8 +2407,9 @@ void writeGlb(
     json << "\"xcafLabelPath\":"; writeString(json, primitive.labelPath); json << ",";
     json << "\"instancePath\":"; writeString(json, primitive.instancePath); json << ",";
     json << "\"displayName\":"; writeString(json, primitive.displayName); json << ",";
-    json << "\"blockName\":"; writeString(json, primitive.displayName); json << ",";
-    json << "\"componentName\":"; writeString(json, primitive.originalStepName); json << ",";
+    json << "\"objectName\":"; writeString(json, primitive.objectName); json << ",";
+    json << "\"blockName\":"; writeString(json, primitive.blockName); json << ",";
+    json << "\"componentName\":"; writeString(json, primitive.componentName); json << ",";
     json << "\"layer\":"; writeString(json, primitive.layer); json << ",";
     json << "\"layerNames\":"; writeString(json, primitive.layer); json << ",";
     json << "\"colourSource\":"; writeString(json, primitive.colourSource); json << ",";
@@ -2435,6 +2466,12 @@ void writeGlb(
     json << "\"selectableId\":"; writeString(json, primitives[i].instancePath); json << ",";
     json << "\"parentObjectId\":"; writeString(json, primitives[i].instancePath); json << ",";
     json << "\"displayName\":"; writeString(json, primitives[i].displayName); json << ",";
+    json << "\"objectName\":"; writeString(json, primitives[i].objectName); json << ",";
+    json << "\"blockName\":"; writeString(json, primitives[i].blockName); json << ",";
+    json << "\"componentName\":"; writeString(json, primitives[i].componentName); json << ",";
+    json << "\"layerNames\":"; writeString(json, primitives[i].layer); json << ",";
+    json << "\"xcafLabelPath\":"; writeString(json, primitives[i].labelPath); json << ",";
+    json << "\"referredLabelPath\":"; writeString(json, primitives[i].originalStepLabel); json << ",";
     json << "\"stepEntityIds\":["; writeString(json, primitives[i].rawStepTargetId); json << "],";
     json << "\"stepStyledItemId\":"; writeString(json, primitives[i].rawStepStyledItemId); json << ",";
     json << "\"colourSource\":"; writeString(json, primitives[i].colourSource); json << ",";
@@ -3297,6 +3334,7 @@ int main(int argc, char** argv) {
           false,
           noInheritedColour,
           noInheritedLayers,
+          "",
           "",
           primitives,
           stats);

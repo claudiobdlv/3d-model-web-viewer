@@ -20,6 +20,7 @@ if (config.converterBackend === "xcaf-baseline") {
   console.log(`Material rules mode: ${process.env.MATERIAL_RULES_MODE || "fallback"}`);
 }
 console.log(`Keep worker output: ${config.keepWorkerOutput}`);
+console.log(`Maximum model artifact: ${config.maxModelArtifactBytes} bytes`);
 console.log(`Run once: ${config.runOnce}`);
 
 while (true) {

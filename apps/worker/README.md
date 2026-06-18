@@ -9,6 +9,7 @@ This worker polls the server-side processing contract and converts uploaded STEP
 - `POLL_INTERVAL_SECONDS`: delay between polls. Defaults to `15`.
 - `WORKER_OUTPUT_DIR`: local working directory. Defaults to `./worker-output`.
 - `KEEP_WORKER_OUTPUT`: keep downloaded source and intermediate converter output after success. Defaults to `true`; set to `false` to clean the per-job worker-output directory after the server accepts the completed job.
+- `MAX_MODEL_ARTIFACT_BYTES`: maximum converted `display.glb` size accepted by both worker and server. Defaults to `1073741824` (1 GiB). The worker reports the actual GLB size and configured limit before upload when exceeded.
 - `RUN_ONCE`: set to `true` to process at most one job and exit.
 - `CONVERTER_BACKEND`: `occt-js` or `xcaf-baseline`. Defaults to `occt-js`.
 - `CONVERTER_CLI`: JavaScript `occt-import-js` converter path for `occt-js`.

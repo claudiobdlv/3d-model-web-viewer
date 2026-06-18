@@ -11,6 +11,7 @@ services:
       PORT: 3009
       DATA_DIR: /app/data
       WORKER_OUTPUT_DIR: /app/data/worker-output
+      MAX_MODEL_ARTIFACT_BYTES: ${MAX_MODEL_ARTIFACT_BYTES:-1073741824}
     ports:
       - "3009:3009"
     volumes:
@@ -35,6 +36,7 @@ services:
       CONVERTER_CLI: /app/apps/converter/src/cli.js
       XCAF_CONVERTER_BIN: /app/bin/xcaf-step-to-glb
       MATERIAL_RULES_PATH: /app/config/material-rules.json
+      MAX_MODEL_ARTIFACT_BYTES: ${MAX_MODEL_ARTIFACT_BYTES:-1073741824}
     volumes:
       - ../data/worker-output:/app/worker-output
       - ../config/material-rules.json:/app/config/material-rules.json:ro
