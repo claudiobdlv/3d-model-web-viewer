@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { ArrowLeft, Box, Download, Focus, Moon, MousePointer2, Move3D, Sun, X, ZoomIn } from "lucide-react";
+import { ArrowLeft, Box, Download, Focus, MousePointer2, Move3D, X, ZoomIn } from "lucide-react";
 import { getModel } from "../api";
-import type { ModelRecord, ThemeMode } from "../types";
+import type { ModelRecord } from "../types";
 
 type SelectedInfo = {
   title: string;
@@ -13,7 +13,7 @@ type SelectedInfo = {
   sources: Array<{ source: string; name: string; value: Record<string, unknown> }>;
 };
 
-export function ViewerPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggleTheme: () => void }) {
+export function ViewerPage() {
   const slug = useMemo(() => window.location.pathname.split("/").filter(Boolean).pop() ?? "", []);
   const [model, setModel] = useState<ModelRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +32,7 @@ export function ViewerPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggl
 
     const host = canvasHost.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(theme === "dark" ? 0x0b0d10 : 0xf4f7fb);
+    scene.background = new THREE.Color(0x0b0d10);
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -159,13 +159,6 @@ export function ViewerPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggl
     };
   }, [model?.has_display_glb, slug]);
 
-  useEffect(() => {
-    const canvas = canvasHost.current?.querySelector("canvas");
-    if (!canvas) return;
-    const color = theme === "dark" ? "#0b0d10" : "#f4f7fb";
-    canvas.style.background = color;
-  }, [theme]);
-
   return (
     <div className="h-screen overflow-hidden" style={{ background: "var(--bg)", color: "var(--text)" }}>
       <header className="relative z-20 flex min-h-14 items-center justify-between gap-3 border-b px-3 md:px-4" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
@@ -184,9 +177,6 @@ export function ViewerPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggl
               {model.has_display_glb ? <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/display.glb`}><Download size={15} /> GLB</a> : null}
             </>
           ) : null}
-          <button className="icon-button" type="button" onClick={onToggleTheme} aria-label={theme === "dark" ? "Use light mode" : "Use dark mode"}>
-            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-          </button>
         </div>
       </header>
 
@@ -210,18 +200,6 @@ export function ViewerPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggl
         ) : null}
 
         <div ref={canvasHost} className="h-full w-full" />
-
-        <div className="pointer-events-none absolute bottom-5 left-5 hidden h-28 w-28 md:block">
-          <svg viewBox="0 0 100 100" className="h-full w-full">
-            <line x1="50" x2="86" y1="50" y2="50" stroke="#ff6464" strokeWidth="2" />
-            <text x="88" y="54" fill="#ff6464" fontSize="10" fontWeight="800">X</text>
-            <line x1="50" x2="50" y1="50" y2="14" stroke="#4ade80" strokeWidth="2" />
-            <text x="47" y="12" fill="#4ade80" fontSize="10" fontWeight="800">Y</text>
-            <line x1="50" x2="29" y1="50" y2="71" stroke="#6d8dff" strokeWidth="2" />
-            <text x="19" y="79" fill="#6d8dff" fontSize="10" fontWeight="800">Z</text>
-            <circle cx="50" cy="50" r="3" fill="var(--text)" />
-          </svg>
-        </div>
 
         <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 shadow-panel backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 88%, transparent)", color: "var(--muted)" }}>
           <MousePointer2 size={17} />

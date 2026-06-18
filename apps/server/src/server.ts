@@ -11,6 +11,7 @@ import {
   getLogDir,
   getModelDir,
   getUploadDir,
+  getWorkerOutputDir,
   isSafeSlug,
   publicRoot,
   webRoot
@@ -157,9 +158,13 @@ app.get("/admin/logs/:slug/conversion.log", requireAdmin, (req, res) => {
     return;
   }
 
-  const filePath = path.join(getLogDir(slug), "conversion.log");
-  if (!fs.existsSync(filePath)) {
-    res.status(404).send("Not found");
+  const filePath = [
+    path.join(getLogDir(slug), "conversion.log"),
+    path.join(getWorkerOutputDir(slug), "conversion.log")
+  ].find((candidate) => fs.existsSync(candidate));
+
+  if (!filePath) {
+    res.type("text/plain").send(`No conversion log is available for "${slug}".`);
     return;
   }
 

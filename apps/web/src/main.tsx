@@ -10,13 +10,11 @@ import {
   FolderOpen,
   List,
   Loader2,
-  Moon,
   MoreVertical,
   Pencil,
   Plus,
   RefreshCw,
   Search,
-  Sun,
   Trash2,
   Upload,
   X
@@ -32,8 +30,7 @@ import {
   renameModel as renameModelApi,
   uploadModel
 } from "./api";
-import type { FolderRecord, FolderSelection, ModelRecord, ThemeMode } from "./types";
-import { applyTheme, initialTheme, toggleTheme } from "./theme";
+import type { FolderRecord, FolderSelection, ModelRecord } from "./types";
 import {
   activeStatuses,
   fileKind,
@@ -52,20 +49,14 @@ const root = createRoot(document.getElementById("root") as HTMLElement);
 type OpenMenu = { slug: string; x: number; y: number } | null;
 
 function App() {
-  const [theme, setTheme] = useState<ThemeMode>(() => initialTheme());
-
-  useEffect(() => {
-    applyTheme(theme);
-  }, [theme]);
-
   if (window.location.pathname.startsWith("/3dviewer/")) {
-    return <ViewerPage theme={theme} onToggleTheme={() => setTheme(toggleTheme(theme))} />;
+    return <ViewerPage />;
   }
 
-  return <AdminPage theme={theme} onToggleTheme={() => setTheme(toggleTheme(theme))} />;
+  return <AdminPage />;
 }
 
-function AdminPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggleTheme: () => void }) {
+function AdminPage() {
   const [folders, setFolders] = useState<FolderRecord[]>([]);
   const [models, setModels] = useState<ModelRecord[]>([]);
   const [selection, setSelection] = useState<FolderSelection>("all");
@@ -153,7 +144,6 @@ function AdminPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggleTheme: 
             <Upload size={16} />
             Upload
           </button>
-          <ThemeButton theme={theme} onClick={onToggleTheme} />
         </div>
       </header>
 
@@ -257,14 +247,6 @@ function AdminPage({ theme, onToggleTheme }: { theme: ThemeMode; onToggleTheme: 
   );
 }
 
-function ThemeButton({ theme, onClick }: { theme: ThemeMode; onClick: () => void }) {
-  return (
-    <button className="icon-button" type="button" aria-label={theme === "dark" ? "Use light mode" : "Use dark mode"} title={theme === "dark" ? "Use light mode" : "Use dark mode"} onClick={onClick}>
-      {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-    </button>
-  );
-}
-
 function FolderList({ folders, models, selection, onSelect, onRefresh }: {
   folders: FolderRecord[];
   models: ModelRecord[];
@@ -301,7 +283,11 @@ function FolderList({ folders, models, selection, onSelect, onRefresh }: {
                   Rename
                 </button>
                 <button className="secondary-button h-7 px-2 text-xs text-[var(--failed)]" type="button" onClick={async () => {
-                  if (!window.confirm(`Delete empty folder "${item.name}"?`)) return;
+                  if (item.count > 0) {
+                    window.alert(`This folder contains ${item.count} models. Move or delete the models before deleting this folder.`);
+                    return;
+                  }
+                  if (!window.confirm(`Delete folder "${item.name}"?`)) return;
                   await deleteFolderApi(item.id);
                   await onRefresh();
                 }}>

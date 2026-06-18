@@ -36,5 +36,3 @@ export type JobRecord = {
 };
 
 export type FolderSelection = "all" | "unsorted" | number;
-
-export type ThemeMode = "dark" | "light";

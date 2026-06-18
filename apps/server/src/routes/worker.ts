@@ -23,7 +23,15 @@ if (!process.env.WORKER_API_TOKEN) {
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 250 * 1024 * 1024
+    // Converted GLBs can be substantially larger than their STEP sources.
+    fileSize: 512 * 1024 * 1024
+  }
+});
+
+const failureUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024
   }
 });
 
@@ -152,7 +160,7 @@ workerRouter.post(
   }
 );
 
-workerRouter.post("/jobs/:jobId/fail", (req, res) => {
+workerRouter.post("/jobs/:jobId/fail", failureUpload.single("conversion.log"), (req, res) => {
   const jobId = Number(req.params.jobId);
   const job = getValidStepJob(jobId);
   if (!job) {
@@ -164,6 +172,12 @@ workerRouter.post("/jobs/:jobId/fail", (req, res) => {
     typeof req.body?.message === "string" && req.body.message.trim()
       ? req.body.message.trim().slice(0, 2000)
       : "Worker failed without an error message.";
+
+  if (req.file) {
+    const logDir = getLogDir(job.model_slug);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(logDir, "conversion.log"), req.file.buffer);
+  }
 
   markJobFailed(job.id, message);
   res.json({ ok: true, status: "failed" });

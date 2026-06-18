@@ -75,7 +75,8 @@ async function processJob(job: WorkerJob): Promise<void> {
     console.error(`Job ${job.id} failed: ${message}`);
 
     try {
-      await client.failJob(job.id, message);
+      const conversionLogPath = path.join(config.outputDir, job.modelSlug, "conversion.log");
+      await client.failJob(job.id, message, conversionLogPath);
     } catch (failError) {
       const failMessage = failError instanceof Error ? failError.message : "Unknown fail-reporting error.";
       console.error(`Could not report failure for job ${job.id}: ${failMessage}`);

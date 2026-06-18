@@ -53,13 +53,16 @@ export class WorkerClient {
     });
   }
 
-  async failJob(jobId: number, message: string): Promise<void> {
+  async failJob(jobId: number, message: string, conversionLogPath?: string): Promise<void> {
+    const form = new FormData();
+    form.set("message", message);
+    if (conversionLogPath && fs.existsSync(conversionLogPath)) {
+      form.set("conversion.log", await fileBlob(conversionLogPath), "conversion.log");
+    }
+
     await this.request(`/api/worker/jobs/${jobId}/fail`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ message })
+      body: form
     });
   }
 
