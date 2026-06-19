@@ -54,7 +54,7 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   assert.equal((await fetch(`${origin}/public/${share.token}`)).status, 200);
   const metadata = await fetch(`${origin}/public/${share.token}/model.json`);
   assert.equal(metadata.status, 200);
-  assert.deepEqual(Object.keys(await metadata.json()).sort(), ["glb_url", "name", "slug"]);
+  assert.deepEqual(Object.keys(await metadata.json()).sort(), ["default_view_json", "glb_url", "name", "slug"]);
   assert.equal((await fetch(`${origin}/public/${share.token}/model.glb`)).status, 200);
   assert.equal((await fetch(`${origin}/public/${share.token}/original`)).status, 404);
   assert.equal((await fetch(`${origin}/api/models`)).status, 401);

@@ -10,7 +10,8 @@ import {
   getModelBySlug,
   listModels,
   moveModelToFolder,
-  renameModel
+  renameModel,
+  saveModelDefaultView
 } from "../db.js";
 import {
   createSlug,
@@ -194,6 +195,83 @@ modelsRouter.patch("/:slug/folder", (req, res) => {
   }
 
   res.json(moveModelToFolder(slug, folderId));
+});
+
+modelsRouter.post("/:slug/default-view", (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    if (!isSafeSlug(slug)) {
+      res.status(400).json({ error: "Invalid model slug." });
+      return;
+    }
+
+    const model = getModelBySlug(slug);
+    if (!model) {
+      res.status(404).json({ error: "Model not found." });
+      return;
+    }
+
+    const { defaultView } = req.body;
+    let defaultViewJson: string | null = null;
+
+    if (defaultView !== undefined && defaultView !== null) {
+      if (typeof defaultView !== "object") {
+        res.status(400).json({ error: "Invalid defaultView format." });
+        return;
+      }
+
+      const { version, cameraPosition, target, rootQuaternion, fov } = defaultView;
+
+      if (version !== 1) {
+        res.status(400).json({ error: "Unsupported view version. Must be 1." });
+        return;
+      }
+
+      if (!Array.isArray(cameraPosition) || cameraPosition.length !== 3 || !cameraPosition.every(Number.isFinite)) {
+        res.status(400).json({ error: "Invalid cameraPosition. Must be an array of 3 finite numbers." });
+        return;
+      }
+
+      if (!Array.isArray(target) || target.length !== 3 || !target.every(Number.isFinite)) {
+        res.status(400).json({ error: "Invalid target. Must be an array of 3 finite numbers." });
+        return;
+      }
+
+      if (rootQuaternion !== undefined && rootQuaternion !== null) {
+        if (!Array.isArray(rootQuaternion) || rootQuaternion.length !== 4 || !rootQuaternion.every(Number.isFinite)) {
+          res.status(400).json({ error: "Invalid rootQuaternion. Must be an array of 4 finite numbers." });
+          return;
+        }
+
+        const [qx, qy, qz, qw] = rootQuaternion;
+        const sumSq = qx * qx + qy * qy + qz * qz + qw * qw;
+        if (Math.abs(sumSq - 1.0) > 0.05) {
+          res.status(400).json({ error: "Invalid rootQuaternion length. Quaternion must be normalizable." });
+          return;
+        }
+      }
+
+      if (fov !== undefined && fov !== null) {
+        if (typeof fov !== "number" || !Number.isFinite(fov) || fov < 10 || fov > 90) {
+          res.status(400).json({ error: "Invalid fov. Must be a finite number between 10 and 90." });
+          return;
+        }
+      }
+
+      defaultViewJson = JSON.stringify({
+        version,
+        cameraPosition,
+        target,
+        rootQuaternion: rootQuaternion || null,
+        fov: fov || null
+      });
+    }
+
+    const updatedModel = saveModelDefaultView(slug, defaultViewJson);
+    res.json(updatedModel);
+  } catch (error) {
+    next(error);
+  }
 });
 
 modelsRouter.delete("/:slug", async (req, res, next) => {

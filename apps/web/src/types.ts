@@ -10,6 +10,7 @@ export type ModelRecord = {
   folder_id: number | null;
   created_at: string;
   updated_at: string;
+  default_view_json?: string | null;
 };
 
 export type FolderRecord = {
@@ -52,4 +53,5 @@ export type PublicModel = {
   name: string;
   slug: string;
   glb_url: string;
+  default_view_json?: string | null;
 };

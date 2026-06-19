@@ -279,7 +279,8 @@ app.get("/public/:token/model.json", (req, res) => {
   res.json({
     name: share.name,
     slug: share.slug,
-    glb_url: `/public/${encodeURIComponent(token)}/model.glb`
+    glb_url: `/public/${encodeURIComponent(token)}/model.glb`,
+    default_view_json: share.default_view_json
   });
 });
 

@@ -16,6 +16,7 @@ export type ModelRecord = {
   folder_id: number | null;
   created_at: string;
   updated_at: string;
+  default_view_json?: string | null;
 };
 
 export type FolderRecord = {
@@ -133,6 +134,7 @@ export function initDb(): void {
   ensureColumn("jobs", "quality", "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn("models", "folder_id", "INTEGER REFERENCES folders(id)");
   ensureColumn("models", "glb_size_bytes", "INTEGER");
+  ensureColumn("models", "default_view_json", "TEXT");
   backfillGlbSizes();
 }
 
@@ -513,4 +515,15 @@ export function markJobFailed(jobId: number, message: string): void {
          updated_at = CURRENT_TIMESTAMP
      WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
   ).run(jobId);
+}
+
+export function saveModelDefaultView(slug: string, defaultViewJson: string | null): ModelRecord | undefined {
+  db.prepare(
+    `UPDATE models
+     SET default_view_json = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE slug = ?`
+  ).run(defaultViewJson, slug);
+
+  return getModelBySlug(slug);
 }

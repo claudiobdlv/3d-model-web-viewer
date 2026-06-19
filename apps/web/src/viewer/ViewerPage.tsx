@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { ArrowLeft, Box, Download, Home, Sun, Moon } from "lucide-react";
-import { getModel, getPublicModel } from "../api";
+import { getModel, getPublicModel, saveModelDefaultView } from "../api";
 import type { ModelRecord, PublicModel } from "../types";
 
 type MetadataSource = { source: string; name: string; value: Record<string, unknown> };
@@ -44,7 +44,6 @@ function MarqueeText({ text }: { text: string }) {
       }
     };
 
-    // Small delay to ensure the layout has settled and font is rendered
     const timer = setTimeout(measure, 50);
 
     window.addEventListener("resize", measure);
@@ -54,29 +53,36 @@ function MarqueeText({ text }: { text: string }) {
     };
   }, [text]);
 
-  const duration = scrollDistance > 0 ? Math.max(4, scrollDistance / 20) : 0; // Slow, readable speed
-  const animationName = `marquee-${Math.round(scrollDistance)}`;
+  const scrollTime = scrollDistance / 50; // 50 px/sec
+  const pauseTime = 0.6; // 0.6s pause
+  const totalDuration = 2 * pauseTime + 2 * scrollTime;
+
+  const p1 = totalDuration > 0 ? (pauseTime / totalDuration) * 100 : 0;
+  const p2 = totalDuration > 0 ? ((pauseTime + scrollTime) / totalDuration) * 100 : 0;
+  const p3 = totalDuration > 0 ? ((2 * pauseTime + scrollTime) / totalDuration) * 100 : 0;
+
+  const animationName = `marquee-${Math.round(scrollDistance)}-${Math.round(totalDuration * 10)}`;
 
   return (
     <div
       ref={containerRef}
-      className="relative overflow-hidden whitespace-nowrap w-full"
-      style={{ display: "block" }}
+      className="relative overflow-hidden whitespace-nowrap w-full flex items-center"
+      style={{ display: "flex", minHeight: "1rem" }}
     >
       {scrollDistance > 0 && !prefersReducedMotion ? (
         <>
           <style>{`
             @keyframes ${animationName} {
-              0%, 15% { transform: translate3d(0, 0, 0); }
-              45%, 60% { transform: translate3d(-${scrollDistance}px, 0, 0); }
-              90%, 100% { transform: translate3d(0, 0, 0); }
+              0%, ${p1}% { transform: translate3d(0, 0, 0); }
+              ${p2}%, ${p3}% { transform: translate3d(-${scrollDistance}px, 0, 0); }
+              100% { transform: translate3d(0, 0, 0); }
             }
           `}</style>
           <span
             ref={textRef}
-            className="inline-block"
+            className="inline-block text-xs leading-none"
             style={{
-              animation: `${animationName} ${duration * 2}s linear infinite`,
+              animation: `${animationName} ${totalDuration}s linear infinite`,
             }}
           >
             {text}
@@ -85,7 +91,7 @@ function MarqueeText({ text }: { text: string }) {
       ) : (
         <span
           ref={textRef}
-          className="inline-block max-w-full truncate"
+          className="inline-block max-w-full truncate text-xs leading-none"
           style={{ textOverflow: "ellipsis" }}
         >
           {text}
@@ -96,6 +102,7 @@ function MarqueeText({ text }: { text: string }) {
 }
 
 export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: string; theme?: "dark" | "light"; toggleTheme?: () => void }) {
+  const isPublic = !!publicToken;
   const slug = useMemo(() => window.location.pathname.split("/").filter(Boolean).pop() ?? "", []);
   const [model, setModel] = useState<ModelRecord | PublicModel | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +111,41 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
   const canvasHost = useRef<HTMLDivElement | null>(null);
   const resetViewRef = useRef<(() => void) | null>(null);
   const updateThemeRef = useRef<((theme: "dark" | "light") => void) | null>(null);
+  const saveViewRef = useRef<(() => Promise<void>) | null>(null);
+  const clearViewRef = useRef<(() => Promise<void>) | null>(null);
+  const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const showToast = (type: "success" | "error", message: string) => {
+    setToast({ type, message });
+  };
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  const savedViewRef = useRef<{
+    version: number;
+    cameraPosition: [number, number, number];
+    target: [number, number, number];
+    rootQuaternion?: [number, number, number, number];
+    fov?: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (model && model.default_view_json) {
+      try {
+        savedViewRef.current = JSON.parse(model.default_view_json);
+      } catch (e) {
+        console.error("Failed to parse default view JSON", e);
+        savedViewRef.current = null;
+      }
+    } else {
+      savedViewRef.current = null;
+    }
+  }, [model]);
 
   // Propagate theme changes into the live Three.js scene without reloading the GLB.
   useEffect(() => {
@@ -215,7 +257,7 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     // Vector components (x, y, z) in Three.js world space (Y-up). After the
     // -90° root rotation the model's native Z appears as Three.js +Y, so this
     // positions the camera slightly in front and high up, looking down.
-    const DEFAULT_CAM_DIR = new THREE.Vector3(0.4, 1.1, 0.9).normalize();
+    const DEFAULT_CAM_DIR = new THREE.Vector3(-0.4, 1.1, 0.9).normalize();
 
     const frame = () => {
       if (!root) return;
@@ -230,8 +272,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       const fitFov = Math.min(verticalFov, horizontalFov);
 
       // Calculate distance to fit the bounding sphere.
-      // Use sin(fitFov / 2) to ensure the sphere fits inside both vertical and horizontal bounds.
-      // 1.1x scaling adds a 10% safety margin/padding so the model is framed nicely without clipping.
       const distance = (radius / Math.sin(fitFov / 2)) * 1.1;
 
       modelRadius = radius;
@@ -245,7 +285,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       controls.minDistance = Math.max(radius * 0.04, 0.01);
       controls.maxDistance = radius * 100;
 
-      // Conservative initial near/far — will be refined per-frame in render().
       camera.near = Math.max(radius * 0.001, 0.001);
       camera.far = distance + radius * 4;
       camera.updateProjectionMatrix();
@@ -255,16 +294,68 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     resetViewRef.current = () => {
       if (!root) return;
       stopIntro();
-      // Cancel any previous reset/snap in-flight.
       cancelResetAnimation();
+
+      const savedView = savedViewRef.current;
+      let targetCamPos: THREE.Vector3;
+      let targetTarget: THREE.Vector3;
+      let targetRootQ: THREE.Quaternion;
+
+      if (savedView) {
+        const targetOffset = new THREE.Vector3().fromArray(savedView.target);
+        const cameraOffset = new THREE.Vector3().fromArray(savedView.cameraPosition);
+        targetTarget = modelCenter.clone().add(targetOffset);
+        targetCamPos = targetTarget.clone().add(cameraOffset);
+        targetRootQ = savedView.rootQuaternion
+          ? new THREE.Quaternion().fromArray(savedView.rootQuaternion)
+          : new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ"));
+      } else {
+        targetTarget = modelCenter.clone();
+        targetCamPos = modelCenter.clone().add(defaultCamOffset);
+        targetRootQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ"));
+      }
+
       startResetAnimation(
         camera.position.clone(),
-        modelCenter.clone().add(defaultCamOffset),
+        targetCamPos,
         controls.target.clone(),
-        modelCenter.clone(),
+        targetTarget,
         root.quaternion.clone(),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ")),
+        targetRootQ
       );
+    };
+
+    saveViewRef.current = async () => {
+      if (!camera || !controls || !root) return;
+
+      const cameraOffset = camera.position.clone().sub(controls.target);
+      const targetOffset = controls.target.clone().sub(modelCenter);
+
+      const viewState = {
+        version: 1,
+        cameraPosition: [cameraOffset.x, cameraOffset.y, cameraOffset.z],
+        target: [targetOffset.x, targetOffset.y, targetOffset.z],
+        rootQuaternion: [root.quaternion.x, root.quaternion.y, root.quaternion.z, root.quaternion.w],
+        fov: camera.fov
+      };
+
+      try {
+        const updatedModel = await saveModelDefaultView(slug, viewState);
+        setModel(updatedModel);
+        showToast("success", "Start view saved successfully!");
+      } catch (err) {
+        showToast("error", err instanceof Error ? err.message : "Failed to save start view.");
+      }
+    };
+
+    clearViewRef.current = async () => {
+      try {
+        const updatedModel = await saveModelDefaultView(slug, null);
+        setModel(updatedModel);
+        showToast("success", "Saved start view cleared!");
+      } catch (err) {
+        showToast("error", err instanceof Error ? err.message : "Failed to clear start view.");
+      }
     };
 
     // --- Shared reset/snap animation helpers ---
@@ -547,8 +638,47 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
         root.traverse((object) => {
           if ((object as THREE.Mesh).isMesh) selectable.push(object);
         });
-        frame();
-        intro = { startedAt: performance.now() + 250, baseOffset: camera.position.clone().sub(controls.target) };
+        root.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(root);
+        modelRadius = box.getBoundingSphere(new THREE.Sphere()).radius || 1;
+        modelCenter = box.getCenter(new THREE.Vector3());
+
+        const savedView = savedViewRef.current;
+        if (savedView) {
+          const targetOffset = new THREE.Vector3().fromArray(savedView.target);
+          const cameraOffset = new THREE.Vector3().fromArray(savedView.cameraPosition);
+          const targetPos = modelCenter.clone().add(targetOffset);
+          const cameraPos = targetPos.clone().add(cameraOffset);
+
+          camera.position.copy(cameraPos);
+          controls.target.copy(targetPos);
+
+          if (savedView.rootQuaternion && root) {
+            root.quaternion.set(
+              savedView.rootQuaternion[0],
+              savedView.rootQuaternion[1],
+              savedView.rootQuaternion[2],
+              savedView.rootQuaternion[3]
+            );
+          }
+          if (savedView.fov !== undefined) {
+            camera.fov = savedView.fov;
+          }
+          camera.updateProjectionMatrix();
+          controls.update();
+
+          const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+          const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
+          const fitFov = Math.min(verticalFov, horizontalFov);
+          const distance = (modelRadius / Math.sin(fitFov / 2)) * 1.1;
+          defaultCamOffset = DEFAULT_CAM_DIR.clone().multiplyScalar(distance);
+
+          intro = null;
+        } else {
+          frame();
+          intro = { startedAt: performance.now() + 250, baseOffset: camera.position.clone().sub(controls.target) };
+        }
+
         setLoadProgress(null);
         requestRender();
       },
@@ -573,6 +703,8 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       disposed = true;
       updateThemeRef.current = null;
       resetViewRef.current = null;
+      saveViewRef.current = null;
+      clearViewRef.current = null;
       resizeObserver.disconnect();
       controls.removeEventListener("change", requestRender);
       controls.removeEventListener("start", onControlsStart);
@@ -599,12 +731,14 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
 
   return (
     <div className="w-screen overflow-hidden" style={{ height: "100dvh", background: "var(--bg)", color: "var(--text)" }}>
-      <header className="relative z-20 flex min-h-14 items-center justify-between gap-3 border-b px-3 md:px-4" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
+      <header className="relative z-20 flex min-h-12 sm:min-h-14 items-center justify-between gap-3 border-b px-3 md:px-4" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
         <div className="flex min-w-0 items-center gap-3">
-          {!publicToken ? <><a className="secondary-button" href="/admin"><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
+          {!isPublic ? <><a className="secondary-button" href="/admin"><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
           <div className="min-w-0">
-            <h1 className="truncate font-display text-lg font-bold text-[var(--accent)]">{model?.name ?? "Model viewer"}</h1>
-            <p className="truncate text-xs" style={{ color: "var(--subtle)" }}>{model ? ("source_filename" in model ? `${model.source_filename} / ${model.status}` : "Public read-only viewer") : (publicToken ? "Public read-only viewer" : slug)}</p>
+            <h1 className="truncate font-display text-lg font-bold text-[var(--accent)] leading-tight">{model?.name ?? "Model viewer"}</h1>
+            {!isPublic && (
+              <p className="truncate text-xs leading-none mt-0.5" style={{ color: "var(--subtle)" }}>{model ? ("source_filename" in model ? `${model.source_filename} / ${model.status}` : "") : slug}</p>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -630,6 +764,20 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
 
       {/* Main 3-D viewport */}
       <main className="relative h-[calc(100dvh-3.5rem)] overflow-hidden" style={{ background: "var(--panel-soft)" }}>
+        {/* Toast Notification */}
+        {toast && (
+          <div
+            className="fixed right-4 top-16 z-50 flex items-center gap-2 rounded-xl border px-4 py-2.5 shadow-lg backdrop-blur-md transition-all duration-300"
+            style={{
+              borderColor: toast.type === "success" ? "var(--ready)" : "var(--failed)",
+              background: "color-mix(in srgb, var(--panel) 90%, transparent)",
+              color: toast.type === "success" ? "var(--ready)" : "var(--failed)"
+            }}
+          >
+            <span className="font-bold text-xs">{toast.message}</span>
+          </div>
+        )}
+
         {error ? (
           <div className="absolute inset-0 grid place-items-center p-6">
             <div className="grid max-w-md place-items-center gap-3 rounded border p-8 text-center" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
@@ -665,7 +813,7 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
           ─────────────────────────────────────────────────────────────────────────
         */}
         <div
-          className="absolute left-1/2 z-10 flex w-max max-w-[calc(100vw-1.5rem)] -translate-x-1/2 items-center justify-center gap-1 rounded-2xl border px-2 py-1.5 shadow-panel backdrop-blur"
+          className="absolute left-1/2 z-10 flex w-[calc(100vw-32px)] max-w-[520px] -translate-x-1/2 items-center gap-1.5 rounded-2xl border px-3 py-1.5 shadow-panel backdrop-blur"
           style={{
             bottom: "calc(12px + env(safe-area-inset-bottom, 0px))",
             borderColor: "var(--line)",
@@ -685,14 +833,40 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
             <span className="hidden text-xs font-bold sm:inline">Reset</span>
           </button>
 
+          {!isPublic && (
+            <>
+              <button
+                className="flex h-10 shrink-0 items-center gap-1 rounded-xl px-2 transition hover:bg-[var(--panel-strong)] hover:text-[var(--ready)] text-[var(--muted)]"
+                type="button"
+                title="Save current view as start view"
+                aria-label="Save start view"
+                onClick={() => saveViewRef.current?.()}
+              >
+                <span className="text-xs font-bold">Save</span>
+              </button>
+
+              {model?.default_view_json ? (
+                <button
+                  className="flex h-10 shrink-0 items-center gap-1 rounded-xl px-2 transition hover:bg-[var(--panel-strong)] hover:text-[var(--failed)] text-[var(--muted)]"
+                  type="button"
+                  title="Clear saved start view"
+                  aria-label="Clear start view"
+                  onClick={() => clearViewRef.current?.()}
+                >
+                  <span className="text-xs font-bold">Clear</span>
+                </button>
+              ) : null}
+            </>
+          )}
+
           <div className="h-5 w-px shrink-0" style={{ background: "var(--line)" }} />
 
           {/* Selected object name – never pushes buttons; scrolls dynamically if long */}
           <div
-            className="flex items-center gap-1 min-w-0 max-w-[55vw] sm:max-w-[60vw] text-xs px-1"
+            className="flex items-center gap-1 min-w-0 flex-1 px-1 text-xs"
           >
-            <strong className="text-[var(--text)] shrink-0">Selected:</strong>
-            <div className="min-w-0 flex-1">
+            <strong className="text-[var(--text)] shrink-0 leading-none">Selected:</strong>
+            <div className="min-w-0 flex-1 flex items-center">
               <MarqueeText text={selectedName} />
             </div>
           </div>

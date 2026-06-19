@@ -108,3 +108,10 @@ export async function uploadModel(
 export function listJobs(): Promise<JobRecord[]> {
   return request<JobRecord[]>("/api/jobs");
 }
+
+export function saveModelDefaultView(slug: string, defaultView: any | null): Promise<ModelRecord> {
+  return request<ModelRecord>(`/api/models/${encodeURIComponent(slug)}/default-view`, {
+    method: "POST",
+    body: JSON.stringify({ defaultView })
+  });
+}
