@@ -33,12 +33,10 @@ services:
     environment:
       SERVER_URL: http://server:3009
       WORKER_OUTPUT_DIR: /app/worker-output
-      WORKER_MAX_CONCURRENT_JOBS: ${WORKER_MAX_CONCURRENT_JOBS:-1}
       CONVERTER_CLI: /app/apps/converter/src/cli.js
       XCAF_CONVERTER_BIN: /app/bin/xcaf-step-to-glb
       MATERIAL_RULES_PATH: /app/config/material-rules.json
       MAX_MODEL_ARTIFACT_BYTES: ${MAX_MODEL_ARTIFACT_BYTES:-1073741824}
-      GLB_OPTIMIZATION_MODE: ${GLB_OPTIMIZATION_MODE:-disabled}
     volumes:
       - ../data/worker-output:/app/worker-output
       - ../config/material-rules.json:/app/config/material-rules.json:ro
