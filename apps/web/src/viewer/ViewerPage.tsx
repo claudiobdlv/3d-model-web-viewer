@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { ArrowLeft, Box, Download, RotateCw } from "lucide-react";
 import { getModel, getPublicModel } from "../api";
 import type { ModelRecord, PublicModel } from "../types";
@@ -38,9 +39,9 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    // Large CAD assemblies are fill-rate heavy. A modest DPR cap keeps edges
-    // crisp without rendering four physical pixels for every CSS pixel.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    // Keep high-density mobile displays crisp while avoiding the 3x-4x fill
+    // cost common on phones. The previous 1.5 cap visibly undersampled DPR 2.
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(scene.background, 1);
     host.appendChild(renderer.domElement);
 
@@ -189,7 +190,8 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
 
-    new GLTFLoader().load(
+    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+    loader.load(
       glbUrl,
       (gltf) => {
         if (disposed) return;
