@@ -14,6 +14,7 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
   const [model, setModel] = useState<ModelRecord | PublicModel | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState("none");
+  const [loadProgress, setLoadProgress] = useState<number | null>(null);
   const canvasHost = useRef<HTMLDivElement | null>(null);
   const rotateXRef = useRef<(() => void) | null>(null);
   const rotateYRef = useRef<(() => void) | null>(null);
@@ -43,11 +44,19 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     // cost common on phones. The previous 1.5 cap visibly undersampled DPR 2.
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(scene.background, 1);
+    renderer.domElement.style.display = "block";
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.touchAction = "none";
     host.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.screenSpacePanning = true;
+    controls.enableZoom = true;
+    controls.enableRotate = true;
+    controls.enablePan = true;
     controls.mouseButtons = {
       LEFT: THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.DOLLY,
@@ -74,6 +83,8 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     let pointerStart: { x: number; y: number } | null = null;
     let disposed = false;
     let animationFrame: number | null = null;
+    let intro: { startedAt: number; baseOffset: THREE.Vector3 } | null = null;
+    let restorePixelRatioTimer: number | null = null;
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const displayNameCache = new WeakMap<THREE.Object3D, string>();
@@ -94,15 +105,28 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
 
     const frame = () => {
       if (!root) return;
+      root.updateMatrixWorld(true);
       const box = new THREE.Box3().setFromObject(root);
-      const size = box.getSize(new THREE.Vector3());
       const center = box.getCenter(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z) || 1;
-      const distance = maxDim / (2 * Math.tan((camera.fov * Math.PI) / 360));
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      const radius = sphere.radius || 1;
+
+      const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+      const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
+      const fitFov = Math.min(verticalFov, horizontalFov);
+
+      // Calculate distance to fit the bounding sphere.
+      // Use sin(fitFov / 2) to ensure the sphere fits inside both vertical and horizontal bounds.
+      // 1.1x scaling adds a 10% safety margin/padding so the model is framed nicely without clipping.
+      const distance = (radius / Math.sin(fitFov / 2)) * 1.1;
+
       controls.target.copy(center);
-      camera.position.copy(center).add(new THREE.Vector3(distance * 0.7, distance * 0.46, distance * 1.25));
-      camera.near = Math.max(maxDim / 10000, 0.01);
-      camera.far = Math.max(maxDim * 30, 1000);
+      camera.position.copy(center).add(new THREE.Vector3(0.48, 0.32, 1).normalize().multiplyScalar(distance));
+
+      controls.minDistance = Math.max(radius * 0.04, 0.01);
+      controls.maxDistance = radius * 100;
+      camera.near = Math.max(radius / 5000, 0.01);
+      camera.far = Math.max(radius * 60, 1000);
       camera.updateProjectionMatrix();
       controls.update();
     };
@@ -126,17 +150,60 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
 
     rotateXRef.current = () => {
       if (!root) return;
+      stopIntro();
       xQuarterTurns = (xQuarterTurns + 1) % 4;
       animateToQuarterTurns();
     };
     rotateYRef.current = () => {
       if (!root) return;
+      stopIntro();
       yQuarterTurns = (yQuarterTurns + 1) % 4;
       animateToQuarterTurns();
     };
 
     const onPointerDown = (event: PointerEvent) => {
+      stopIntro();
       pointerStart = { x: event.clientX, y: event.clientY };
+    };
+
+    const onTouchStart = () => {
+      stopIntro();
+    };
+
+    const onWheel = () => {
+      stopIntro();
+    };
+
+    const onContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    function stopIntro() {
+      if (!intro) return;
+      intro = null;
+      // Sync controls state to the camera's current wiggled position before OrbitControls takes over
+      const damping = controls.enableDamping;
+      controls.enableDamping = false;
+      controls.update();
+      controls.enableDamping = damping;
+    }
+
+    const onControlsStart = () => {
+      stopIntro();
+      if ((window.devicePixelRatio || 1) > 1.5) {
+        if (restorePixelRatioTimer !== null) window.clearTimeout(restorePixelRatioTimer);
+        renderer.setPixelRatio(1.5);
+        resize();
+      }
+    };
+
+    const onControlsEnd = () => {
+      if ((window.devicePixelRatio || 1) <= 1.5) return;
+      if (restorePixelRatioTimer !== null) window.clearTimeout(restorePixelRatioTimer);
+      restorePixelRatioTimer = window.setTimeout(() => {
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        resize();
+      }, 180);
     };
 
     const onPointerUp = (event: PointerEvent) => {
@@ -178,19 +245,42 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
           rotationAnimation = null;
         }
       }
-      const controlsChanged = controls.update();
+      if (intro) {
+        const progress = Math.max(0, Math.min((performance.now() - intro.startedAt) / 1800, 1));
+        const easedEnvelope = Math.sin(Math.PI * progress);
+        const angle = Math.sin(progress * Math.PI * 2) * THREE.MathUtils.degToRad(6) * easedEnvelope;
+        camera.position.copy(controls.target).add(intro.baseOffset.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle));
+        camera.lookAt(controls.target);
+        if (progress === 1) {
+          intro = null;
+          // Sync controls state to the camera's final wiggled position before OrbitControls takes over
+          const damping = controls.enableDamping;
+          controls.enableDamping = false;
+          controls.update();
+          controls.enableDamping = damping;
+        }
+      }
+      // Only update controls if we are NOT in the intro wiggling phase.
+      // Bypassing controls.update prevents it from overwriting manual camera.position modifications.
+      const controlsChanged = intro ? false : controls.update();
       renderer.render(scene, camera);
-      if (rotationAnimation || controlsChanged) requestRender();
+      if (rotationAnimation || intro || controlsChanged) requestRender();
     }
 
     resize();
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(host);
     controls.addEventListener("change", requestRender);
+    controls.addEventListener("start", onControlsStart);
+    controls.addEventListener("end", onControlsEnd);
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
+    renderer.domElement.addEventListener("touchstart", onTouchStart, { passive: true });
+    renderer.domElement.addEventListener("wheel", onWheel, { passive: true });
+    renderer.domElement.addEventListener("contextmenu", onContextMenu);
 
     const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+    setLoadProgress(0);
     loader.load(
       glbUrl,
       (gltf) => {
@@ -209,15 +299,21 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
         content.position.sub(pivot);
         root.add(content);
         scene.add(root);
+        root.updateMatrixWorld(true); // Explicitly update matrices before computing bounds
         selectable = [];
         root.traverse((object) => {
           if ((object as THREE.Mesh).isMesh) selectable.push(object);
         });
         frame();
+        intro = { startedAt: performance.now() + 250, baseOffset: camera.position.clone().sub(controls.target) };
+        setLoadProgress(null);
         requestRender();
       },
-      undefined,
-      (loadError) => setError(loadError instanceof Error ? loadError.message : "Could not load GLB.")
+      (event) => setLoadProgress(event.total > 0 ? Math.min(event.loaded / event.total, 1) : 0),
+      (loadError) => {
+        setLoadProgress(null);
+        setError(loadError instanceof Error ? loadError.message : "Could not load GLB.");
+      }
     );
 
     requestRender();
@@ -228,9 +324,15 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       rotateYRef.current = null;
       resizeObserver.disconnect();
       controls.removeEventListener("change", requestRender);
+      controls.removeEventListener("start", onControlsStart);
+      controls.removeEventListener("end", onControlsEnd);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("touchstart", onTouchStart);
+      renderer.domElement.removeEventListener("wheel", onWheel);
+      renderer.domElement.removeEventListener("contextmenu", onContextMenu);
       controls.dispose();
+      if (restorePixelRatioTimer !== null) window.clearTimeout(restorePixelRatioTimer);
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
       renderer.dispose();
       if (renderer.domElement.parentNode === host) host.removeChild(renderer.domElement);
@@ -282,7 +384,13 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
           </div>
         ) : null}
 
-        <div ref={canvasHost} className="h-full w-full" />
+        <div ref={canvasHost} className="h-full w-full overflow-hidden touch-none" />
+
+        {loadProgress !== null ? (
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-1 overflow-hidden bg-black/20" aria-label="Loading model">
+            <div className="h-full bg-[var(--accent-strong)] transition-[width] duration-150" style={{ width: `${Math.max(loadProgress * 100, 3)}%` }} />
+          </div>
+        ) : null}
 
         <div className="absolute bottom-4 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 shadow-panel backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 88%, transparent)", color: "var(--muted)" }}>
           <button className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2 hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Rotate model 90 degrees around X" aria-label="Rotate X 90 degrees" onClick={() => rotateXRef.current?.()}>

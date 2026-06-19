@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 
 const slug = window.location.pathname.split("/").filter(Boolean).pop();
 const title = document.querySelector("#modelTitle");
@@ -100,7 +101,7 @@ async function initThree(url) {
   keyLight.position.set(5, 8, 6);
   scene.add(keyLight);
 
-  const loader = new GLTFLoader();
+  const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   const gltf = await loader.loadAsync(url);
   loadedRoot = gltf.scene;
   scene.add(loadedRoot);
