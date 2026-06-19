@@ -5,7 +5,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   Download,
-  FileText,
+
   Folder,
   FolderOpen,
   List,
@@ -500,7 +500,7 @@ function RowMenu({ menuRef, menu, model, onRename, onDelete }: {
       }}
     >
       <MenuLink href={`/downloads/${encodeURIComponent(model.slug)}/display.glb`} disabled={!model.has_display_glb} icon={<Download size={15} />} label="Download GLB" />
-      <MenuLink href={`/downloads/${encodeURIComponent(model.slug)}/original`} icon={<FileText size={15} />} label="Download STEP" />
+
       <MenuLink href={`/admin/logs/${encodeURIComponent(model.slug)}/conversion.log`} icon={<List size={15} />} label="Log" />
       {canShare ? (
         <>

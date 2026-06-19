@@ -259,6 +259,38 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     // positions the camera slightly in front and high up, looking down.
     const DEFAULT_CAM_DIR = new THREE.Vector3(-0.4, 1.1, 0.9).normalize();
 
+    // --- Responsive saved-view helper ---
+    // On mobile / narrow screens the saved desktop composition may be too
+    // zoomed-in.  This helper preserves the saved camera *direction* and
+    // orientation but zooms out just enough so the full model bounding
+    // sphere fits inside the viewport with a small margin (1.12×).
+    // On desktop the saved offset is returned unchanged.
+    const MOBILE_BREAKPOINT = 768;
+    const FIT_MARGIN = 1.12;
+    function getResponsiveCameraOffset(
+      savedCameraOffset: THREE.Vector3,
+      fov: number,
+      aspect: number,
+      radius: number,
+    ): THREE.Vector3 {
+      const isMobile = window.innerWidth < MOBILE_BREAKPOINT;
+      if (!isMobile) return savedCameraOffset.clone();
+
+      const savedDistance = savedCameraOffset.length();
+      const direction = savedCameraOffset.clone().normalize();
+
+      // Required distance so the bounding sphere fits both the vertical
+      // and horizontal field-of-view, whichever is tighter.
+      const vFov = THREE.MathUtils.degToRad(fov);
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+      const fitFov = Math.min(vFov, hFov);
+      const fitDistance = (radius / Math.sin(fitFov / 2)) * FIT_MARGIN;
+
+      // Never zoom in closer than the saved desktop composition.
+      const finalDistance = Math.max(savedDistance, fitDistance);
+      return direction.multiplyScalar(finalDistance);
+    }
+
     const frame = () => {
       if (!root) return;
       root.updateMatrixWorld(true);
@@ -303,9 +335,12 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
 
       if (savedView) {
         const targetOffset = new THREE.Vector3().fromArray(savedView.target);
-        const cameraOffset = new THREE.Vector3().fromArray(savedView.cameraPosition);
+        const rawCameraOffset = new THREE.Vector3().fromArray(savedView.cameraPosition);
+        const responsiveCameraOffset = getResponsiveCameraOffset(
+          rawCameraOffset, camera.fov, camera.aspect, modelRadius,
+        );
         targetTarget = modelCenter.clone().add(targetOffset);
-        targetCamPos = targetTarget.clone().add(cameraOffset);
+        targetCamPos = targetTarget.clone().add(responsiveCameraOffset);
         targetRootQ = savedView.rootQuaternion
           ? new THREE.Quaternion().fromArray(savedView.rootQuaternion)
           : new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ"));
@@ -646,9 +681,19 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
         const savedView = savedViewRef.current;
         if (savedView) {
           const targetOffset = new THREE.Vector3().fromArray(savedView.target);
-          const cameraOffset = new THREE.Vector3().fromArray(savedView.cameraPosition);
+          const rawCameraOffset = new THREE.Vector3().fromArray(savedView.cameraPosition);
           const targetPos = modelCenter.clone().add(targetOffset);
-          const cameraPos = targetPos.clone().add(cameraOffset);
+
+          // Apply saved FOV first so the responsive helper uses the correct value.
+          if (savedView.fov !== undefined) {
+            camera.fov = savedView.fov;
+            camera.updateProjectionMatrix();
+          }
+
+          const responsiveCameraOffset = getResponsiveCameraOffset(
+            rawCameraOffset, camera.fov, camera.aspect, modelRadius,
+          );
+          const cameraPos = targetPos.clone().add(responsiveCameraOffset);
 
           camera.position.copy(cameraPos);
           controls.target.copy(targetPos);
@@ -660,9 +705,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
               savedView.rootQuaternion[2],
               savedView.rootQuaternion[3]
             );
-          }
-          if (savedView.fov !== undefined) {
-            camera.fov = savedView.fov;
           }
           camera.updateProjectionMatrix();
           controls.update();
@@ -736,9 +778,7 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
           {!isPublic ? <><a className="secondary-button" href="/admin"><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
           <div className="min-w-0">
             <h1 className="truncate font-display text-lg font-bold text-[var(--accent)] leading-tight">{model?.name ?? "Model viewer"}</h1>
-            {!isPublic && (
-              <p className="truncate text-xs leading-none mt-0.5" style={{ color: "var(--subtle)" }}>{model ? ("source_filename" in model ? `${model.source_filename} / ${model.status}` : "") : slug}</p>
-            )}
+
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -753,11 +793,8 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
           ) : null}
-          {model && !publicToken && "source_filename" in model ? (
-            <>
-              <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/original`}>STEP</a>
-              {model.has_display_glb ? <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/display.glb`}><Download size={15} /> GLB</a> : null}
-            </>
+          {model && !publicToken && "source_filename" in model && model.has_display_glb ? (
+              <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/display.glb`}><Download size={15} /> GLB</a>
           ) : null}
         </div>
       </header>
@@ -813,12 +850,14 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
           ─────────────────────────────────────────────────────────────────────────
         */}
         <div
-          className="absolute left-1/2 z-10 flex w-[calc(100vw-32px)] max-w-[520px] -translate-x-1/2 items-center gap-1.5 rounded-2xl border px-3 py-1.5 shadow-panel backdrop-blur"
+          className="absolute left-1/2 z-10 flex w-[calc(100vw-32px)] max-w-[520px] sm:w-fit sm:max-w-[720px] -translate-x-1/2 items-center gap-1.5 rounded-2xl border px-3 py-1.5 shadow-panel backdrop-blur"
           style={{
             bottom: "calc(12px + env(safe-area-inset-bottom, 0px))",
             borderColor: "var(--line)",
             background: "color-mix(in srgb, var(--panel) 88%, transparent)",
             color: "var(--muted)",
+            transition: "max-width 180ms ease-out, padding 180ms ease-out",
+            minWidth: "260px",
           }}
         >
           {/* Home / Reset view — always first on left */}
