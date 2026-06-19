@@ -94,7 +94,7 @@ All files are under ignored scratch directory `.tmp/mobile-performance-spike/` a
 | Draco | 19,540,872 | 18.64 | 77.1% | `KHR_draco_mesh_compression` |
 | Meshopt | 16,978,808 | 16.19 | **80.1%** | `EXT_meshopt_compression`, `KHR_mesh_quantization` |
 
-Representative source: EliteDesk model `u843-non-haz-panel-20260618082048`, copied from its `display.glb`. The requested `...20260618100539` slug was not present; this ready U843 variant was selected instead.
+Benchmark source: EliteDesk model `u843-non-haz-panel-20260618082048`, copied from its 85.5 MB `display.glb` to stress the large-model case. The preferred `u843-non-haz-panel-20260618100539` model also exists (24.4 MB) and was used for the final live deployment QA.
 
 ### Structural and metadata gate
 
@@ -120,6 +120,7 @@ A temporary local server loaded the real production web build with either the ra
 - Rotate X and Rotate Y controls remained present; both animation paths ran without console errors.
 - Fresh local first-interactive probes were approximately 1.31 seconds for raw and 1.33 seconds for Meshopt. This shows no concerning decode regression locally, but the local transfer path intentionally cannot demonstrate Meshopt's network benefit.
 - The test browser reported DPR 1 and a 1280x664 CSS/backing canvas, so it could not visually validate the DPR-2 crispness improvement. The backing-resolution issue is established directly by the prior `min(devicePixelRatio, 1.5)` code.
+- After deployment, the live admin and the old uncompressed `u843-non-haz-panel-20260618100539` viewer loaded without console warnings/errors. Picking returned the expected component name, and Rotate X/Y both animated successfully.
 
 Actual mobile transfer, decode, thermal behavior, and orbit feel were not measured in this spike. Those require a physical phone and network throttling or production-like hosting of versioned test artifacts.
 
