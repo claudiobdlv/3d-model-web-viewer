@@ -229,12 +229,14 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     let modelCenter = new THREE.Vector3();
     let defaultCamOffset = new THREE.Vector3(); // camera offset from target at default view
     let rotationAnimation: { from: THREE.Quaternion; to: THREE.Quaternion; startedAt: number } | null = null;
-    // Reset animation interpolates camera position and OrbitControls target simultaneously.
+    // Reset animation interpolates camera position, OrbitControls target, and root quaternion.
+    // Controls are disabled for the duration to prevent damping from fighting the lerp.
     let resetAnimation: {
       fromCamPos: THREE.Vector3; toCamPos: THREE.Vector3;
       fromTarget: THREE.Vector3; toTarget: THREE.Vector3;
       fromRootQ: THREE.Quaternion; toRootQ: THREE.Quaternion;
       startedAt: number;
+      controlsWereEnabled: boolean;
     } | null = null;
     let selectable: THREE.Object3D[] = [];
     let pointerStart: { x: number; y: number } | null = null;
@@ -245,6 +247,19 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const displayNameCache = new WeakMap<THREE.Object3D, string>();
+
+    // Pre-allocated temporaries for per-frame animation (avoid GC pressure).
+    const _tmpVec = new THREE.Vector3();
+    const _tmpQuat = new THREE.Quaternion();
+
+    // Throttle gimbal React state updates to ~30 fps to avoid per-frame re-renders.
+    let lastGimbalUpdate = 0;
+    const GIMBAL_INTERVAL = 33; // ms (~30 fps)
+
+    // Smooth easing: easeInOutCubic
+    function easeInOutCubic(t: number): number {
+      return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    }
 
     const requestRender = () => {
       if (!disposed && animationFrame === null) {
@@ -340,24 +355,58 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       stopIntro();
       // Cancel any ongoing model rotation animation.
       rotationAnimation = null;
+      // Cancel any previous reset/snap in-flight.
+      cancelResetAnimation();
       xQuarterTurns = 0;
       yQuarterTurns = 0;
-      resetAnimation = {
-        fromCamPos: camera.position.clone(),
-        toCamPos: modelCenter.clone().add(defaultCamOffset),
-        fromTarget: controls.target.clone(),
-        toTarget: modelCenter.clone(),
-        fromRootQ: root.quaternion.clone(),
-        toRootQ: defaultRotationTarget(),
-        startedAt: performance.now(),
-      };
-      requestRender();
+      startResetAnimation(
+        camera.position.clone(),
+        modelCenter.clone().add(defaultCamOffset),
+        controls.target.clone(),
+        modelCenter.clone(),
+        root.quaternion.clone(),
+        defaultRotationTarget(),
+      );
     };
+
+    // --- Shared reset/snap animation helpers ---
+    function startResetAnimation(
+      fromCamPos: THREE.Vector3, toCamPos: THREE.Vector3,
+      fromTarget: THREE.Vector3, toTarget: THREE.Vector3,
+      fromRootQ: THREE.Quaternion, toRootQ: THREE.Quaternion,
+    ) {
+      resetAnimation = {
+        fromCamPos, toCamPos,
+        fromTarget, toTarget,
+        fromRootQ, toRootQ,
+        startedAt: performance.now(),
+        controlsWereEnabled: controls.enabled,
+      };
+      // Disable controls entirely so damping / internal spherical state
+      // cannot fight the animation each frame.
+      controls.enabled = false;
+      requestRender();
+    }
+
+    /** Cancel any in-flight reset/snap animation and restore controls. */
+    function cancelResetAnimation() {
+      if (!resetAnimation) return;
+      const wasEnabled = resetAnimation.controlsWereEnabled;
+      resetAnimation = null;
+      controls.enabled = wasEnabled;
+      // Sync controls to current camera state so there is no snap.
+      const damping = controls.enableDamping;
+      controls.enableDamping = false;
+      controls.update();
+      controls.enableDamping = damping;
+    }
 
     // Snap camera to look along a world axis.
     snapAxisRef.current = (axis: string) => {
       if (!root) return;
       stopIntro();
+      // Cancel any previous reset/snap in-flight.
+      cancelResetAnimation();
       // We keep Rotate X/Y state unchanged — snapping is a camera move only.
       const dist = camera.position.distanceTo(controls.target);
       const dirs: Record<string, THREE.Vector3> = {
@@ -370,29 +419,30 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       };
       const dir = dirs[axis];
       if (!dir) return;
-      resetAnimation = {
-        fromCamPos: camera.position.clone(),
-        toCamPos: controls.target.clone().add(dir.clone().normalize().multiplyScalar(dist)),
-        fromTarget: controls.target.clone(),
-        toTarget: controls.target.clone(),
-        fromRootQ: root.quaternion.clone(),
-        toRootQ: root.quaternion.clone(), // keep current model rotation
-        startedAt: performance.now(),
-      };
-      requestRender();
+      startResetAnimation(
+        camera.position.clone(),
+        controls.target.clone().add(dir.clone().normalize().multiplyScalar(dist)),
+        controls.target.clone(),
+        controls.target.clone(),
+        root.quaternion.clone(),
+        root.quaternion.clone(), // keep current model rotation
+      );
     };
 
     const onPointerDown = (event: PointerEvent) => {
       stopIntro();
+      cancelResetAnimation(); // user interaction cancels any in-flight reset/snap
       pointerStart = { x: event.clientX, y: event.clientY };
     };
 
     const onTouchStart = () => {
       stopIntro();
+      cancelResetAnimation();
     };
 
     const onWheel = () => {
       stopIntro();
+      cancelResetAnimation();
     };
 
     const onContextMenu = (event: MouseEvent) => {
@@ -455,19 +505,20 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     };
 
     // Animation constants
-    const RESET_DURATION = 400;   // ms for Home/snap animations
+    const RESET_DURATION = 500;   // ms for Home/snap animations
     const ROT_DURATION = 240;     // ms for Rotate X/Y
 
     function render() {
       animationFrame = null;
       if (disposed) return;
 
+      const now = performance.now();
       let needsMore = false;
 
       // --- Model rotation animation (Rotate X/Y buttons) ---
       if (root && rotationAnimation) {
-        const progress = Math.min((performance.now() - rotationAnimation.startedAt) / ROT_DURATION, 1);
-        const eased = 1 - Math.pow(1 - progress, 3);
+        const progress = Math.min((now - rotationAnimation.startedAt) / ROT_DURATION, 1);
+        const eased = easeInOutCubic(progress);
         root.quaternion.slerpQuaternions(rotationAnimation.from, rotationAnimation.to, eased);
         root.updateMatrixWorld(true);
         if (progress >= 1) rotationAnimation = null;
@@ -475,22 +526,60 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       }
 
       // --- Reset / axis-snap animation ---
+      // Controls are disabled for the duration (see startResetAnimation).
+      // We directly drive camera position, target, and root quaternion.
       if (resetAnimation) {
-        const progress = Math.min((performance.now() - resetAnimation.startedAt) / RESET_DURATION, 1);
-        const eased = 1 - Math.pow(1 - progress, 3);
+        const progress = Math.min((now - resetAnimation.startedAt) / RESET_DURATION, 1);
+        const eased = easeInOutCubic(progress);
+
         camera.position.lerpVectors(resetAnimation.fromCamPos, resetAnimation.toCamPos, eased);
-        controls.target.lerpVectors(resetAnimation.fromTarget, resetAnimation.toTarget, eased);
+        // Lerp the target into a temp first, then copy — avoids controls.target
+        // being read in a half-updated state by any listener.
+        _tmpVec.lerpVectors(resetAnimation.fromTarget, resetAnimation.toTarget, eased);
+        controls.target.copy(_tmpVec);
+
         if (root) {
-          root.quaternion.slerpQuaternions(resetAnimation.fromRootQ, resetAnimation.toRootQ, eased);
+          _tmpQuat.slerpQuaternions(resetAnimation.fromRootQ, resetAnimation.toRootQ, eased);
+          root.quaternion.copy(_tmpQuat);
           root.updateMatrixWorld(true);
         }
+
+        // Maintain correct camera orientation toward the moving target.
+        camera.lookAt(controls.target);
+        camera.updateMatrixWorld(true);
+
+        // Update near/far every frame during animation to prevent clipping.
+        // (Bypasses the threshold gate below to ensure smoothness.)
+        {
+          const dist = camera.position.distanceTo(controls.target);
+          const minNear = modelRadius * 0.001;
+          const rawNear = dist - modelRadius * 2.5;
+          camera.near = Math.max(minNear, rawNear > 0 ? rawNear : minNear);
+          camera.far = Math.max(dist + modelRadius * 2.5, camera.near * 10);
+          camera.updateProjectionMatrix();
+        }
+
         if (progress >= 1) {
-          // Sync OrbitControls internal state after teleport.
+          // Snap to exact end values to avoid floating-point drift.
+          camera.position.copy(resetAnimation.toCamPos);
+          controls.target.copy(resetAnimation.toTarget);
+          if (root) {
+            root.quaternion.copy(resetAnimation.toRootQ);
+            root.updateMatrixWorld(true);
+          }
+          camera.lookAt(controls.target);
+          camera.updateMatrixWorld(true);
+
+          // Restore controls and sync internal spherical coordinates.
+          const wasEnabled = resetAnimation.controlsWereEnabled;
+          resetAnimation = null;
+          controls.enabled = wasEnabled;
+          // Temporarily disable damping so controls.update() instantly
+          // adopts the new camera/target without any residual velocity.
           const damping = controls.enableDamping;
           controls.enableDamping = false;
           controls.update();
           controls.enableDamping = damping;
-          resetAnimation = null;
         } else {
           needsMore = true;
         }
@@ -498,7 +587,7 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
 
       // --- Intro wiggle ---
       if (intro) {
-        const progress = Math.max(0, Math.min((performance.now() - intro.startedAt) / 1800, 1));
+        const progress = Math.max(0, Math.min((now - intro.startedAt) / 1800, 1));
         const easedEnvelope = Math.sin(Math.PI * progress);
         const angle = Math.sin(progress * Math.PI * 2) * THREE.MathUtils.degToRad(6) * easedEnvelope;
         camera.position.copy(controls.target).add(intro.baseOffset.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle));
@@ -520,16 +609,8 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       if (controlsChanged) needsMore = true;
 
       // --- Dynamic near/far to maintain depth precision without clipping ---
-      // We update every frame so zooming in/out keeps the ratio tight.
-      // Formula is deliberately conservative:
-      //   near = max(radius * 0.001,  distance - radius * 2.5)
-      //   far  = distance + radius * 2.5
-      // This ensures near > 0, far > near, and the whole bounding sphere
-      // remains visible even when the camera is close to or partially inside
-      // the model. The ratio (far/near) stays manageable compared to a fixed
-      // huge far plane (was radius * 60 / (radius / 5000) = 300,000 ratio
-      // before; now it's at most ~(5 * radius) / (0.001 * radius) = 5000).
-      if (root) {
+      // Skip if we already updated near/far inside the reset animation block above.
+      if (root && !resetAnimation) {
         const dist = camera.position.distanceTo(controls.target);
         const minNear = modelRadius * 0.001;
         const rawNear = dist - modelRadius * 2.5;
@@ -542,8 +623,9 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
         }
       }
 
-      // --- Update gimbal ---
-      if (root && gimbalUpdateRef.current) {
+      // --- Update gimbal (throttled to ~30 fps to avoid React re-render jank) ---
+      if (root && gimbalUpdateRef.current && now - lastGimbalUpdate >= GIMBAL_INTERVAL) {
+        lastGimbalUpdate = now;
         gimbalUpdateRef.current(camera.quaternion, root.quaternion);
       }
 
