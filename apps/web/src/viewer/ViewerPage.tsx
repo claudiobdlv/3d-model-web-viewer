@@ -38,7 +38,9 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // Large CAD assemblies are fill-rate heavy. A modest DPR cap keeps edges
+    // crisp without rendering four physical pixels for every CSS pixel.
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.setClearColor(scene.background, 1);
     host.appendChild(renderer.domElement);
 
@@ -70,12 +72,23 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     let selectable: THREE.Object3D[] = [];
     let pointerStart: { x: number; y: number } | null = null;
     let disposed = false;
+    let animationFrame: number | null = null;
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const displayNameCache = new WeakMap<THREE.Object3D, string>();
+
+    const requestRender = () => {
+      if (!disposed && animationFrame === null) {
+        animationFrame = requestAnimationFrame(render);
+      }
+    };
 
     const resize = () => {
       const rect = host.getBoundingClientRect();
       camera.aspect = Math.max(rect.width, 1) / Math.max(rect.height, 1);
       camera.updateProjectionMatrix();
       renderer.setSize(rect.width, rect.height, false);
+      requestRender();
     };
 
     const frame = () => {
@@ -131,19 +144,29 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       if (moved > 6) return;
 
       const rect = renderer.domElement.getBoundingClientRect();
-      const pointer = new THREE.Vector2(
+      pointer.set(
         ((event.clientX - rect.left) / rect.width) * 2 - 1,
         -((event.clientY - rect.top) / rect.height) * 2 + 1
       );
-      const raycaster = new THREE.Raycaster();
       raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObjects(selectable, true)[0];
-      setSelectedName(hit ? selectedDisplayName(hit.object) : "none");
+      // `selectable` already contains every mesh, so recursive intersection
+      // only repeats work for nested mesh hierarchies.
+      const hit = raycaster.intersectObjects(selectable, false)[0];
+      if (!hit) {
+        setSelectedName("none");
+        return;
+      }
+      let displayName = displayNameCache.get(hit.object);
+      if (!displayName) {
+        displayName = selectedDisplayName(hit.object);
+        displayNameCache.set(hit.object, displayName);
+      }
+      setSelectedName(displayName);
     };
 
-    const animate = () => {
+    function render() {
+      animationFrame = null;
       if (disposed) return;
-      requestAnimationFrame(animate);
       if (root && rotationAnimation) {
         const progress = Math.min((performance.now() - rotationAnimation.startedAt) / 240, 1);
         const eased = 1 - Math.pow(1 - progress, 3);
@@ -153,12 +176,15 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
           rotationAnimation = null;
         }
       }
-      controls.update();
+      const controlsChanged = controls.update();
       renderer.render(scene, camera);
-    };
+      if (rotationAnimation || controlsChanged) requestRender();
+    }
 
     resize();
-    window.addEventListener("resize", resize);
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(host);
+    controls.addEventListener("change", requestRender);
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
 
@@ -185,21 +211,24 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
           if ((object as THREE.Mesh).isMesh) selectable.push(object);
         });
         frame();
+        requestRender();
       },
       undefined,
       (loadError) => setError(loadError instanceof Error ? loadError.message : "Could not load GLB.")
     );
 
-    animate();
+    requestRender();
 
     return () => {
       disposed = true;
       rotateXRef.current = null;
       rotateYRef.current = null;
-      window.removeEventListener("resize", resize);
+      resizeObserver.disconnect();
+      controls.removeEventListener("change", requestRender);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       controls.dispose();
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
       renderer.dispose();
       if (renderer.domElement.parentNode === host) host.removeChild(renderer.domElement);
       scene.traverse((object) => {
