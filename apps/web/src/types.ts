@@ -7,11 +7,49 @@ export type ModelRecord = {
   status: "uploaded" | "queued" | "processing" | "ready" | "failed" | string;
   has_display_glb: number;
   glb_size_bytes: number | null;
+  original_size_bytes: number | null;
   folder_id: number | null;
+  project_id: number | null;
+  project_name?: string | null;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
   default_view_json?: string | null;
 };
+
+export type ProjectRecord = {
+  id: number;
+  name: string;
+  slug: string;
+  created_at: string;
+  updated_at: string;
+  model_count: number;
+  total_size_bytes: number;
+};
+
+export type ModelListParams = {
+  view?: "all" | "unsorted" | "recycling";
+  projectId?: number;
+  q?: string;
+  sortBy?: "name" | "status" | "created_at" | "updated_at" | "glb_size_bytes" | "original_size_bytes" | "project";
+  sortDir?: "asc" | "desc";
+};
+
+export type StorageQuota = {
+  quotaBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+  percentUsed: number;
+  breakdown: {
+    originalBytes: number;
+    displayGlbBytes: number;
+    logsBytes: number;
+    deletedBytes: number;
+  };
+};
+
+export type BatchAction = "trash" | "restore" | "deleteForever" | "moveToProject";
+export type BatchResult = { updated: string[]; failed: Array<{ slug: string; reason: string }> };
 
 export type FolderRecord = {
   id: number;

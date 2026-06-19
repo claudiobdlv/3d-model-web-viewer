@@ -11,7 +11,10 @@ import {
   listModels,
   moveModelToFolder,
   renameModel,
-  saveModelDefaultView
+  restoreModel,
+  saveModelDefaultView,
+  trashModel,
+  type ModelListOptions
 } from "../db.js";
 import {
   createSlug,
@@ -43,23 +46,75 @@ const upload = multer({
 export const modelsRouter = express.Router();
 
 modelsRouter.get("/", (req, res) => {
-  const folder = typeof req.query.folder === "string" ? req.query.folder : undefined;
-  if (folder === "unsorted") {
-    res.json(listModels({ unsortedOnly: true }));
+  try {
+    res.json(listModels(parseListOptions(req.query)));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Invalid list options." });
+  }
+});
+
+modelsRouter.post("/batch", async (req, res) => {
+  const action = req.body?.action;
+  const slugs = req.body?.slugs;
+  const allowedActions = new Set(["trash", "restore", "deleteForever", "moveToProject"]);
+  if (!allowedActions.has(action)) {
+    res.status(400).json({ error: "Invalid batch action." });
+    return;
+  }
+  if (!Array.isArray(slugs) || slugs.length < 1 || slugs.length > 100) {
+    res.status(400).json({ error: "slugs must contain between 1 and 100 items." });
     return;
   }
 
-  if (folder) {
-    const folderId = Number(folder);
-    if (!Number.isInteger(folderId) || folderId < 1) {
-      res.status(400).json({ error: "Invalid folder id." });
+  let projectId: number | null = null;
+  if (action === "moveToProject") {
+    try {
+      projectId = parseOptionalFolderId(req.body?.projectId);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : "Invalid project id." });
       return;
     }
-    res.json(listModels({ folderId }));
-    return;
+    if (projectId !== null && !getFolderById(projectId)) {
+      res.status(400).json({ error: "Project not found." });
+      return;
+    }
   }
 
-  res.json(listModels());
+  const updated: string[] = [];
+  const failed: Array<{ slug: string; reason: string }> = [];
+  for (const value of slugs) {
+    const slug = typeof value === "string" ? value : "";
+    if (!isSafeSlug(slug)) {
+      failed.push({ slug, reason: "Invalid model slug." });
+      continue;
+    }
+    const model = getModelBySlug(slug, true);
+    if (!model) {
+      failed.push({ slug, reason: "Model not found." });
+      continue;
+    }
+
+    try {
+      if (action === "trash") {
+        if (model.deleted_at) throw new Error("Model is already in the recycling bin.");
+        trashModel(slug);
+      } else if (action === "restore") {
+        if (!model.deleted_at) throw new Error("Model is not in the recycling bin.");
+        restoreModel(slug);
+      } else if (action === "moveToProject") {
+        if (model.deleted_at) throw new Error("Deleted models cannot be moved.");
+        moveModelToFolder(slug, projectId);
+      } else {
+        if (!model.deleted_at) throw new Error("Model must be in the recycling bin before permanent deletion.");
+        await permanentlyDeleteModel(slug);
+      }
+      updated.push(slug);
+    } catch (error) {
+      failed.push({ slug, reason: error instanceof Error ? error.message : "Action failed." });
+    }
+  }
+
+  res.json({ updated, failed });
 });
 
 modelsRouter.get("/:slug", (req, res) => {
@@ -87,9 +142,9 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
   const sourceFilename = path.basename(req.file.originalname);
   const sourceExt = path.extname(sourceFilename).toLowerCase();
   const quality = parseConversionQuality(req.body?.quality);
-  const folderId = parseOptionalFolderId(req.body?.folderId);
+  const folderId = parseUploadProjectId(req.body);
   if (folderId !== null && !getFolderById(folderId)) {
-    res.status(400).send("Selected folder was not found.");
+    res.status(400).send("Selected project was not found.");
     return;
   }
   const slug = createSlug(sourceFilename);
@@ -130,6 +185,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
     status,
     hasDisplayGlb: isGlb,
     glbSizeBytes: isGlb ? req.file.size : null,
+    originalSizeBytes: req.file.size,
     folderId
   });
 
@@ -195,6 +251,55 @@ modelsRouter.patch("/:slug/folder", (req, res) => {
   }
 
   res.json(moveModelToFolder(slug, folderId));
+});
+
+modelsRouter.patch("/:slug/project", (req, res) => {
+  const { slug } = req.params;
+  if (!isSafeSlug(slug)) {
+    res.status(400).json({ error: "Invalid model slug." });
+    return;
+  }
+  if (!getModelBySlug(slug)) {
+    res.status(404).json({ error: "Model not found." });
+    return;
+  }
+  const projectId = parseOptionalFolderId(req.body?.projectId);
+  if (projectId !== null && !getFolderById(projectId)) {
+    res.status(400).json({ error: "Project not found." });
+    return;
+  }
+  res.json(moveModelToFolder(slug, projectId));
+});
+
+modelsRouter.post("/:slug/trash", (req, res) => {
+  const slug = req.params.slug;
+  if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
+  const model = getModelBySlug(slug, true);
+  if (!model) return void res.status(404).json({ error: "Model not found." });
+  if (model.deleted_at) return void res.status(409).json({ error: "Model is already in the recycling bin." });
+  res.json(trashModel(slug));
+});
+
+modelsRouter.post("/:slug/restore", (req, res) => {
+  const slug = req.params.slug;
+  if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
+  const model = getModelBySlug(slug, true);
+  if (!model) return void res.status(404).json({ error: "Model not found." });
+  if (!model.deleted_at) return void res.status(409).json({ error: "Model is not in the recycling bin." });
+  res.json(restoreModel(slug));
+});
+
+modelsRouter.delete("/:slug/forever", async (req, res, next) => {
+  try {
+    const slug = req.params.slug;
+    if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
+    const model = getModelBySlug(slug, true);
+    if (!model) return void res.status(404).json({ error: "Model not found." });
+    if (!model.deleted_at) return void res.status(409).json({ error: "Model must be in the recycling bin before permanent deletion." });
+    res.json({ ok: true, slug, ...(await permanentlyDeleteModel(slug)) });
+  } catch (error) {
+    next(error);
+  }
 });
 
 modelsRouter.post("/:slug/default-view", (req, res, next) => {
@@ -288,8 +393,7 @@ modelsRouter.delete("/:slug", async (req, res, next) => {
       return;
     }
 
-    const deletion = deleteModelBySlug(slug);
-    const removedPaths = await removeModelFiles(slug);
+    const { deletion, removedPaths } = await permanentlyDeleteModel(slug);
 
     res.json({
       ok: true,
@@ -322,6 +426,12 @@ async function removeModelFiles(slug: string): Promise<string[]> {
   return removedPaths;
 }
 
+async function permanentlyDeleteModel(slug: string) {
+  const removedPaths = await removeModelFiles(slug);
+  const deletion = deleteModelBySlug(slug);
+  return { deletion, removedPaths };
+}
+
 function parseOptionalFolderId(value: unknown): number | null {
   if (value === undefined || value === null || value === "" || value === "null") {
     return null;
@@ -333,4 +443,41 @@ function parseOptionalFolderId(value: unknown): number | null {
   }
 
   return folderId;
+}
+
+function parseUploadProjectId(body: Record<string, unknown> | undefined): number | null {
+  const projectValue = body?.projectId;
+  const folderValue = body?.folderId;
+  if (projectValue !== undefined && folderValue !== undefined && String(projectValue) !== String(folderValue)) {
+    throw new Error("projectId and folderId must match when both are provided.");
+  }
+  return parseOptionalFolderId(projectValue ?? folderValue);
+}
+
+function parseListOptions(query: express.Request["query"]) {
+  const allowedViews = new Set(["all", "unsorted", "recycling"]);
+  const allowedSorts = new Set(["name", "status", "created_at", "updated_at", "glb_size_bytes", "original_size_bytes", "project"]);
+  const viewValue = typeof query.view === "string" ? query.view : undefined;
+  const legacyFolder = typeof query.folder === "string" ? query.folder : undefined;
+  const view = viewValue ?? (legacyFolder === "unsorted" ? "unsorted" : "all");
+  if (!allowedViews.has(view)) throw new Error("Invalid view.");
+
+  const projectValue = typeof query.projectId === "string" ? query.projectId : legacyFolder !== "unsorted" ? legacyFolder : undefined;
+  let projectId: number | undefined;
+  if (projectValue !== undefined) {
+    projectId = Number(projectValue);
+    if (!Number.isInteger(projectId) || projectId < 1) throw new Error("Invalid project id.");
+  }
+  const sortBy = typeof query.sortBy === "string" ? query.sortBy : "created_at";
+  const sortDir = typeof query.sortDir === "string" ? query.sortDir : "desc";
+  if (!allowedSorts.has(sortBy)) throw new Error("Invalid sortBy.");
+  if (sortDir !== "asc" && sortDir !== "desc") throw new Error("Invalid sortDir.");
+  const q = typeof query.q === "string" ? query.q.trim().slice(0, 200) : undefined;
+  return {
+    view: view as NonNullable<ModelListOptions["view"]>,
+    projectId,
+    q,
+    sortBy: sortBy as NonNullable<ModelListOptions["sortBy"]>,
+    sortDir: sortDir as NonNullable<ModelListOptions["sortDir"]>
+  };
 }

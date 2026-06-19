@@ -1,4 +1,17 @@
-import type { ConversionQuality, FolderRecord, FolderSelection, JobRecord, ModelRecord, PublicModel, PublicShareResponse } from "./types";
+import type {
+  BatchAction,
+  BatchResult,
+  ConversionQuality,
+  FolderRecord,
+  FolderSelection,
+  JobRecord,
+  ModelListParams,
+  ModelRecord,
+  ProjectRecord,
+  PublicModel,
+  PublicShareResponse,
+  StorageQuota
+} from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -26,6 +39,44 @@ export function listModels(selection: FolderSelection): Promise<ModelRecord[]> {
   const query =
     selection === "unsorted" ? "?folder=unsorted" : typeof selection === "number" ? `?folder=${selection}` : "";
   return request<ModelRecord[]>(`/api/models${query}`);
+}
+
+export function listLibraryModels(params: ModelListParams = {}): Promise<ModelRecord[]> {
+  const query = new URLSearchParams();
+  if (params.view) query.set("view", params.view);
+  if (params.projectId) query.set("projectId", String(params.projectId));
+  if (params.q) query.set("q", params.q);
+  if (params.sortBy) query.set("sortBy", params.sortBy);
+  if (params.sortDir) query.set("sortDir", params.sortDir);
+  const suffix = query.size ? `?${query}` : "";
+  return request<ModelRecord[]>(`/api/models${suffix}`);
+}
+
+export function listProjects(): Promise<ProjectRecord[]> {
+  return request<ProjectRecord[]>("/api/projects");
+}
+
+export function createProject(name: string): Promise<ProjectRecord> {
+  return request<ProjectRecord>("/api/projects", { method: "POST", body: JSON.stringify({ name }) });
+}
+
+export function renameProject(projectId: number, name: string): Promise<ProjectRecord> {
+  return request<ProjectRecord>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify({ name }) });
+}
+
+export async function deleteProject(projectId: number): Promise<void> {
+  await request<{ ok: true }>(`/api/projects/${projectId}`, { method: "DELETE" });
+}
+
+export function getStorageQuota(): Promise<StorageQuota> {
+  return request<StorageQuota>("/api/storage/quota");
+}
+
+export function batchModels(action: BatchAction, slugs: string[], projectId?: number | null): Promise<BatchResult> {
+  return request<BatchResult>("/api/models/batch", {
+    method: "POST",
+    body: JSON.stringify({ action, slugs, ...(action === "moveToProject" ? { projectId: projectId ?? null } : {}) })
+  });
 }
 
 export function getModel(slug: string): Promise<ModelRecord> {

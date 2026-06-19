@@ -105,4 +105,15 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   assert.equal(replacementShare.reused, false);
   assert.equal((await fetch(`${origin}/public/${replacementShare.token}`)).status, 200);
   assert.equal((await fetch(`${origin}/public/${replacementShare.token}/model.glb`)).status, 200);
+
+  assert.equal((await fetch(`${origin}/api/models/${model.slug}/trash`, {
+    method: "POST",
+    headers: { authorization, accept: "application/json" }
+  })).status, 200);
+  assert.equal((await fetch(`${origin}/public/${replacementShare.token}`)).status, 404);
+  assert.equal((await fetch(`${origin}/api/models/${model.slug}/restore`, {
+    method: "POST",
+    headers: { authorization, accept: "application/json" }
+  })).status, 200);
+  assert.equal((await fetch(`${origin}/public/${replacementShare.token}`)).status, 200);
 });

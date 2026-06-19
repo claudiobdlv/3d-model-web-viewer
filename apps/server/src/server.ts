@@ -7,6 +7,7 @@ import {
   getActivePublicShareForModel,
   getModelById,
   getPublicShareModelByHash,
+  getStorageQuota,
   initDb,
   recordPublicShareAccess,
   revokePublicSharesForModel
@@ -20,6 +21,7 @@ import {
 import { foldersRouter } from "./routes/folders.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { modelsRouter } from "./routes/models.js";
+import { projectsRouter } from "./routes/projects.js";
 import { workerRouter } from "./routes/worker.js";
 import {
   ensureStorage,
@@ -138,6 +140,8 @@ app.delete("/api/models/:id/share", requireAdmin, (req, res) => {
 
 app.use("/api/models", requireAdmin, modelsRouter);
 app.use("/api/folders", requireAdmin, foldersRouter);
+app.use("/api/projects", requireAdmin, projectsRouter);
+app.get("/api/storage/quota", requireAdmin, (_req, res) => res.json(getStorageQuota()));
 app.use("/api/jobs", requireAdmin, jobsRouter);
 app.use("/api/worker", workerRouter);
 

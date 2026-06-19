@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { dbRoot, getModelDir } from "./storage.js";
+import { dbRoot, getModelDir, getUploadDir } from "./storage.js";
 import { parseConversionQuality, type ConversionQuality } from "./quality.js";
 
 export type ModelRecord = {
@@ -13,7 +13,11 @@ export type ModelRecord = {
   status: string;
   has_display_glb: number;
   glb_size_bytes: number | null;
+  original_size_bytes: number | null;
   folder_id: number | null;
+  project_id: number | null;
+  project_name?: string | null;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
   default_view_json?: string | null;
@@ -27,6 +31,28 @@ export type FolderRecord = {
   created_at: string;
   updated_at: string;
   model_count?: number;
+  total_size_bytes?: number;
+};
+
+export type ModelListOptions = {
+  view?: "all" | "unsorted" | "recycling";
+  projectId?: number;
+  q?: string;
+  sortBy?: "name" | "status" | "created_at" | "updated_at" | "glb_size_bytes" | "original_size_bytes" | "project";
+  sortDir?: "asc" | "desc";
+};
+
+export type StorageQuota = {
+  quotaBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+  percentUsed: number;
+  breakdown: {
+    originalBytes: number;
+    displayGlbBytes: number;
+    logsBytes: number;
+    deletedBytes: number;
+  };
 };
 
 export type JobRecord = {
@@ -135,14 +161,21 @@ export function initDb(): void {
   ensureColumn("jobs", "quality", "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn("models", "folder_id", "INTEGER REFERENCES folders(id)");
   ensureColumn("models", "glb_size_bytes", "INTEGER");
+  ensureColumn("models", "original_size_bytes", "INTEGER");
+  ensureColumn("models", "deleted_at", "TEXT");
   ensureColumn("models", "default_view_json", "TEXT");
   ensureColumn("public_shares", "public_token", "TEXT");
   db.exec(`
+    CREATE INDEX IF NOT EXISTS models_deleted_at_idx
+      ON models (deleted_at);
+    CREATE INDEX IF NOT EXISTS models_folder_deleted_idx
+      ON models (folder_id, deleted_at);
     CREATE UNIQUE INDEX IF NOT EXISTS public_shares_public_token_idx
       ON public_shares (public_token)
       WHERE public_token IS NOT NULL;
   `);
   backfillGlbSizes();
+  backfillOriginalSizes();
 }
 
 function backfillGlbSizes(): void {
@@ -160,6 +193,21 @@ function backfillGlbSizes(): void {
   }
 }
 
+function backfillOriginalSizes(): void {
+  const models = db
+    .prepare("SELECT id, slug, source_ext FROM models WHERE original_size_bytes IS NULL")
+    .all() as Array<{ id: number; slug: string; source_ext: string }>;
+  const update = db.prepare("UPDATE models SET original_size_bytes = ? WHERE id = ?");
+
+  for (const model of models) {
+    try {
+      update.run(fs.statSync(path.join(getUploadDir(model.slug), `original${model.source_ext}`)).size, model.id);
+    } catch {
+      // Missing legacy source files stay nullable and contribute zero to quota.
+    }
+  }
+}
+
 function ensureColumn(table: string, column: string, definition: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (!columns.some((existing) => existing.name === column)) {
@@ -167,28 +215,61 @@ function ensureColumn(table: string, column: string, definition: string): void {
   }
 }
 
-export function listModels(filter: { folderId?: number | null; unsortedOnly?: boolean } = {}): ModelRecord[] {
-  if (filter.unsortedOnly) {
-    return db
-      .prepare("SELECT * FROM models WHERE folder_id IS NULL ORDER BY created_at DESC, id DESC")
-      .all() as ModelRecord[];
+export function listModels(options: ModelListOptions = {}): ModelRecord[] {
+  const sortColumns: Record<NonNullable<ModelListOptions["sortBy"]>, string> = {
+    name: "lower(models.name)",
+    status: "lower(models.status)",
+    created_at: "models.created_at",
+    updated_at: "models.updated_at",
+    glb_size_bytes: "models.glb_size_bytes",
+    original_size_bytes: "models.original_size_bytes",
+    project: "lower(folders.name)"
+  };
+  const where: string[] = [];
+  const params: Array<string | number> = [];
+
+  if (options.view === "recycling") where.push("models.deleted_at IS NOT NULL");
+  else where.push("models.deleted_at IS NULL");
+  if (options.view === "unsorted") where.push("models.folder_id IS NULL");
+  if (typeof options.projectId === "number") {
+    where.push("models.folder_id = ?");
+    params.push(options.projectId);
+  }
+  if (options.q) {
+    where.push("(models.name LIKE ? ESCAPE '\\' OR models.source_filename LIKE ? ESCAPE '\\' OR folders.name LIKE ? ESCAPE '\\')");
+    const query = `%${escapeLike(options.q)}%`;
+    params.push(query, query, query);
   }
 
-  if (typeof filter.folderId === "number") {
-    return db
-      .prepare("SELECT * FROM models WHERE folder_id = ? ORDER BY created_at DESC, id DESC")
-      .all(filter.folderId) as ModelRecord[];
-  }
-
-  return db.prepare("SELECT * FROM models ORDER BY created_at DESC, id DESC").all() as ModelRecord[];
+  const sortBy = options.sortBy ?? "created_at";
+  const sortDir = options.sortDir === "asc" ? "ASC" : "DESC";
+  return db.prepare(
+    `SELECT models.*, models.folder_id AS project_id, folders.name AS project_name
+     FROM models
+     LEFT JOIN folders ON folders.id = models.folder_id
+     WHERE ${where.join(" AND ")}
+     ORDER BY ${sortColumns[sortBy]} ${sortDir}, models.id ${sortDir}`
+  ).all(...params) as ModelRecord[];
 }
 
-export function getModelBySlug(slug: string): ModelRecord | undefined {
-  return db.prepare("SELECT * FROM models WHERE slug = ?").get(slug) as ModelRecord | undefined;
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`);
 }
 
-export function getModelById(id: number): ModelRecord | undefined {
-  return db.prepare("SELECT * FROM models WHERE id = ?").get(id) as ModelRecord | undefined;
+export function getModelBySlug(slug: string, includeDeleted = false): ModelRecord | undefined {
+  return db.prepare(
+    `SELECT models.*, models.folder_id AS project_id, folders.name AS project_name
+     FROM models LEFT JOIN folders ON folders.id = models.folder_id
+     WHERE models.slug = ? ${includeDeleted ? "" : "AND models.deleted_at IS NULL"}`
+  ).get(slug) as ModelRecord | undefined;
+}
+
+export function getModelById(id: number, includeDeleted = false): ModelRecord | undefined {
+  return db.prepare(
+    `SELECT models.*, models.folder_id AS project_id, folders.name AS project_name
+     FROM models LEFT JOIN folders ON folders.id = models.folder_id
+     WHERE models.id = ? ${includeDeleted ? "" : "AND models.deleted_at IS NULL"}`
+  ).get(id) as ModelRecord | undefined;
 }
 
 export function createPublicShare(input: {
@@ -232,7 +313,8 @@ export function getPublicShareModelByHash(tokenHash: string): PublicShareModelRe
             public_shares.access_count
      FROM public_shares
      JOIN models ON models.id = public_shares.model_id
-     WHERE public_shares.token_hash = ? AND public_shares.revoked_at IS NULL`
+     WHERE public_shares.token_hash = ? AND public_shares.revoked_at IS NULL
+       AND models.deleted_at IS NULL`
   ).get(tokenHash) as PublicShareModelRecord | undefined;
 }
 
@@ -263,12 +345,13 @@ export function createModel(input: {
   status: string;
   hasDisplayGlb: boolean;
   glbSizeBytes?: number | null;
+  originalSizeBytes?: number | null;
   folderId?: number | null;
 }): ModelRecord {
   const result = db
     .prepare(
-      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb, glb_size_bytes, folder_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb, glb_size_bytes, original_size_bytes, folder_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.slug,
@@ -278,10 +361,11 @@ export function createModel(input: {
       input.status,
       input.hasDisplayGlb ? 1 : 0,
       input.glbSizeBytes ?? null,
+      input.originalSizeBytes ?? null,
       input.folderId ?? null
     );
 
-  return db.prepare("SELECT * FROM models WHERE id = ?").get(result.lastInsertRowid) as ModelRecord;
+  return getModelById(Number(result.lastInsertRowid))!;
 }
 
 export function createJob(input: {
@@ -311,9 +395,10 @@ export function listFolders(): FolderRecord[] {
   return db
     .prepare(
       `SELECT folders.*,
-              COUNT(models.id) AS model_count
+              COUNT(models.id) AS model_count,
+              COALESCE(SUM(COALESCE(models.original_size_bytes, 0) + COALESCE(models.glb_size_bytes, 0)), 0) AS total_size_bytes
        FROM folders
-       LEFT JOIN models ON models.folder_id = folders.id
+       LEFT JOIN models ON models.folder_id = folders.id AND models.deleted_at IS NULL
        GROUP BY folders.id
        ORDER BY lower(folders.name) ASC, folders.id ASC`
     )
@@ -367,10 +452,45 @@ export function moveModelToFolder(slug: string, folderId: number | null): ModelR
     `UPDATE models
      SET folder_id = ?,
          updated_at = CURRENT_TIMESTAMP
-     WHERE slug = ?`
+     WHERE slug = ? AND deleted_at IS NULL`
   ).run(folderId, slug);
 
   return getModelBySlug(slug);
+}
+
+export function trashModel(slug: string): ModelRecord | undefined {
+  db.prepare(
+    `UPDATE models SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+     WHERE slug = ? AND deleted_at IS NULL`
+  ).run(slug);
+  return getModelBySlug(slug, true);
+}
+
+export function restoreModel(slug: string): ModelRecord | undefined {
+  db.prepare(
+    `UPDATE models SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+     WHERE slug = ? AND deleted_at IS NOT NULL`
+  ).run(slug);
+  return getModelBySlug(slug);
+}
+
+export function getStorageQuota(): StorageQuota {
+  const totals = db.prepare(
+    `SELECT
+       COALESCE(SUM(original_size_bytes), 0) AS originalBytes,
+       COALESCE(SUM(glb_size_bytes), 0) AS displayGlbBytes,
+       COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN COALESCE(original_size_bytes, 0) + COALESCE(glb_size_bytes, 0) ELSE 0 END), 0) AS deletedBytes
+     FROM models`
+  ).get() as { originalBytes: number; displayGlbBytes: number; deletedBytes: number };
+  const quotaBytes = 5 * 1024 * 1024 * 1024;
+  const usedBytes = totals.originalBytes + totals.displayGlbBytes;
+  return {
+    quotaBytes,
+    usedBytes,
+    availableBytes: Math.max(0, quotaBytes - usedBytes),
+    percentUsed: quotaBytes === 0 ? 0 : Number(((usedBytes / quotaBytes) * 100).toFixed(4)),
+    breakdown: { ...totals, logsBytes: 0 }
+  };
 }
 
 export function renameModel(slug: string, nameInput: string): ModelRecord | undefined {
@@ -439,6 +559,7 @@ export function claimNextWorkerJob(): WorkerJobRecord | undefined {
        WHERE jobs.type = 'step-to-glb'
          AND jobs.status IN ('uploaded', 'queued')
          AND models.source_ext IN ('.step', '.stp')
+         AND models.deleted_at IS NULL
        ORDER BY jobs.created_at ASC, jobs.id ASC
        LIMIT 1`
       )
