@@ -49,6 +49,7 @@ export type PublicShareRecord = {
   model_id: number;
   token_hash: string;
   token_prefix: string;
+  public_token: string | null;
   created_at: string;
   revoked_at: string | null;
   last_accessed_at: string | null;
@@ -135,6 +136,12 @@ export function initDb(): void {
   ensureColumn("models", "folder_id", "INTEGER REFERENCES folders(id)");
   ensureColumn("models", "glb_size_bytes", "INTEGER");
   ensureColumn("models", "default_view_json", "TEXT");
+  ensureColumn("public_shares", "public_token", "TEXT");
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS public_shares_public_token_idx
+      ON public_shares (public_token)
+      WHERE public_token IS NOT NULL;
+  `);
   backfillGlbSizes();
 }
 
@@ -189,30 +196,19 @@ export function createPublicShare(input: {
   modelId: number;
   tokenHash: string;
   tokenPrefix: string;
+  publicToken: string;
 }): PublicShareRecord {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.prepare(
-      `UPDATE public_shares
-       SET revoked_at = CURRENT_TIMESTAMP
-       WHERE model_id = ? AND revoked_at IS NULL`
-    ).run(input.modelId);
-    db.prepare(
-      `INSERT INTO public_shares (id, model_id, token_hash, token_prefix)
-       VALUES (?, ?, ?, ?)`
-    ).run(input.id, input.modelId, input.tokenHash, input.tokenPrefix);
-    db.exec("COMMIT");
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
+  db.prepare(
+    `INSERT INTO public_shares (id, model_id, token_hash, token_prefix, public_token)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(input.id, input.modelId, input.tokenHash, input.tokenPrefix, input.publicToken);
   return db.prepare("SELECT * FROM public_shares WHERE id = ?").get(input.id) as PublicShareRecord;
 }
 
 export function getActivePublicShareForModel(modelId: number): PublicShareRecord | undefined {
   return db.prepare(
     `SELECT * FROM public_shares
-     WHERE model_id = ? AND revoked_at IS NULL
+     WHERE model_id = ? AND revoked_at IS NULL AND public_token IS NOT NULL
      ORDER BY created_at DESC LIMIT 1`
   ).get(modelId) as PublicShareRecord | undefined;
 }

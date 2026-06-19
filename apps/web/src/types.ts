@@ -46,7 +46,7 @@ export type PublicShareResponse = {
   token: string;
   url: string;
   model: Pick<ModelRecord, "id" | "slug" | "name">;
-  rotated: boolean;
+  reused: boolean;
 };
 
 export type PublicModel = {

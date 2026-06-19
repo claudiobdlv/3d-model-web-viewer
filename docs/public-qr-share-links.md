@@ -1,16 +1,18 @@
 # Public QR share links
 
-ModelBase can issue a read-only public link for a viewer-ready model. The admin file explorer's **Generate QR code** action creates a new 256-bit random token and downloads a 1200 px JPEG named `modelbase-qr-<slug>.jpg`. The QR is black on white, has a four-module quiet zone, and uses error-correction level H.
+ModelBase can issue a stable, read-only public link for a viewer-ready model. The admin file explorer's **Download QR code** action creates a 256-bit random token when the model has no active reusable share, or reuses the existing token when it does. It downloads a 1200 px JPEG named `modelbase-qr-<slug>.jpg`. The QR is black on white, has a four-module quiet zone, and uses error-correction level H.
 
 ## Routes and data flow
 
-- `POST /api/models/:id/share` is a Basic-Auth-protected admin action. It returns the raw token and absolute public URL once.
+- `POST /api/models/:id/share` is a Basic-Auth-protected admin action. It returns the same active token and absolute public URL on every call, creating them only when no reusable active share exists.
 - `DELETE /api/models/:id/share` is protected and revokes the active link.
 - `GET /public/:token` returns only the public viewer shell.
 - `GET /public/:token/model.json` returns only `name`, `slug`, and the token-scoped GLB URL.
 - `GET /public/:token/model.glb` serves only that share's `display.glb`.
 
-The `public_shares` SQLite table stores the model ID, a SHA-256 token hash, an eight-character diagnostic prefix, timestamps, and an access count. The raw token is never stored. Generating another QR for the same model revokes the old active link and rotates to a new token because a hash-only token cannot be recovered safely for reuse.
+The `public_shares` SQLite table stores the model ID, the stable random public bearer token, its SHA-256 hash, an eight-character diagnostic prefix, timestamps, and an access count. The hash remains the public-route lookup key. The bearer token is stored so the protected admin action can reproduce the same printed URL; it is not exposed by public APIs and is not an admin credential.
+
+Existing hash-only shares created before this lifecycle change remain valid. Because their raw tokens cannot be recovered, the first QR download after upgrading creates one reusable share without revoking those legacy links. Explicit revocation invalidates all active shares for the model.
 
 The public viewer retains orbit, pan, zoom, Rotate X/Y 90 degrees, and object picking. It has no admin navigation, upload, source/GLB download, logs, rename, delete, folders, or file explorer.
 
@@ -18,7 +20,9 @@ Admin APIs (apart from the existing health check), `/3dviewer/*`, `/model-files/
 
 ## Revocation
 
-Choose **Revoke public QR link** in the ready model's row menu. Revocation is immediate. The viewer page, metadata endpoint, and GLB endpoint then return a safe 404 response. Generating a replacement QR also revokes the prior link.
+Choose **Revoke public QR link** in the ready model's row menu. Revocation is immediate and deliberately breaks existing printed drawings: the viewer page, metadata endpoint, and GLB endpoint then return a safe 404 response. The next **Download QR code** action creates a new stable token and URL. Re-downloading without revoking never rotates the token.
+
+Public QR links do not expire automatically. They remain stable until an admin revokes them, the model is deleted, or the model is no longer viewer-ready or its `display.glb` is unavailable. A future regenerate action must be treated as destructive for the same reason as revoke; normal QR downloading must never invoke it.
 
 ## Required manual Cloudflare Access change
 
@@ -42,4 +46,5 @@ The app sends `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, and `X-
 - Prefer at least 30-40 mm square on clean, high-contrast drawings; test the actual print size and site lighting before distribution.
 - Avoid scaling with interpolation that blurs module edges.
 - Scan one printed proof from typical working distance before issuing drawings.
-- Revoke and regenerate the link when a drawing becomes obsolete.
+- Re-downloading a QR is safe and does not invalidate previously printed drawings.
+- Revoke the link only when the drawing or public access is intentionally made obsolete.

@@ -107,21 +107,22 @@ app.post("/api/models/:id/share", requireAdmin, (req, res) => {
     return;
   }
 
-  // Raw tokens cannot be recovered from their hashes. Generating again rotates
-  // the active link so the database never needs to store reusable credentials.
-  const replacedShare = getActivePublicShareForModel(model.id);
-  const token = generatePublicToken();
-  createPublicShare({
-    id: crypto.randomUUID(),
-    modelId: model.id,
-    tokenHash: hashPublicToken(token),
-    tokenPrefix: token.slice(0, 8)
-  });
-  res.status(201).json({
+  const activeShare = getActivePublicShareForModel(model.id);
+  const token = activeShare?.public_token || generatePublicToken();
+  if (!activeShare) {
+    createPublicShare({
+      id: crypto.randomUUID(),
+      modelId: model.id,
+      tokenHash: hashPublicToken(token),
+      tokenPrefix: token.slice(0, 8),
+      publicToken: token
+    });
+  }
+  res.status(activeShare ? 200 : 201).json({
     token,
     url: publicShareUrl(token),
     model: { id: model.id, slug: model.slug, name: model.name },
-    rotated: Boolean(replacedShare)
+    reused: Boolean(activeShare)
   });
 });
 

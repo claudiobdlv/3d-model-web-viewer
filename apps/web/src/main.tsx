@@ -472,7 +472,7 @@ function RowMenu({ menuRef, menu, model, onRename, onDelete }: {
     try {
       const share = await createPublicShare(model.id);
       await downloadPublicShareQr(share.url, model.slug);
-      console.info(share.rotated ? "Public QR link rotated." : "Public QR link created.", share.url);
+      console.info(share.reused ? "Existing public QR link downloaded." : "Public QR link created.", share.url);
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Could not generate public QR code.");
     }
@@ -505,7 +505,7 @@ function RowMenu({ menuRef, menu, model, onRename, onDelete }: {
       {canShare ? (
         <>
           <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-sm hover:bg-[var(--panel-strong)]" type="button" onClick={() => void generateQr()}>
-            <QrCode size={15} /> Generate QR code
+            <QrCode size={15} /> Download QR code
           </button>
           <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-sm hover:bg-[var(--panel-strong)]" type="button" onClick={() => void revokeQr()}>
             <QrCode size={15} /> Revoke public QR link
