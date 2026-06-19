@@ -4,6 +4,7 @@ export type WorkerConfig = {
   serverUrl: string;
   token: string;
   pollIntervalMs: number;
+  maxConcurrentJobs: number;
   outputDir: string;
   converterBackend: "occt-js" | "xcaf-baseline";
   converterCli: string;
@@ -46,6 +47,11 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     serverUrl: trimTrailingSlash(process.env.SERVER_URL || "http://localhost:3009"),
     token,
     pollIntervalMs: Math.max(1, pollIntervalSeconds) * 1000,
+    maxConcurrentJobs: positiveInteger(
+      process.env.WORKER_MAX_CONCURRENT_JOBS,
+      1,
+      "WORKER_MAX_CONCURRENT_JOBS"
+    ),
     outputDir: path.resolve(process.env.WORKER_OUTPUT_DIR || "./worker-output"),
     converterBackend: converterBackend as WorkerConfig["converterBackend"],
     converterCli: path.resolve(process.env.CONVERTER_CLI || "../converter/src/cli.js"),
@@ -67,7 +73,7 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
   if (value === undefined || value.trim() === "") return fallback;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new Error(`${name} must be a positive integer number of bytes.`);
+    throw new Error(`${name} must be a positive integer.`);
   }
   return parsed;
 }

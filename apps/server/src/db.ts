@@ -428,9 +428,11 @@ export type WorkerJobRecord = JobRecord & {
   source_ext: string;
 };
 
-export function getNextWorkerJob(): WorkerJobRecord | undefined {
-  return db
-    .prepare(
+export function claimNextWorkerJob(): WorkerJobRecord | undefined {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const job = db
+      .prepare(
       `SELECT jobs.*, models.source_filename, models.source_ext
        FROM jobs
        JOIN models ON models.id = jobs.model_id
@@ -439,8 +441,43 @@ export function getNextWorkerJob(): WorkerJobRecord | undefined {
          AND models.source_ext IN ('.step', '.stp')
        ORDER BY jobs.created_at ASC, jobs.id ASC
        LIMIT 1`
-    )
-    .get() as WorkerJobRecord | undefined;
+      )
+      .get() as WorkerJobRecord | undefined;
+
+    if (!job) {
+      db.exec("COMMIT");
+      return undefined;
+    }
+
+    const result = db.prepare(
+      `UPDATE jobs
+       SET status = 'processing',
+           message = 'Worker claimed job for processing.',
+           updated_at = CURRENT_TIMESTAMP,
+           started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+           completed_at = NULL,
+           failed_at = NULL
+       WHERE id = ? AND status IN ('uploaded', 'queued')`
+    ).run(job.id);
+
+    if (result.changes !== 1) {
+      db.exec("ROLLBACK");
+      return undefined;
+    }
+
+    db.prepare(
+      `UPDATE models
+       SET status = 'processing',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(job.model_id);
+
+    db.exec("COMMIT");
+    return { ...job, status: "processing" };
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function getJobForWorker(jobId: number): WorkerJobRecord | undefined {

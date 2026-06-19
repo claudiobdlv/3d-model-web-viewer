@@ -10,6 +10,7 @@ const client = new WorkerClient(config);
 
 console.log(`Converter worker starting against ${config.serverUrl}`);
 console.log(`Poll interval: ${config.pollIntervalMs / 1000}s`);
+console.log(`Maximum concurrent jobs: ${config.maxConcurrentJobs}`);
 console.log(`Output dir: ${config.outputDir}`);
 console.log(`Converter backend: ${config.converterBackend}`);
 console.log(`Converter CLI: ${config.converterCli}`);
@@ -25,34 +26,80 @@ console.log(`Maximum model artifact: ${config.maxModelArtifactBytes} bytes`);
 console.log(`GLB optimization mode: ${config.glbOptimizationMode}`);
 console.log(`Run once: ${config.runOnce}`);
 
-while (true) {
-  await pollOnce();
-  if (config.runOnce) {
-    break;
+const activeJobs = new Set<Promise<void>>();
+let shutdownRequested = false;
+
+process.once("SIGINT", requestShutdown);
+process.once("SIGTERM", requestShutdown);
+
+await runWorkerPool();
+
+async function runWorkerPool(): Promise<void> {
+  while (!shutdownRequested) {
+    let queueEmpty = false;
+
+    while (!shutdownRequested && activeJobs.size < config.maxConcurrentJobs) {
+      let job: WorkerJob | null;
+      try {
+        job = await client.getNextJob();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown polling error.";
+        console.error(`Could not claim next job: ${message}`);
+        queueEmpty = true;
+        break;
+      }
+
+      if (!job) {
+        queueEmpty = true;
+        break;
+      }
+
+      startTrackedJob(job);
+    }
+
+    if (config.runOnce) break;
+
+    if (activeJobs.size > 0) {
+      await Promise.race(activeJobs);
+    } else if (queueEmpty) {
+      console.log("No pending worker job.");
+      await sleep(config.pollIntervalMs);
+    }
   }
 
-  await sleep(config.pollIntervalMs);
+  if (activeJobs.size > 0) {
+    console.log(`Worker shutdown waiting for ${activeJobs.size} active job(s).`);
+    await Promise.allSettled(activeJobs);
+  }
+  console.log("Converter worker stopped cleanly.");
 }
 
-async function pollOnce(): Promise<boolean> {
-  const job = await client.getNextJob();
-  if (!job) {
-    console.log("No pending worker job.");
-    return false;
-  }
+function startTrackedJob(job: WorkerJob): void {
+  let task: Promise<void>;
+  task = processJob(job).finally(() => {
+    activeJobs.delete(task);
+    console.log(
+      `Job ${job.id} for ${job.modelSlug} finished; active jobs: ${activeJobs.size}/${config.maxConcurrentJobs}`
+    );
+  });
+  activeJobs.add(task);
+  console.log(
+    `Job ${job.id} for ${job.modelSlug} started; active jobs: ${activeJobs.size}/${config.maxConcurrentJobs}`
+  );
+}
 
-  await processJob(job);
-  return true;
+function requestShutdown(): void {
+  if (shutdownRequested) return;
+  shutdownRequested = true;
+  console.log(`Worker shutdown requested; active jobs: ${activeJobs.size}/${config.maxConcurrentJobs}`);
 }
 
 async function processJob(job: WorkerJob): Promise<void> {
   const quality = resolveSemanticQuality(job.quality, config.quality);
   const nativePreset = nativeQualityPreset(quality);
-  console.log(`Processing job ${job.id} for ${job.modelSlug}`);
+  console.log(`Processing claimed job ${job.id} for ${job.modelSlug}`);
   console.log(`Job quality: ${quality}; native XCAF preset: ${nativePreset}`);
   try {
-    await client.startJob(job.id);
-
     const jobDir = path.join(config.outputDir, job.modelSlug);
     const sourcePath = path.join(jobDir, job.sourceFilename);
     await client.downloadSource(job, sourcePath);

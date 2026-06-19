@@ -19,10 +19,6 @@ export class WorkerClient {
     return payload.job;
   }
 
-  async startJob(jobId: number): Promise<void> {
-    await this.request(`/api/worker/jobs/${jobId}/start`, { method: "POST" });
-  }
-
   async downloadSource(job: WorkerJob, outputPath: string): Promise<void> {
     const response = await this.request(job.downloadUrl);
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });

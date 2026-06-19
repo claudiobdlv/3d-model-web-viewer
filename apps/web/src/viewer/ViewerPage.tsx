@@ -923,11 +923,19 @@ function selectedDisplayName(object: THREE.Object3D): string {
       if (name) return name;
     }
   }
+  const objectName = readableName(object.name);
+  if (objectName) return objectName;
   for (const source of sources) {
     const layer = readableName(firstValue(source.value, ["layerNames", "layerName", "layer"]));
     if (layer) return layer;
   }
-  return readableName(object.name) ?? "Unnamed object";
+  for (const key of ["stableObjectId", "selectableId"]) {
+    for (const source of sources) {
+      const id = stableIdentifier(source.value[key]);
+      if (id) return id;
+    }
+  }
+  return "Unnamed part";
 }
 
 function metadataSources(object: THREE.Object3D): MetadataSource[] {
@@ -973,6 +981,13 @@ function readableName(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const name = value.trim();
   if (!name || /^=>\s*\[[\d:]+\]$/.test(name) || /^\d+(?::\d+)+$/.test(name)) return undefined;
+  if (/^(mesh|node|object|primitive)[ _-]?\d+$/i.test(name)) return undefined;
   if (["document", "compound", "compsolid", "solid", "shell", "shape"].includes(name.toLowerCase())) return undefined;
   return name;
+}
+
+function stableIdentifier(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const id = String(value).trim();
+  return id || undefined;
 }

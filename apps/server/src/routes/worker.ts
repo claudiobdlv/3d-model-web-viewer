@@ -4,7 +4,7 @@ import express from "express";
 import multer from "multer";
 import {
   getJobForWorker,
-  getNextWorkerJob,
+  claimNextWorkerJob,
   markJobFailed,
   markJobProcessing,
   markJobReady
@@ -55,7 +55,7 @@ workerRouter.use((req, res, next) => {
 });
 
 workerRouter.get("/jobs/next", (_req, res) => {
-  const job = getNextWorkerJob();
+  const job = claimNextWorkerJob();
   if (!job) {
     res.json({ job: null });
     return;
@@ -71,6 +71,11 @@ workerRouter.post("/jobs/:jobId/start", (req, res) => {
   const job = getValidStepJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Worker job not found." });
+    return;
+  }
+
+  if (job.status !== "uploaded" && job.status !== "queued") {
+    res.status(409).json({ error: `Worker job is already ${job.status}.` });
     return;
   }
 

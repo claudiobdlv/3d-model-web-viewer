@@ -38,6 +38,7 @@ WORKDIR /app/apps/worker
 
 ENV SERVER_URL=http://server:3009
 ENV WORKER_OUTPUT_DIR=/app/worker-output
+ENV WORKER_MAX_CONCURRENT_JOBS=1
 ENV CONVERTER_BACKEND=occt-js
 ENV CONVERTER_CLI=/app/apps/converter/src/cli.js
 ENV XCAF_CONVERTER_BIN=/app/bin/xcaf-step-to-glb
