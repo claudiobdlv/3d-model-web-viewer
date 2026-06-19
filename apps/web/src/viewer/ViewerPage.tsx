@@ -3,143 +3,94 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import { ArrowLeft, Box, Download, RotateCw, Home, Sun, Moon } from "lucide-react";
+import { ArrowLeft, Box, Download, Home, Sun, Moon } from "lucide-react";
 import { getModel, getPublicModel } from "../api";
 import type { ModelRecord, PublicModel } from "../types";
 
 type MetadataSource = { source: string; name: string; value: Record<string, unknown> };
 
-// --- SVG Gimbal Component ---
-// Renders a small interactive XYZ orientation indicator in the top-right of the viewer.
-// The gimbal state is updated from inside the render loop via a React ref callback.
-
-type GimbalAxis = { label: string; color: string; x: number; y: number; z: number; dot: number };
-
-function OrientationGimbal({
-  gimbalRef,
-  onAxisClick,
-}: {
-  gimbalRef: React.RefObject<((camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => void) | null>;
-  onAxisClick: (axis: string) => void;
-}) {
-  // We store the computed 2-D axis endpoints in state and update them from the render loop.
-  const [axes, setAxes] = useState<GimbalAxis[]>([]);
-  const localRef = useRef<(camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => void>(() => {});
+// --- Marquee Auto-Scroll Text Component ---
+// Automatically scrolls text horizontally if it overflows its container.
+// Includes pauses at the start and end, and respects reduced-motion preferences.
+function MarqueeText({ text }: { text: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [scrollDistance, setScrollDistance] = useState(0);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
 
   useEffect(() => {
-    // World-space axis directions after the Z-up correction (root rotates -90° around X so that
-    // the CAD Z axis points up in Three.js/screen space).
-    const WORLD_AXES = [
-      { label: "+X", color: "#ef4444", dir: new THREE.Vector3(1, 0, 0) },
-      { label: "-X", color: "#f87171", dir: new THREE.Vector3(-1, 0, 0) },
-      { label: "+Y", color: "#22c55e", dir: new THREE.Vector3(0, 1, 0) },
-      { label: "-Y", color: "#4ade80", dir: new THREE.Vector3(0, -1, 0) },
-      // +Z is visually "up" (was the CAD Z axis before -90° root rotation)
-      { label: "+Z", color: "#3b82f6", dir: new THREE.Vector3(0, 0, 1) },
-      { label: "-Z", color: "#93c5fd", dir: new THREE.Vector3(0, 0, -1) },
-    ];
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setPrefersReducedMotion(mediaQuery.matches);
+    const handler = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
+    mediaQuery.addEventListener("change", handler);
+    return () => mediaQuery.removeEventListener("change", handler);
+  }, []);
 
-    localRef.current = (camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => {
-      // Camera view matrix: to map world → camera space we use the camera quaternion inverse.
-      const camQInv = camQ.clone().invert();
-      const result: GimbalAxis[] = WORLD_AXES.map(({ label, color, dir }) => {
-        // 1. Apply root model rotation to the axis (accounts for Rotate X/Y transforms).
-        const rotated = dir.clone().applyQuaternion(rootQ);
-        // 2. Transform into camera space so it appears relative to the current view.
-        const inCam = rotated.clone().applyQuaternion(camQInv);
-        // 3. Simple orthographic projection: x → right, y → up, z → depth
-        //    SVG Y grows downward so negate y.
-        const SIZE = 44; // half-width of gimbal SVG canvas in px
-        return {
-          label,
-          color,
-          x: inCam.x * SIZE * 0.7,
-          y: -inCam.y * SIZE * 0.7,
-          z: inCam.z,       // depth: positive = towards viewer
-          dot: inCam.z,
-        };
-      });
-      // Sort so axes pointing towards the viewer render on top.
-      result.sort((a, b) => a.z - b.z);
-      setAxes(result);
+  useEffect(() => {
+    setScrollDistance(0);
+
+    const measure = () => {
+      const container = containerRef.current;
+      const textEl = textRef.current;
+      if (!container || !textEl) return;
+
+      const containerWidth = container.getBoundingClientRect().width;
+      const textWidth = textEl.scrollWidth;
+
+      if (textWidth > containerWidth) {
+        setScrollDistance(textWidth - containerWidth);
+      } else {
+        setScrollDistance(0);
+      }
     };
 
-    // Expose to parent via ref.
-    (gimbalRef as React.MutableRefObject<typeof localRef.current>).current = localRef.current;
+    // Small delay to ensure the layout has settled and font is rendered
+    const timer = setTimeout(measure, 50);
+
+    window.addEventListener("resize", measure);
     return () => {
-      (gimbalRef as React.MutableRefObject<typeof localRef.current | null>).current = null;
+      clearTimeout(timer);
+      window.removeEventListener("resize", measure);
     };
-  }, [gimbalRef]);
+  }, [text]);
 
-  const SIZE = 88; // total SVG size in px
-  const CENTER = SIZE / 2;
-  const STICK = 30; // length of each axis line
+  const duration = scrollDistance > 0 ? Math.max(4, scrollDistance / 20) : 0; // Slow, readable speed
+  const animationName = `marquee-${Math.round(scrollDistance)}`;
 
   return (
     <div
-      className="absolute right-3 z-10 select-none"
-      style={{ top: "calc(3.5rem + 12px)", pointerEvents: "auto" }}
-      aria-label="XYZ orientation gimbal"
+      ref={containerRef}
+      className="relative overflow-hidden whitespace-nowrap w-full"
+      style={{ display: "block" }}
     >
-      <svg
-        width={SIZE}
-        height={SIZE}
-        viewBox={`0 0 ${SIZE} ${SIZE}`}
-        style={{ overflow: "visible", filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.5))" }}
-      >
-        {/* Subtle background circle */}
-        <circle cx={CENTER} cy={CENTER} r={CENTER - 4} fill="rgba(0,0,0,0.18)" />
-        {axes.map((axis) => {
-          const ex = CENTER + axis.x;
-          const ey = CENTER + axis.y;
-          const opacity = axis.dot >= 0 ? 1 : 0.35;
-          const isPositive = axis.label.startsWith("+");
-          return (
-            <g
-              key={axis.label}
-              style={{ cursor: "pointer", opacity }}
-              onClick={() => onAxisClick(axis.label)}
-              aria-label={`Snap camera to ${axis.label} axis`}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => e.key === "Enter" && onAxisClick(axis.label)}
-            >
-              {isPositive && (
-                <line
-                  x1={CENTER}
-                  y1={CENTER}
-                  x2={ex}
-                  y2={ey}
-                  stroke={axis.color}
-                  strokeWidth={2.5}
-                  strokeLinecap="round"
-                />
-              )}
-              {isPositive ? (
-                <circle cx={ex} cy={ey} r={8} fill={axis.color} />
-              ) : (
-                <circle cx={ex} cy={ey} r={5} fill="none" stroke={axis.color} strokeWidth={2} />
-              )}
-              {isPositive && (
-                <text
-                  x={ex}
-                  y={ey}
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                  fontSize={7}
-                  fontWeight="bold"
-                  fill="white"
-                  style={{ pointerEvents: "none", userSelect: "none" }}
-                >
-                  {axis.label[1]}
-                </text>
-              )}
-            </g>
-          );
-        })}
-        {/* Central dot */}
-        <circle cx={CENTER} cy={CENTER} r={4} fill="white" opacity={0.9} />
-      </svg>
+      {scrollDistance > 0 && !prefersReducedMotion ? (
+        <>
+          <style>{`
+            @keyframes ${animationName} {
+              0%, 15% { transform: translate3d(0, 0, 0); }
+              45%, 60% { transform: translate3d(-${scrollDistance}px, 0, 0); }
+              90%, 100% { transform: translate3d(0, 0, 0); }
+            }
+          `}</style>
+          <span
+            ref={textRef}
+            className="inline-block"
+            style={{
+              animation: `${animationName} ${duration * 2}s linear infinite`,
+            }}
+          >
+            {text}
+          </span>
+        </>
+      ) : (
+        <span
+          ref={textRef}
+          className="inline-block max-w-full truncate"
+          style={{ textOverflow: "ellipsis" }}
+        >
+          {text}
+        </span>
+      )}
     </div>
   );
 }
@@ -151,12 +102,8 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
   const [selectedName, setSelectedName] = useState("none");
   const [loadProgress, setLoadProgress] = useState<number | null>(null);
   const canvasHost = useRef<HTMLDivElement | null>(null);
-  const rotateXRef = useRef<(() => void) | null>(null);
-  const rotateYRef = useRef<(() => void) | null>(null);
   const resetViewRef = useRef<(() => void) | null>(null);
   const updateThemeRef = useRef<((theme: "dark" | "light") => void) | null>(null);
-  const snapAxisRef = useRef<((axis: string) => void) | null>(null);
-  const gimbalUpdateRef = useRef<((camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => void) | null>(null);
 
   // Propagate theme changes into the live Three.js scene without reloading the GLB.
   useEffect(() => {
@@ -223,12 +170,9 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     scene.add(fill);
 
     let root: THREE.Group | null = null;
-    let xQuarterTurns = 0;
-    let yQuarterTurns = 0;
     let modelRadius = 1;
     let modelCenter = new THREE.Vector3();
     let defaultCamOffset = new THREE.Vector3(); // camera offset from target at default view
-    let rotationAnimation: { from: THREE.Quaternion; to: THREE.Quaternion; startedAt: number } | null = null;
     // Reset animation interpolates camera position, OrbitControls target, and root quaternion.
     // Controls are disabled for the duration to prevent damping from fighting the lerp.
     let resetAnimation: {
@@ -247,14 +191,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const displayNameCache = new WeakMap<THREE.Object3D, string>();
-
-    // Pre-allocated temporaries for per-frame animation (avoid GC pressure).
-    const _tmpVec = new THREE.Vector3();
-    const _tmpQuat = new THREE.Quaternion();
-
-    // Throttle gimbal React state updates to ~30 fps to avoid per-frame re-renders.
-    let lastGimbalUpdate = 0;
-    const GIMBAL_INTERVAL = 33; // ms (~30 fps)
 
     // Smooth easing: easeInOutCubic
     function easeInOutCubic(t: number): number {
@@ -316,56 +252,18 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       controls.update();
     };
 
-    const rotationTarget = () => new THREE.Quaternion().setFromEuler(new THREE.Euler(
-      -Math.PI / 2 + xQuarterTurns * Math.PI / 2,
-      yQuarterTurns * Math.PI / 2,
-      0,
-      "XYZ"
-    ));
-
-    const defaultRotationTarget = () => new THREE.Quaternion().setFromEuler(
-      new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ")
-    );
-
-    const animateToQuarterTurns = () => {
-      if (!root) return;
-      rotationAnimation = {
-        from: root.quaternion.clone(),
-        to: rotationTarget(),
-        startedAt: performance.now()
-      };
-      requestRender();
-    };
-
-    rotateXRef.current = () => {
-      if (!root) return;
-      stopIntro();
-      xQuarterTurns = (xQuarterTurns + 1) % 4;
-      animateToQuarterTurns();
-    };
-    rotateYRef.current = () => {
-      if (!root) return;
-      stopIntro();
-      yQuarterTurns = (yQuarterTurns + 1) % 4;
-      animateToQuarterTurns();
-    };
-
     resetViewRef.current = () => {
       if (!root) return;
       stopIntro();
-      // Cancel any ongoing model rotation animation.
-      rotationAnimation = null;
       // Cancel any previous reset/snap in-flight.
       cancelResetAnimation();
-      xQuarterTurns = 0;
-      yQuarterTurns = 0;
       startResetAnimation(
         camera.position.clone(),
         modelCenter.clone().add(defaultCamOffset),
         controls.target.clone(),
         modelCenter.clone(),
         root.quaternion.clone(),
-        defaultRotationTarget(),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ")),
       );
     };
 
@@ -400,34 +298,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       controls.update();
       controls.enableDamping = damping;
     }
-
-    // Snap camera to look along a world axis.
-    snapAxisRef.current = (axis: string) => {
-      if (!root) return;
-      stopIntro();
-      // Cancel any previous reset/snap in-flight.
-      cancelResetAnimation();
-      // We keep Rotate X/Y state unchanged — snapping is a camera move only.
-      const dist = camera.position.distanceTo(controls.target);
-      const dirs: Record<string, THREE.Vector3> = {
-        "+X": new THREE.Vector3(1, 0, 0),
-        "-X": new THREE.Vector3(-1, 0, 0),
-        "+Y": new THREE.Vector3(0, 1, 0),
-        "-Y": new THREE.Vector3(0, -1, 0),
-        "+Z": new THREE.Vector3(0, 1, 0.001), // near-top view
-        "-Z": new THREE.Vector3(0, -1, 0.001),
-      };
-      const dir = dirs[axis];
-      if (!dir) return;
-      startResetAnimation(
-        camera.position.clone(),
-        controls.target.clone().add(dir.clone().normalize().multiplyScalar(dist)),
-        controls.target.clone(),
-        controls.target.clone(),
-        root.quaternion.clone(),
-        root.quaternion.clone(), // keep current model rotation
-      );
-    };
 
     const onPointerDown = (event: PointerEvent) => {
       stopIntro();
@@ -506,7 +376,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
 
     // Animation constants
     const RESET_DURATION = 500;   // ms for Home/snap animations
-    const ROT_DURATION = 240;     // ms for Rotate X/Y
 
     function render() {
       animationFrame = null;
@@ -514,16 +383,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
 
       const now = performance.now();
       let needsMore = false;
-
-      // --- Model rotation animation (Rotate X/Y buttons) ---
-      if (root && rotationAnimation) {
-        const progress = Math.min((now - rotationAnimation.startedAt) / ROT_DURATION, 1);
-        const eased = easeInOutCubic(progress);
-        root.quaternion.slerpQuaternions(rotationAnimation.from, rotationAnimation.to, eased);
-        root.updateMatrixWorld(true);
-        if (progress >= 1) rotationAnimation = null;
-        else needsMore = true;
-      }
 
       // --- Reset / axis-snap animation ---
       // Controls are disabled for the duration (see startResetAnimation).
@@ -535,10 +394,12 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
         camera.position.lerpVectors(resetAnimation.fromCamPos, resetAnimation.toCamPos, eased);
         // Lerp the target into a temp first, then copy — avoids controls.target
         // being read in a half-updated state by any listener.
+        const _tmpVec = new THREE.Vector3();
         _tmpVec.lerpVectors(resetAnimation.fromTarget, resetAnimation.toTarget, eased);
         controls.target.copy(_tmpVec);
 
         if (root) {
+          const _tmpQuat = new THREE.Quaternion();
           _tmpQuat.slerpQuaternions(resetAnimation.fromRootQ, resetAnimation.toRootQ, eased);
           root.quaternion.copy(_tmpQuat);
           root.updateMatrixWorld(true);
@@ -621,12 +482,6 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
           camera.far = far;
           camera.updateProjectionMatrix();
         }
-      }
-
-      // --- Update gimbal (throttled to ~30 fps to avoid React re-render jank) ---
-      if (root && gimbalUpdateRef.current && now - lastGimbalUpdate >= GIMBAL_INTERVAL) {
-        lastGimbalUpdate = now;
-        gimbalUpdateRef.current(camera.quaternion, root.quaternion);
       }
 
       renderer.render(scene, camera);
@@ -717,10 +572,7 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     return () => {
       disposed = true;
       updateThemeRef.current = null;
-      rotateXRef.current = null;
-      rotateYRef.current = null;
       resetViewRef.current = null;
-      snapAxisRef.current = null;
       resizeObserver.disconnect();
       controls.removeEventListener("change", requestRender);
       controls.removeEventListener("start", onControlsStart);
@@ -806,24 +658,14 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
           </div>
         ) : null}
 
-        {/* XYZ Orientation Gimbal – top-right, above toolbar */}
-        <OrientationGimbal
-          gimbalRef={gimbalUpdateRef}
-          onAxisClick={(axis) => snapAxisRef.current?.(axis)}
-        />
+
 
         {/*
-          Bottom toolbar: Home | Rotate X | Rotate Y | separator | Selected object
+          Bottom toolbar: Home | separator | Selected object
           ─────────────────────────────────────────────────────────────────────────
-          Layout strategy for mobile:
-          - Positioned with env(safe-area-inset-bottom) to clear the home indicator / nav bar.
-          - flex-wrap allows the selected-name row to move below controls on very narrow screens.
-          - Buttons use h-10 (40 px) for comfortable touch targets.
-          - Selected text is truncated with min-w-0/overflow-hidden so it never pushes buttons away.
-          - max-w uses dvw units (supported alongside dvh) to respect real viewport width.
         */}
         <div
-          className="absolute left-1/2 z-10 flex w-max max-w-[calc(100vw-1.5rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-1 rounded-2xl border px-2 py-1.5 shadow-panel backdrop-blur"
+          className="absolute left-1/2 z-10 flex w-max max-w-[calc(100vw-1.5rem)] -translate-x-1/2 items-center justify-center gap-1 rounded-2xl border px-2 py-1.5 shadow-panel backdrop-blur"
           style={{
             bottom: "calc(12px + env(safe-area-inset-bottom, 0px))",
             borderColor: "var(--line)",
@@ -845,47 +687,15 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
 
           <div className="h-5 w-px shrink-0" style={{ background: "var(--line)" }} />
 
-          {/* Rotate X */}
-          <button
-            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl px-2.5 transition hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]"
-            type="button"
-            title="Rotate model 90 degrees around X"
-            aria-label="Rotate X 90 degrees"
-            onClick={() => rotateXRef.current?.()}
+          {/* Selected object name – never pushes buttons; scrolls dynamically if long */}
+          <div
+            className="flex items-center gap-1 min-w-0 max-w-[55vw] sm:max-w-[60vw] text-xs px-1"
           >
-            <RotateCw size={16} />
-            <span className="text-xs font-bold">
-              <span className="sm:hidden">X</span>
-              <span className="hidden sm:inline">Rotate X 90°</span>
-            </span>
-          </button>
-
-          {/* Rotate Y */}
-          <button
-            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl px-2.5 transition hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]"
-            type="button"
-            title="Rotate model 90 degrees around Y"
-            aria-label="Rotate Y 90 degrees"
-            onClick={() => rotateYRef.current?.()}
-          >
-            <RotateCw size={16} />
-            <span className="text-xs font-bold">
-              <span className="sm:hidden">Y</span>
-              <span className="hidden sm:inline">Rotate Y 90°</span>
-            </span>
-          </button>
-
-          <div className="h-5 w-px shrink-0" style={{ background: "var(--line)" }} />
-
-          {/* Selected object name – never pushes buttons; truncates cleanly */}
-          <span
-            className="min-w-0 max-w-[40vw] overflow-hidden whitespace-nowrap text-xs"
-            style={{ textOverflow: "ellipsis", display: "inline-block" }}
-            title={selectedName === "none" ? undefined : selectedName}
-          >
-            <strong className="text-[var(--text)]">Selected:</strong>{" "}
-            {selectedName}
-          </span>
+            <strong className="text-[var(--text)] shrink-0">Selected:</strong>
+            <div className="min-w-0 flex-1">
+              <MarqueeText text={selectedName} />
+            </div>
+          </div>
         </div>
       </main>
     </div>
