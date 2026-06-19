@@ -16,9 +16,11 @@ import {
   QrCode,
   RefreshCw,
   Search,
+  Sun,
   Trash2,
   Upload,
-  X
+  X,
+  Moon
 } from "lucide-react";
 import {
   createFolder as createFolderApi,
@@ -50,22 +52,43 @@ import { ViewerPage } from "./viewer/ViewerPage";
 import { downloadPublicShareQr } from "./qr";
 import "./index.css";
 
+const initialTheme = localStorage.getItem("theme") === "light" ? "light" : "dark";
+document.documentElement.setAttribute("data-theme", initialTheme);
+
 const root = createRoot(document.getElementById("root") as HTMLElement);
 type OpenMenu = { slug: string; x: number; y: number } | null;
 
-function App() {
-  if (window.location.pathname.startsWith("/public/")) {
-    const token = window.location.pathname.split("/").filter(Boolean)[1] ?? "";
-    return <ViewerPage publicToken={token} />;
-  }
-  if (window.location.pathname.startsWith("/3dviewer/")) {
-    return <ViewerPage />;
-  }
+function useTheme() {
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    const saved = localStorage.getItem("theme");
+    return saved === "light" ? "light" : "dark";
+  });
 
-  return <AdminPage />;
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+
+  return [theme, toggleTheme] as const;
 }
 
-function AdminPage() {
+function App() {
+  const [theme, toggleTheme] = useTheme();
+
+  if (window.location.pathname.startsWith("/public/")) {
+    const token = window.location.pathname.split("/").filter(Boolean)[1] ?? "";
+    return <ViewerPage publicToken={token} theme={theme} toggleTheme={toggleTheme} />;
+  }
+  if (window.location.pathname.startsWith("/3dviewer/")) {
+    return <ViewerPage theme={theme} toggleTheme={toggleTheme} />;
+  }
+
+  return <AdminPage theme={theme} toggleTheme={toggleTheme} />;
+}
+
+function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; toggleTheme: () => void }) {
   const [folders, setFolders] = useState<FolderRecord[]>([]);
   const [models, setModels] = useState<ModelRecord[]>([]);
   const [selection, setSelection] = useState<FolderSelection>("all");
@@ -133,7 +156,7 @@ function AdminPage() {
   const activeCount = models.filter((model) => activeStatuses.has(model.status)).length;
 
   return (
-    <div className="min-h-screen overflow-hidden" style={{ background: "var(--bg)", color: "var(--text)" }}>
+    <div className="overflow-hidden" style={{ minHeight: "100dvh", background: "var(--bg)", color: "var(--text)" }}>
       <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b px-4 backdrop-blur-xl" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--bg) 94%, transparent)" }}>
         <div className="flex min-w-0 items-center gap-3">
           <div className="grid h-9 w-9 place-items-center rounded bg-[var(--accent-strong)] text-[var(--accent-text)]">
@@ -148,6 +171,15 @@ function AdminPage() {
             <Search size={16} />
             <input className="min-w-0 flex-1 bg-transparent text-sm text-[var(--text)] outline-none" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" type="search" />
           </label>
+          <button
+            className="secondary-button"
+            type="button"
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            onClick={toggleTheme}
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
           <button className="primary-button" type="button" onClick={() => setUploadOpen(true)}>
             <Upload size={16} />
             Upload
@@ -155,7 +187,7 @@ function AdminPage() {
         </div>
       </header>
 
-      <main className="grid h-[calc(100vh-3.5rem)] grid-cols-1 overflow-hidden lg:grid-cols-[288px_minmax(0,1fr)]">
+      <main className="grid h-[calc(100dvh-3.5rem)] grid-cols-1 overflow-hidden lg:grid-cols-[288px_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col border-b lg:border-b-0 lg:border-r" style={{ borderColor: "var(--line)", background: "var(--panel-soft)" }}>
           <section className="p-4">
             <div className="mb-4 flex items-center justify-between gap-3">

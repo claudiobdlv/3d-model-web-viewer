@@ -3,13 +3,148 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
-import { ArrowLeft, Box, Download, RotateCw } from "lucide-react";
+import { ArrowLeft, Box, Download, RotateCw, Home, Sun, Moon } from "lucide-react";
 import { getModel, getPublicModel } from "../api";
 import type { ModelRecord, PublicModel } from "../types";
 
 type MetadataSource = { source: string; name: string; value: Record<string, unknown> };
 
-export function ViewerPage({ publicToken }: { publicToken?: string }) {
+// --- SVG Gimbal Component ---
+// Renders a small interactive XYZ orientation indicator in the top-right of the viewer.
+// The gimbal state is updated from inside the render loop via a React ref callback.
+
+type GimbalAxis = { label: string; color: string; x: number; y: number; z: number; dot: number };
+
+function OrientationGimbal({
+  gimbalRef,
+  onAxisClick,
+}: {
+  gimbalRef: React.RefObject<((camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => void) | null>;
+  onAxisClick: (axis: string) => void;
+}) {
+  // We store the computed 2-D axis endpoints in state and update them from the render loop.
+  const [axes, setAxes] = useState<GimbalAxis[]>([]);
+  const localRef = useRef<(camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => void>(() => {});
+
+  useEffect(() => {
+    // World-space axis directions after the Z-up correction (root rotates -90° around X so that
+    // the CAD Z axis points up in Three.js/screen space).
+    const WORLD_AXES = [
+      { label: "+X", color: "#ef4444", dir: new THREE.Vector3(1, 0, 0) },
+      { label: "-X", color: "#f87171", dir: new THREE.Vector3(-1, 0, 0) },
+      { label: "+Y", color: "#22c55e", dir: new THREE.Vector3(0, 1, 0) },
+      { label: "-Y", color: "#4ade80", dir: new THREE.Vector3(0, -1, 0) },
+      // +Z is visually "up" (was the CAD Z axis before -90° root rotation)
+      { label: "+Z", color: "#3b82f6", dir: new THREE.Vector3(0, 0, 1) },
+      { label: "-Z", color: "#93c5fd", dir: new THREE.Vector3(0, 0, -1) },
+    ];
+
+    localRef.current = (camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => {
+      // Camera view matrix: to map world → camera space we use the camera quaternion inverse.
+      const camQInv = camQ.clone().invert();
+      const result: GimbalAxis[] = WORLD_AXES.map(({ label, color, dir }) => {
+        // 1. Apply root model rotation to the axis (accounts for Rotate X/Y transforms).
+        const rotated = dir.clone().applyQuaternion(rootQ);
+        // 2. Transform into camera space so it appears relative to the current view.
+        const inCam = rotated.clone().applyQuaternion(camQInv);
+        // 3. Simple orthographic projection: x → right, y → up, z → depth
+        //    SVG Y grows downward so negate y.
+        const SIZE = 44; // half-width of gimbal SVG canvas in px
+        return {
+          label,
+          color,
+          x: inCam.x * SIZE * 0.7,
+          y: -inCam.y * SIZE * 0.7,
+          z: inCam.z,       // depth: positive = towards viewer
+          dot: inCam.z,
+        };
+      });
+      // Sort so axes pointing towards the viewer render on top.
+      result.sort((a, b) => a.z - b.z);
+      setAxes(result);
+    };
+
+    // Expose to parent via ref.
+    (gimbalRef as React.MutableRefObject<typeof localRef.current>).current = localRef.current;
+    return () => {
+      (gimbalRef as React.MutableRefObject<typeof localRef.current | null>).current = null;
+    };
+  }, [gimbalRef]);
+
+  const SIZE = 88; // total SVG size in px
+  const CENTER = SIZE / 2;
+  const STICK = 30; // length of each axis line
+
+  return (
+    <div
+      className="absolute right-3 z-10 select-none"
+      style={{ top: "calc(3.5rem + 12px)", pointerEvents: "auto" }}
+      aria-label="XYZ orientation gimbal"
+    >
+      <svg
+        width={SIZE}
+        height={SIZE}
+        viewBox={`0 0 ${SIZE} ${SIZE}`}
+        style={{ overflow: "visible", filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.5))" }}
+      >
+        {/* Subtle background circle */}
+        <circle cx={CENTER} cy={CENTER} r={CENTER - 4} fill="rgba(0,0,0,0.18)" />
+        {axes.map((axis) => {
+          const ex = CENTER + axis.x;
+          const ey = CENTER + axis.y;
+          const opacity = axis.dot >= 0 ? 1 : 0.35;
+          const isPositive = axis.label.startsWith("+");
+          return (
+            <g
+              key={axis.label}
+              style={{ cursor: "pointer", opacity }}
+              onClick={() => onAxisClick(axis.label)}
+              aria-label={`Snap camera to ${axis.label} axis`}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => e.key === "Enter" && onAxisClick(axis.label)}
+            >
+              {isPositive && (
+                <line
+                  x1={CENTER}
+                  y1={CENTER}
+                  x2={ex}
+                  y2={ey}
+                  stroke={axis.color}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                />
+              )}
+              {isPositive ? (
+                <circle cx={ex} cy={ey} r={8} fill={axis.color} />
+              ) : (
+                <circle cx={ex} cy={ey} r={5} fill="none" stroke={axis.color} strokeWidth={2} />
+              )}
+              {isPositive && (
+                <text
+                  x={ex}
+                  y={ey}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fontSize={7}
+                  fontWeight="bold"
+                  fill="white"
+                  style={{ pointerEvents: "none", userSelect: "none" }}
+                >
+                  {axis.label[1]}
+                </text>
+              )}
+            </g>
+          );
+        })}
+        {/* Central dot */}
+        <circle cx={CENTER} cy={CENTER} r={4} fill="white" opacity={0.9} />
+      </svg>
+    </div>
+  );
+}
+
+export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: string; theme?: "dark" | "light"; toggleTheme?: () => void }) {
   const slug = useMemo(() => window.location.pathname.split("/").filter(Boolean).pop() ?? "", []);
   const [model, setModel] = useState<ModelRecord | PublicModel | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -18,6 +153,17 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
   const canvasHost = useRef<HTMLDivElement | null>(null);
   const rotateXRef = useRef<(() => void) | null>(null);
   const rotateYRef = useRef<(() => void) | null>(null);
+  const resetViewRef = useRef<(() => void) | null>(null);
+  const updateThemeRef = useRef<((theme: "dark" | "light") => void) | null>(null);
+  const snapAxisRef = useRef<((axis: string) => void) | null>(null);
+  const gimbalUpdateRef = useRef<((camQ: THREE.Quaternion, rootQ: THREE.Quaternion) => void) | null>(null);
+
+  // Propagate theme changes into the live Three.js scene without reloading the GLB.
+  useEffect(() => {
+    if (updateThemeRef.current && theme) {
+      updateThemeRef.current(theme);
+    }
+  }, [theme]);
 
   useEffect(() => {
     void (publicToken ? getPublicModel(publicToken) : getModel(slug))
@@ -35,9 +181,10 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
 
     const host = canvasHost.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0b0d10);
+    const initialBgColor = theme === "light" ? 0xf4f7fb : 0x0b0d10;
+    scene.background = new THREE.Color(initialBgColor);
 
-    const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100000);
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 10000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     // Keep high-density mobile displays crisp while avoiding the 3x-4x fill
@@ -78,7 +225,17 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     let root: THREE.Group | null = null;
     let xQuarterTurns = 0;
     let yQuarterTurns = 0;
+    let modelRadius = 1;
+    let modelCenter = new THREE.Vector3();
+    let defaultCamOffset = new THREE.Vector3(); // camera offset from target at default view
     let rotationAnimation: { from: THREE.Quaternion; to: THREE.Quaternion; startedAt: number } | null = null;
+    // Reset animation interpolates camera position and OrbitControls target simultaneously.
+    let resetAnimation: {
+      fromCamPos: THREE.Vector3; toCamPos: THREE.Vector3;
+      fromTarget: THREE.Vector3; toTarget: THREE.Vector3;
+      fromRootQ: THREE.Quaternion; toRootQ: THREE.Quaternion;
+      startedAt: number;
+    } | null = null;
     let selectable: THREE.Object3D[] = [];
     let pointerStart: { x: number; y: number } | null = null;
     let disposed = false;
@@ -103,6 +260,12 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       requestRender();
     };
 
+    // Default camera direction for the higher starting angle (≈60° elevation).
+    // Vector components (x, y, z) in Three.js world space (Y-up). After the
+    // -90° root rotation the model's native Z appears as Three.js +Y, so this
+    // positions the camera slightly in front and high up, looking down.
+    const DEFAULT_CAM_DIR = new THREE.Vector3(0.4, 1.1, 0.9).normalize();
+
     const frame = () => {
       if (!root) return;
       root.updateMatrixWorld(true);
@@ -120,13 +283,20 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       // 1.1x scaling adds a 10% safety margin/padding so the model is framed nicely without clipping.
       const distance = (radius / Math.sin(fitFov / 2)) * 1.1;
 
+      modelRadius = radius;
+      modelCenter = center.clone();
+
       controls.target.copy(center);
-      camera.position.copy(center).add(new THREE.Vector3(0.48, 0.32, 1).normalize().multiplyScalar(distance));
+      const camOffset = DEFAULT_CAM_DIR.clone().multiplyScalar(distance);
+      camera.position.copy(center).add(camOffset);
+      defaultCamOffset = camOffset.clone();
 
       controls.minDistance = Math.max(radius * 0.04, 0.01);
       controls.maxDistance = radius * 100;
-      camera.near = Math.max(radius / 5000, 0.01);
-      camera.far = Math.max(radius * 60, 1000);
+
+      // Conservative initial near/far — will be refined per-frame in render().
+      camera.near = Math.max(radius * 0.001, 0.001);
+      camera.far = distance + radius * 4;
       camera.updateProjectionMatrix();
       controls.update();
     };
@@ -137,6 +307,10 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       0,
       "XYZ"
     ));
+
+    const defaultRotationTarget = () => new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(-Math.PI / 2, 0, 0, "XYZ")
+    );
 
     const animateToQuarterTurns = () => {
       if (!root) return;
@@ -161,6 +335,53 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       animateToQuarterTurns();
     };
 
+    resetViewRef.current = () => {
+      if (!root) return;
+      stopIntro();
+      // Cancel any ongoing model rotation animation.
+      rotationAnimation = null;
+      xQuarterTurns = 0;
+      yQuarterTurns = 0;
+      resetAnimation = {
+        fromCamPos: camera.position.clone(),
+        toCamPos: modelCenter.clone().add(defaultCamOffset),
+        fromTarget: controls.target.clone(),
+        toTarget: modelCenter.clone(),
+        fromRootQ: root.quaternion.clone(),
+        toRootQ: defaultRotationTarget(),
+        startedAt: performance.now(),
+      };
+      requestRender();
+    };
+
+    // Snap camera to look along a world axis.
+    snapAxisRef.current = (axis: string) => {
+      if (!root) return;
+      stopIntro();
+      // We keep Rotate X/Y state unchanged — snapping is a camera move only.
+      const dist = camera.position.distanceTo(controls.target);
+      const dirs: Record<string, THREE.Vector3> = {
+        "+X": new THREE.Vector3(1, 0, 0),
+        "-X": new THREE.Vector3(-1, 0, 0),
+        "+Y": new THREE.Vector3(0, 1, 0),
+        "-Y": new THREE.Vector3(0, -1, 0),
+        "+Z": new THREE.Vector3(0, 1, 0.001), // near-top view
+        "-Z": new THREE.Vector3(0, -1, 0.001),
+      };
+      const dir = dirs[axis];
+      if (!dir) return;
+      resetAnimation = {
+        fromCamPos: camera.position.clone(),
+        toCamPos: controls.target.clone().add(dir.clone().normalize().multiplyScalar(dist)),
+        fromTarget: controls.target.clone(),
+        toTarget: controls.target.clone(),
+        fromRootQ: root.quaternion.clone(),
+        toRootQ: root.quaternion.clone(), // keep current model rotation
+        startedAt: performance.now(),
+      };
+      requestRender();
+    };
+
     const onPointerDown = (event: PointerEvent) => {
       stopIntro();
       pointerStart = { x: event.clientX, y: event.clientY };
@@ -181,7 +402,7 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
     function stopIntro() {
       if (!intro) return;
       intro = null;
-      // Sync controls state to the camera's current wiggled position before OrbitControls takes over
+      // Sync controls state to the camera's current wiggled position before OrbitControls takes over.
       const damping = controls.enableDamping;
       controls.enableDamping = false;
       controls.update();
@@ -233,38 +454,101 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       setSelectedName(displayName);
     };
 
+    // Animation constants
+    const RESET_DURATION = 400;   // ms for Home/snap animations
+    const ROT_DURATION = 240;     // ms for Rotate X/Y
+
     function render() {
       animationFrame = null;
       if (disposed) return;
+
+      let needsMore = false;
+
+      // --- Model rotation animation (Rotate X/Y buttons) ---
       if (root && rotationAnimation) {
-        const progress = Math.min((performance.now() - rotationAnimation.startedAt) / 240, 1);
+        const progress = Math.min((performance.now() - rotationAnimation.startedAt) / ROT_DURATION, 1);
         const eased = 1 - Math.pow(1 - progress, 3);
         root.quaternion.slerpQuaternions(rotationAnimation.from, rotationAnimation.to, eased);
         root.updateMatrixWorld(true);
-        if (progress === 1) {
-          rotationAnimation = null;
+        if (progress >= 1) rotationAnimation = null;
+        else needsMore = true;
+      }
+
+      // --- Reset / axis-snap animation ---
+      if (resetAnimation) {
+        const progress = Math.min((performance.now() - resetAnimation.startedAt) / RESET_DURATION, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        camera.position.lerpVectors(resetAnimation.fromCamPos, resetAnimation.toCamPos, eased);
+        controls.target.lerpVectors(resetAnimation.fromTarget, resetAnimation.toTarget, eased);
+        if (root) {
+          root.quaternion.slerpQuaternions(resetAnimation.fromRootQ, resetAnimation.toRootQ, eased);
+          root.updateMatrixWorld(true);
+        }
+        if (progress >= 1) {
+          // Sync OrbitControls internal state after teleport.
+          const damping = controls.enableDamping;
+          controls.enableDamping = false;
+          controls.update();
+          controls.enableDamping = damping;
+          resetAnimation = null;
+        } else {
+          needsMore = true;
         }
       }
+
+      // --- Intro wiggle ---
       if (intro) {
         const progress = Math.max(0, Math.min((performance.now() - intro.startedAt) / 1800, 1));
         const easedEnvelope = Math.sin(Math.PI * progress);
         const angle = Math.sin(progress * Math.PI * 2) * THREE.MathUtils.degToRad(6) * easedEnvelope;
         camera.position.copy(controls.target).add(intro.baseOffset.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), angle));
         camera.lookAt(controls.target);
-        if (progress === 1) {
+        if (progress >= 1) {
           intro = null;
-          // Sync controls state to the camera's final wiggled position before OrbitControls takes over
+          // Sync controls state to the camera's final wiggled position before OrbitControls takes over.
           const damping = controls.enableDamping;
           controls.enableDamping = false;
           controls.update();
           controls.enableDamping = damping;
+        } else {
+          needsMore = true;
         }
       }
-      // Only update controls if we are NOT in the intro wiggling phase.
-      // Bypassing controls.update prevents it from overwriting manual camera.position modifications.
-      const controlsChanged = intro ? false : controls.update();
+
+      // Only update controls if we are NOT in intro or reset animation phase.
+      const controlsChanged = (intro || resetAnimation) ? false : controls.update();
+      if (controlsChanged) needsMore = true;
+
+      // --- Dynamic near/far to maintain depth precision without clipping ---
+      // We update every frame so zooming in/out keeps the ratio tight.
+      // Formula is deliberately conservative:
+      //   near = max(radius * 0.001,  distance - radius * 2.5)
+      //   far  = distance + radius * 2.5
+      // This ensures near > 0, far > near, and the whole bounding sphere
+      // remains visible even when the camera is close to or partially inside
+      // the model. The ratio (far/near) stays manageable compared to a fixed
+      // huge far plane (was radius * 60 / (radius / 5000) = 300,000 ratio
+      // before; now it's at most ~(5 * radius) / (0.001 * radius) = 5000).
+      if (root) {
+        const dist = camera.position.distanceTo(controls.target);
+        const minNear = modelRadius * 0.001;
+        const rawNear = dist - modelRadius * 2.5;
+        const near = Math.max(minNear, rawNear > 0 ? rawNear : minNear);
+        const far = Math.max(dist + modelRadius * 2.5, near * 10);
+        if (Math.abs(camera.near - near) / near > 0.05 || Math.abs(camera.far - far) / far > 0.05) {
+          camera.near = near;
+          camera.far = far;
+          camera.updateProjectionMatrix();
+        }
+      }
+
+      // --- Update gimbal ---
+      if (root && gimbalUpdateRef.current) {
+        gimbalUpdateRef.current(camera.quaternion, root.quaternion);
+      }
+
       renderer.render(scene, camera);
-      if (rotationAnimation || intro || controlsChanged) requestRender();
+      if (needsMore) requestRender();
     }
 
     resize();
@@ -299,7 +583,29 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
         content.position.sub(pivot);
         root.add(content);
         scene.add(root);
-        root.updateMatrixWorld(true); // Explicitly update matrices before computing bounds
+        root.updateMatrixWorld(true);
+
+        // Fix effectively opaque materials to prevent depth-sorting/z-fighting artefacts.
+        // Only touch materials where transparent=true but opacity≥0.99 and no alpha map
+        // (i.e. they are effectively solid and ended up in the transparent draw pass by mistake).
+        root.traverse((object) => {
+          const mesh = object as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          mats.forEach((mat) => {
+            const m = mat as THREE.MeshStandardMaterial;
+            if (
+              m.transparent === true &&
+              m.opacity >= 0.99 &&
+              !m.alphaMap
+            ) {
+              m.transparent = false;
+              m.depthWrite = true;
+              m.depthTest = true;
+            }
+          });
+        });
+
         selectable = [];
         root.traverse((object) => {
           if ((object as THREE.Mesh).isMesh) selectable.push(object);
@@ -316,12 +622,23 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
       }
     );
 
+    // Live theme update without reloading GLB.
+    updateThemeRef.current = (newTheme) => {
+      const bgColor = newTheme === "light" ? 0xf4f7fb : 0x0b0d10;
+      scene.background = new THREE.Color(bgColor);
+      renderer.setClearColor(scene.background, 1);
+      requestRender();
+    };
+
     requestRender();
 
     return () => {
       disposed = true;
+      updateThemeRef.current = null;
       rotateXRef.current = null;
       rotateYRef.current = null;
+      resetViewRef.current = null;
+      snapAxisRef.current = null;
       resizeObserver.disconnect();
       controls.removeEventListener("change", requestRender);
       controls.removeEventListener("start", onControlsStart);
@@ -343,10 +660,11 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
         materials.forEach((material) => material.dispose());
       });
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [glbUrl, hasDisplayGlb]);
 
   return (
-    <div className="h-screen overflow-hidden" style={{ background: "var(--bg)", color: "var(--text)" }}>
+    <div className="w-screen overflow-hidden" style={{ height: "100dvh", background: "var(--bg)", color: "var(--text)" }}>
       <header className="relative z-20 flex min-h-14 items-center justify-between gap-3 border-b px-3 md:px-4" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
         <div className="flex min-w-0 items-center gap-3">
           {!publicToken ? <><a className="secondary-button" href="/admin"><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
@@ -356,6 +674,17 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {theme !== undefined && toggleTheme !== undefined ? (
+            <button
+              className="secondary-button"
+              type="button"
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              onClick={toggleTheme}
+              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          ) : null}
           {model && !publicToken && "source_filename" in model ? (
             <>
               <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/original`}>STEP</a>
@@ -365,7 +694,8 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
         </div>
       </header>
 
-      <main className="relative h-[calc(100vh-3.5rem)] overflow-hidden" style={{ background: "var(--panel-soft)" }}>
+      {/* Main 3-D viewport */}
+      <main className="relative h-[calc(100dvh-3.5rem)] overflow-hidden" style={{ background: "var(--panel-soft)" }}>
         {error ? (
           <div className="absolute inset-0 grid place-items-center p-6">
             <div className="grid max-w-md place-items-center gap-3 rounded border p-8 text-center" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
@@ -384,24 +714,95 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
           </div>
         ) : null}
 
+        {/* Three.js canvas host */}
         <div ref={canvasHost} className="h-full w-full overflow-hidden touch-none" />
 
+        {/* Loading progress bar */}
         {loadProgress !== null ? (
           <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-1 overflow-hidden bg-black/20" aria-label="Loading model">
             <div className="h-full bg-[var(--accent-strong)] transition-[width] duration-150" style={{ width: `${Math.max(loadProgress * 100, 3)}%` }} />
           </div>
         ) : null}
 
-        <div className="absolute bottom-4 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 rounded-full border px-3 py-2 shadow-panel backdrop-blur" style={{ borderColor: "var(--line)", background: "color-mix(in srgb, var(--panel) 88%, transparent)", color: "var(--muted)" }}>
-          <button className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2 hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Rotate model 90 degrees around X" aria-label="Rotate X 90 degrees" onClick={() => rotateXRef.current?.()}>
-            <RotateCw size={17} /><span className="text-xs font-bold"><span className="sm:hidden">X</span><span className="hidden sm:inline">Rotate X 90°</span></span>
+        {/* XYZ Orientation Gimbal – top-right, above toolbar */}
+        <OrientationGimbal
+          gimbalRef={gimbalUpdateRef}
+          onAxisClick={(axis) => snapAxisRef.current?.(axis)}
+        />
+
+        {/*
+          Bottom toolbar: Home | Rotate X | Rotate Y | separator | Selected object
+          ─────────────────────────────────────────────────────────────────────────
+          Layout strategy for mobile:
+          - Positioned with env(safe-area-inset-bottom) to clear the home indicator / nav bar.
+          - flex-wrap allows the selected-name row to move below controls on very narrow screens.
+          - Buttons use h-10 (40 px) for comfortable touch targets.
+          - Selected text is truncated with min-w-0/overflow-hidden so it never pushes buttons away.
+          - max-w uses dvw units (supported alongside dvh) to respect real viewport width.
+        */}
+        <div
+          className="absolute left-1/2 z-10 flex w-max max-w-[calc(100vw-1.5rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-1 rounded-2xl border px-2 py-1.5 shadow-panel backdrop-blur"
+          style={{
+            bottom: "calc(12px + env(safe-area-inset-bottom, 0px))",
+            borderColor: "var(--line)",
+            background: "color-mix(in srgb, var(--panel) 88%, transparent)",
+            color: "var(--muted)",
+          }}
+        >
+          {/* Home / Reset view — always first on left */}
+          <button
+            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl px-2.5 transition hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]"
+            type="button"
+            title="Reset to default view"
+            aria-label="Reset view"
+            onClick={() => resetViewRef.current?.()}
+          >
+            <Home size={16} />
+            <span className="hidden text-xs font-bold sm:inline">Reset</span>
           </button>
-          <button className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2 hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]" type="button" title="Rotate model 90 degrees around Y" aria-label="Rotate Y 90 degrees" onClick={() => rotateYRef.current?.()}>
-            <RotateCw size={17} /><span className="text-xs font-bold"><span className="sm:hidden">Y</span><span className="hidden sm:inline">Rotate Y 90°</span></span>
-          </button>
+
           <div className="h-5 w-px shrink-0" style={{ background: "var(--line)" }} />
-          <span className="min-w-0 max-w-[46vw] truncate text-xs" title={selectedName === "none" ? undefined : selectedName}>
-            <strong className="text-[var(--text)]">Selected:</strong> {selectedName}
+
+          {/* Rotate X */}
+          <button
+            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl px-2.5 transition hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]"
+            type="button"
+            title="Rotate model 90 degrees around X"
+            aria-label="Rotate X 90 degrees"
+            onClick={() => rotateXRef.current?.()}
+          >
+            <RotateCw size={16} />
+            <span className="text-xs font-bold">
+              <span className="sm:hidden">X</span>
+              <span className="hidden sm:inline">Rotate X 90°</span>
+            </span>
+          </button>
+
+          {/* Rotate Y */}
+          <button
+            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl px-2.5 transition hover:bg-[var(--panel-strong)] hover:text-[var(--accent)]"
+            type="button"
+            title="Rotate model 90 degrees around Y"
+            aria-label="Rotate Y 90 degrees"
+            onClick={() => rotateYRef.current?.()}
+          >
+            <RotateCw size={16} />
+            <span className="text-xs font-bold">
+              <span className="sm:hidden">Y</span>
+              <span className="hidden sm:inline">Rotate Y 90°</span>
+            </span>
+          </button>
+
+          <div className="h-5 w-px shrink-0" style={{ background: "var(--line)" }} />
+
+          {/* Selected object name – never pushes buttons; truncates cleanly */}
+          <span
+            className="min-w-0 max-w-[40vw] overflow-hidden whitespace-nowrap text-xs"
+            style={{ textOverflow: "ellipsis", display: "inline-block" }}
+            title={selectedName === "none" ? undefined : selectedName}
+          >
+            <strong className="text-[var(--text)]">Selected:</strong>{" "}
+            {selectedName}
           </span>
         </div>
       </main>
