@@ -9,6 +9,8 @@ import {
   type NativeQualityPreset
 } from "./quality.js";
 
+import type { GlbOptimizationMode } from "./glbOptimizer.js";
+
 export type ConverterProcessorInput = {
   slug: string;
   sourcePath: string;
@@ -18,6 +20,7 @@ export type ConverterProcessorInput = {
   xcafConverterBin: string;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
   quality: ConversionQuality;
+  glbOptimizationMode: GlbOptimizationMode;
 };
 
 export type ConverterProcessorOutput = {
@@ -73,7 +76,6 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
 
   if (input.converterBackend === "occt-js") {
     await assertFile(rawGlbPath, "occt-js converter did not produce display.raw.glb");
-    await fs.promises.copyFile(rawGlbPath, displayGlbPath);
     await assertFile(materialDebugPath, "occt-js converter did not produce material-debug.json");
   } else {
     await assertFile(displayGlbPath, "xcaf-baseline converter did not produce display.glb");
@@ -90,6 +92,82 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
 
   await assertFile(statsPath, "converter did not produce stats.json");
   await assertFile(conversionLogPath, "converter did not produce conversion.log");
+
+  let optimizationResult: any = null;
+
+  if (input.glbOptimizationMode === "meshopt") {
+    if (input.converterBackend === "xcaf-baseline") {
+      await fs.promises.rename(displayGlbPath, rawGlbPath);
+    }
+    try {
+      const { optimizeDisplayGlb } = await import("./glbOptimizer.js");
+      optimizationResult = await optimizeDisplayGlb({
+        requestedMode: "meshopt",
+        rawGlbPath,
+        displayGlbPath,
+        conversionLogPath
+      });
+    } catch (optError) {
+      console.error("GLB optimizer threw exception:", optError);
+      await fs.promises.copyFile(rawGlbPath, displayGlbPath);
+      const rawSize = (await fs.promises.stat(rawGlbPath)).size;
+      optimizationResult = {
+        requestedMode: "meshopt",
+        status: "failed",
+        tool: "@gltf-transform direct APIs + meshoptimizer",
+        toolVersion: "4.4.0 / 1.0.1",
+        quantization: { position: 16, normal: 12, texcoord: 14, generic: 16, color: 8 },
+        rawSizeBytes: rawSize,
+        displaySizeBytes: rawSize,
+        requiresMeshoptDecoder: false,
+        validation: { passed: false, message: optError instanceof Error ? optError.message : String(optError) },
+        fallbackUsed: true,
+        message: `Optimizer exception: ${optError instanceof Error ? optError.message : String(optError)}`
+      };
+      await fs.promises.appendFile(conversionLogPath, `\nGLB optimization exception: ${optError}\n`);
+    }
+  } else {
+    if (input.converterBackend === "occt-js") {
+      await fs.promises.copyFile(rawGlbPath, displayGlbPath);
+    }
+    const rawSize = (await fs.promises.stat(displayGlbPath)).size;
+    optimizationResult = {
+      requestedMode: "disabled",
+      status: "disabled",
+      tool: "@gltf-transform direct APIs + meshoptimizer",
+      toolVersion: "4.4.0 / 1.0.1",
+      quantization: { position: 16, normal: 12, texcoord: 14, generic: 16, color: 8 },
+      rawSizeBytes: rawSize,
+      displaySizeBytes: rawSize,
+      requiresMeshoptDecoder: false,
+      validation: { passed: false, message: "not run because optimization is disabled" },
+      fallbackUsed: false,
+      message: "Meshopt optimization disabled; published raw GLB."
+    };
+  }
+
+  const reductionPercent = optimizationResult.rawSizeBytes > 0
+    ? Number(((1 - optimizationResult.displaySizeBytes / optimizationResult.rawSizeBytes) * 100).toFixed(2))
+    : 0;
+
+  // Update stats.json to reflect the final display.glb size (optimized or fallback/disabled size) and include optimization metadata
+  const statsContent = await fs.promises.readFile(statsPath, "utf8");
+  const statsObj = JSON.parse(statsContent);
+  statsObj.outputGlbSizeBytes = optimizationResult.displaySizeBytes;
+  statsObj.optimization = {
+    requestedMode: optimizationResult.requestedMode,
+    status: optimizationResult.status,
+    rawSizeBytes: optimizationResult.rawSizeBytes,
+    displaySizeBytes: optimizationResult.displaySizeBytes,
+    reductionPercent,
+    tool: optimizationResult.tool,
+    toolVersion: optimizationResult.toolVersion,
+    quantization: optimizationResult.quantization,
+    validation: optimizationResult.validation,
+    fallbackUsed: optimizationResult.fallbackUsed,
+    message: optimizationResult.message
+  };
+  await fs.promises.writeFile(statsPath, JSON.stringify(statsObj, null, 2) + "\n");
 
   const now = new Date().toISOString();
   const manifestPath = path.join(jobDir, "manifest.json");
@@ -109,7 +187,20 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           angular: nativeQualityDetails.angularDeflection,
           relative: nativeQualityDetails.relative
         },
-        converterBackend: input.converterBackend
+        converterBackend: input.converterBackend,
+        optimization: {
+          requestedMode: optimizationResult.requestedMode,
+          status: optimizationResult.status,
+          rawSizeBytes: optimizationResult.rawSizeBytes,
+          displaySizeBytes: optimizationResult.displaySizeBytes,
+          reductionPercent,
+          tool: optimizationResult.tool,
+          toolVersion: optimizationResult.toolVersion,
+          quantization: optimizationResult.quantization,
+          validation: optimizationResult.validation,
+          fallbackUsed: optimizationResult.fallbackUsed,
+          message: optimizationResult.message
+        }
       },
       null,
       2

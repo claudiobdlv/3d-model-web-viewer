@@ -10,6 +10,7 @@ export type WorkerConfig = {
   xcafConverterBin: string;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
   quality: string;
+  glbOptimizationMode: "disabled" | "meshopt";
   runOnce: boolean;
   keepWorkerOutput: boolean;
   maxModelArtifactBytes: number;
@@ -36,6 +37,11 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     throw new Error("XCAF_COLOUR_MODE must be xcaf-baseline or step-presentation.");
   }
 
+    const glbOptimizationMode = process.env.GLB_OPTIMIZATION_MODE || "disabled";
+  if (!["disabled", "meshopt"].includes(glbOptimizationMode)) {
+    throw new Error("GLB_OPTIMIZATION_MODE must be disabled or meshopt.");
+  }
+
   return {
     serverUrl: trimTrailingSlash(process.env.SERVER_URL || "http://localhost:3009"),
     token,
@@ -46,6 +52,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     xcafConverterBin: path.resolve(process.env.XCAF_CONVERTER_BIN || "/app/bin/xcaf-step-to-glb"),
     xcafColourMode: xcafColourMode as WorkerConfig["xcafColourMode"],
     quality,
+    glbOptimizationMode: glbOptimizationMode as "disabled" | "meshopt",
     runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once"),
     keepWorkerOutput: process.env.KEEP_WORKER_OUTPUT !== "false",
     maxModelArtifactBytes: positiveInteger(

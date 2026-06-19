@@ -14,5 +14,12 @@
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "4.4.0",
+    "@gltf-transform/extensions": "4.4.0",
+    "@gltf-transform/functions": "4.4.0",
+    "gltf-validator": "2.0.0-dev.3.10",
+    "meshoptimizer": "1.0.1"
   }
 }

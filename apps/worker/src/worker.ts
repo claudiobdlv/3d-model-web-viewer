@@ -22,6 +22,7 @@ if (config.converterBackend === "xcaf-baseline") {
 }
 console.log(`Keep worker output: ${config.keepWorkerOutput}`);
 console.log(`Maximum model artifact: ${config.maxModelArtifactBytes} bytes`);
+console.log(`GLB optimization mode: ${config.glbOptimizationMode}`);
 console.log(`Run once: ${config.runOnce}`);
 
 while (true) {
@@ -65,7 +66,8 @@ async function processJob(job: WorkerJob): Promise<void> {
       converterCli: config.converterCli,
       xcafConverterBin: config.xcafConverterBin,
       xcafColourMode: config.xcafColourMode,
-      quality
+      quality,
+      glbOptimizationMode: config.glbOptimizationMode
     });
 
     await client.completeJob(job.id, output);
