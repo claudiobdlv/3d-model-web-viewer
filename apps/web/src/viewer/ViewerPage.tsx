@@ -120,6 +120,7 @@ export function ViewerPage({ publicToken }: { publicToken?: string }) {
         to: rotationTarget(),
         startedAt: performance.now()
       };
+      requestRender();
     };
 
     rotateXRef.current = () => {
