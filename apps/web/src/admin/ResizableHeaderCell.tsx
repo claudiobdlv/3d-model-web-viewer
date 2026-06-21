@@ -32,20 +32,23 @@ export function ResizableHeaderCell({
       frame.current = requestAnimationFrame(() => {
         handle.parentElement?.style.setProperty("width", `${nextWidth}px`);
         table?.style.setProperty("width", `${startTableWidth + nextWidth - startWidth}px`);
+        onResize(nextWidth);
       });
     };
     const finish = () => {
       if (frame.current !== null) cancelAnimationFrame(frame.current);
-      handle.releasePointerCapture(event.pointerId);
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", finish);
       handle.removeEventListener("pointercancel", finish);
+      handle.removeEventListener("lostpointercapture", finish);
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
       onResize(nextWidth);
     };
 
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", finish);
     handle.addEventListener("pointercancel", finish);
+    handle.addEventListener("lostpointercapture", finish);
   };
 
   return <th className="resizable-header" style={{ width }}>
