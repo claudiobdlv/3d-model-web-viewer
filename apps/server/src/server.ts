@@ -23,6 +23,7 @@ import { jobsRouter } from "./routes/jobs.js";
 import { modelsRouter } from "./routes/models.js";
 import { projectsRouter } from "./routes/projects.js";
 import { workerRouter } from "./routes/worker.js";
+import { uploadsRouter } from "./routes/uploads.js";
 import {
   ensureStorage,
   getLogDir,
@@ -31,13 +32,15 @@ import {
   getWorkerOutputDir,
   isSafeSlug,
   publicRoot,
-  webRoot
+  webRoot,
+  cleanAbandonedChunkedUploads
 } from "./storage.js";
 
 const port = Number(process.env.PORT || 3009);
 export const app = express();
 
 ensureStorage();
+cleanAbandonedChunkedUploads();
 initDb();
 
 app.use(express.json());
@@ -139,6 +142,7 @@ app.delete("/api/models/:id/share", requireAdmin, (req, res) => {
 });
 
 app.use("/api/models", requireAdmin, modelsRouter);
+app.use("/api/uploads/chunked", requireAdmin, uploadsRouter);
 app.use("/api/folders", requireAdmin, foldersRouter);
 app.use("/api/projects", requireAdmin, projectsRouter);
 app.get("/api/storage/quota", requireAdmin, (_req, res) => {

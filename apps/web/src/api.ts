@@ -13,6 +13,31 @@ import type {
   StorageQuota
 } from "./types";
 
+async function handleErrorResponse(response: Response): Promise<never> {
+  const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+  let errorMessage = "";
+
+  if (contentType.includes("application/json") || text.trim().startsWith("{")) {
+    try {
+      const json = JSON.parse(text);
+      errorMessage = json.error || json.message || text;
+    } catch {
+      errorMessage = text;
+    }
+  } else if (contentType.includes("text/html") || text.trim().startsWith("<")) {
+    if (response.status === 413 || text.includes("413 Payload Too Large") || text.includes("Too Large")) {
+      errorMessage = "Upload too large for a single request. Large files are uploaded in chunks automatically. Please retry.";
+    } else {
+      errorMessage = `Server error (${response.status}). Please try again.`;
+    }
+  } else {
+    errorMessage = text || `Request failed: ${response.status}`;
+  }
+
+  throw new Error(errorMessage);
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -24,8 +49,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+    await handleErrorResponse(response);
   }
 
   return response.json() as Promise<T>;
@@ -149,11 +173,64 @@ export async function uploadModel(
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Upload failed: ${response.status}`);
+    await handleErrorResponse(response);
   }
 
   return response.json() as Promise<ModelRecord>;
+}
+
+export function initChunkedUpload(
+  filename: string,
+  sizeBytes: number,
+  projectId: number | null,
+  quality: ConversionQuality = "medium"
+): Promise<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }> {
+  return request<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }>(
+    "/api/uploads/chunked/init",
+    {
+      method: "POST",
+      body: JSON.stringify({ filename, sizeBytes, projectId, quality })
+    }
+  );
+}
+
+export async function uploadChunk(
+  uploadId: string,
+  chunkIndex: number,
+  totalChunks: number,
+  chunk: Blob,
+  signal?: AbortSignal
+): Promise<void> {
+  const form = new FormData();
+  form.set("chunk", chunk, "chunk.bin");
+
+  const response = await fetch(
+    `/api/uploads/chunked/${encodeURIComponent(uploadId)}/chunk?chunkIndex=${chunkIndex}&totalChunks=${totalChunks}`,
+    {
+      method: "POST",
+      body: form,
+      headers: {
+        accept: "application/json"
+      },
+      signal
+    }
+  );
+
+  if (!response.ok) {
+    await handleErrorResponse(response);
+  }
+}
+
+export function completeChunkedUpload(uploadId: string): Promise<ModelRecord> {
+  return request<ModelRecord>(`/api/uploads/chunked/${encodeURIComponent(uploadId)}/complete`, {
+    method: "POST"
+  });
+}
+
+export function deleteChunkedUpload(uploadId: string): Promise<void> {
+  return request<void>(`/api/uploads/chunked/${encodeURIComponent(uploadId)}`, {
+    method: "DELETE"
+  });
 }
 
 export function listJobs(): Promise<JobRecord[]> {

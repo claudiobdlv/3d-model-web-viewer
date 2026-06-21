@@ -14,6 +14,7 @@ export const logsRoot = path.join(storageRoot, "logs");
 export const workerOutputRoot = path.resolve(process.env.WORKER_OUTPUT_DIR || path.join(storageRoot, "worker-output"));
 export const publicRoot = path.join(appRoot, "public");
 export const webRoot = path.resolve(process.env.WEB_ROOT || path.join(appRoot, "..", "web", "dist"));
+export const chunkedUploadsRoot = path.join(storageRoot, "tmp", "chunked-uploads");
 
 export function ensureStorage(): void {
   fs.mkdirSync(dbRoot, { recursive: true });
@@ -21,6 +22,26 @@ export function ensureStorage(): void {
   fs.mkdirSync(modelsRoot, { recursive: true });
   fs.mkdirSync(logsRoot, { recursive: true });
   fs.mkdirSync(workerOutputRoot, { recursive: true });
+  fs.mkdirSync(chunkedUploadsRoot, { recursive: true });
+}
+
+export function cleanAbandonedChunkedUploads(): void {
+  try {
+    if (!fs.existsSync(chunkedUploadsRoot)) return;
+    const dirs = fs.readdirSync(chunkedUploadsRoot);
+    const now = Date.now();
+    const maxAgeMs = 24 * 60 * 60 * 1000; // 24 hours
+    for (const dir of dirs) {
+      const dirPath = path.join(chunkedUploadsRoot, dir);
+      const stat = fs.statSync(dirPath);
+      if (stat.isDirectory() && now - stat.mtimeMs > maxAgeMs) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+        console.log(`Cleaned up abandoned chunked upload directory: ${dir}`);
+      }
+    }
+  } catch (error) {
+    console.error("Error cleaning abandoned chunked uploads:", error);
+  }
 }
 
 export function createSlug(filename: string): string {

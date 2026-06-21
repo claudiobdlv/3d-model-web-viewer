@@ -130,6 +130,15 @@ async function processJob(job: WorkerJob): Promise<void> {
 
     try {
       const conversionLogPath = path.join(config.outputDir, job.modelSlug, "conversion.log");
+      if (message.includes("exceeded the") && message.includes("display limit")) {
+        try {
+          if (fs.existsSync(conversionLogPath)) {
+            fs.appendFileSync(conversionLogPath, `\n\nERROR: ${message}\n`);
+          }
+        } catch (appendErr) {
+          console.error("Could not append to conversion log:", appendErr);
+        }
+      }
       await client.failJob(job.id, message, conversionLogPath);
     } catch (failError) {
       const failMessage = failError instanceof Error ? failError.message : "Unknown fail-reporting error.";

@@ -36,8 +36,9 @@ export class WorkerClient {
   }): Promise<void> {
     const displayGlbBytes = (await fs.promises.stat(output.displayGlbPath)).size;
     if (displayGlbBytes > this.config.maxModelArtifactBytes) {
+      const limitMb = Math.round(this.config.maxModelArtifactBytes / (1024 * 1024));
       throw new Error(
-        `Converted GLB is ${displayGlbBytes} bytes, exceeding MAX_MODEL_ARTIFACT_BYTES=${this.config.maxModelArtifactBytes} bytes.`
+        `Upload failed because the converted model exceeded the ${limitMb} MB display limit. Try Medium or Low quality.`
       );
     }
 

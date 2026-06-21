@@ -7,7 +7,8 @@ import {
 } from "lucide-react";
 import {
   batchModels, createProject, createPublicShare, deleteProject, getStorageQuota,
-  listLibraryModels, listProjects, renameModel, renameProject, uploadModel
+  listLibraryModels, listProjects, renameModel, renameProject, uploadModel,
+  initChunkedUpload, uploadChunk, completeChunkedUpload, deleteChunkedUpload
 } from "../api";
 import { downloadPublicShareQr } from "../qr";
 import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ProjectRecord, StorageQuota } from "../types";
@@ -301,7 +302,227 @@ async function copyText(value:string){
 }
 
 function DropUploadOverlay({label,blocked}:{label:string;blocked:boolean}){return <div className={`drop-upload-overlay ${blocked?"blocked":""}`}><div><Upload/><strong>{blocked?"Uploads aren't available here":"Drop to upload"}</strong><span>{blocked?"Choose a project or All Models to upload.":`to ${label}`}</span></div></div>}
-function UploadDialog({projects,defaultProjectId,initialFile,hint,onClose,onDone}:{projects:ProjectRecord[];defaultProjectId:number|null;initialFile:File|null;hint:string|null;onClose:()=>void;onDone:()=>void}){const[file,setFile]=useState<File|null>(initialFile);const[projectId,setProjectId]=useState(defaultProjectId?String(defaultProjectId):"");const[quality,setQuality]=useState<ConversionQuality>("medium");const[busy,setBusy]=useState(false);const[error,setError]=useState<string|null>(null);return <Dialog title="Upload model" onClose={onClose}><form onSubmit={async e=>{e.preventDefault();if(!file)return;setBusy(true);setError(null);try{await uploadModel(file,projectId?Number(projectId):null,quality);onDone()}catch(r){setError(r instanceof Error?r.message:"Upload failed");setBusy(false)}}} className="dialog-form"><label className="upload-drop"><Upload/><strong>{file?.name??"Choose a model file"}</strong><span>{file?"File staged — review the project and quality below.":"STEP, STP, GLB or GLTF up to 250 MB"}</span><input type="file" accept=".step,.stp,.glb,.gltf" onChange={e=>setFile(e.target.files?.[0]??null)}/></label>{hint&&<div className="upload-hint">{hint}</div>}<label>Project<select className="field" value={projectId} onChange={e=>setProjectId(e.target.value)}><option value="">Unsorted</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><fieldset><legend>Conversion quality</legend><div className="quality-options">{(["low","medium","high"] as const).map(q=><button type="button" className={quality===q?"active":""} onClick={()=>setQuality(q)} key={q}>{q}</button>)}</div></fieldset>{error&&<div className="alert error">{error}</div>}<div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!file||busy}>{busy?<Loader2 className="animate-spin"/>:<Upload/>}Upload</button></div></form></Dialog>}
+function UploadDialog({
+  projects,
+  defaultProjectId,
+  initialFile,
+  hint,
+  onClose,
+  onDone
+}: {
+  projects: ProjectRecord[];
+  defaultProjectId: number | null;
+  initialFile: File | null;
+  hint: string | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(initialFile);
+  const [projectId, setProjectId] = useState(defaultProjectId ? String(defaultProjectId) : "");
+  const [quality, setQuality] = useState<ConversionQuality>("medium");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ percent: number; text: string } | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const uploadIdRef = useRef<string | null>(null);
+
+  async function handleCancel() {
+    if (busy) {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      if (uploadIdRef.current) {
+        const uid = uploadIdRef.current;
+        uploadIdRef.current = null;
+        try {
+          await deleteChunkedUpload(uid);
+        } catch (e) {
+          console.error("Failed to cleanup chunked upload:", e);
+        }
+      }
+      setError("Upload cancelled.");
+      setBusy(false);
+      setProgress(null);
+    } else {
+      onClose();
+    }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!file) return;
+
+    setBusy(true);
+    setError(null);
+    setProgress(null);
+    abortControllerRef.current = new AbortController();
+
+    const isStep = /\.(step|stp)$/i.test(file.name);
+    const isGlb = /\.(glb|gltf)$/i.test(file.name);
+
+    if (isGlb && file.size > 262144000) {
+      setError("GLB/GLTF files must be under 250 MB.");
+      setBusy(false);
+      return;
+    }
+    if (isStep && file.size > 524288000) {
+      setError("STEP/STP files must be under 500 MB.");
+      setBusy(false);
+      return;
+    }
+
+    // Always use chunked upload for files over 80 MB
+    const useChunked = file.size > 83886080;
+
+    try {
+      if (useChunked) {
+        setProgress({ percent: 0, text: "Initializing upload..." });
+        const { uploadId, chunkSizeBytes } = await initChunkedUpload(
+          file.name,
+          file.size,
+          projectId ? Number(projectId) : null,
+          quality
+        );
+        uploadIdRef.current = uploadId;
+
+        const totalChunks = Math.ceil(file.size / chunkSizeBytes);
+
+        for (let i = 0; i < totalChunks; i++) {
+          if (abortControllerRef.current?.signal.aborted) {
+            throw new DOMException("Upload cancelled.", "AbortError");
+          }
+
+          const start = i * chunkSizeBytes;
+          const end = Math.min(start + chunkSizeBytes, file.size);
+          const chunkBlob = file.slice(start, end);
+          const percent = Math.round((start / file.size) * 100);
+
+          setProgress({
+            percent,
+            text: `Uploading chunk ${i + 1} of ${totalChunks} (${percent}%)`
+          });
+
+          await uploadChunk(
+            uploadId,
+            i,
+            totalChunks,
+            chunkBlob,
+            abortControllerRef.current.signal
+          );
+        }
+
+        setProgress({ percent: 100, text: "Finalizing upload..." });
+        await completeChunkedUpload(uploadId);
+        uploadIdRef.current = null;
+      } else {
+        setProgress({ percent: 50, text: "Uploading file..." });
+        await uploadModel(file, projectId ? Number(projectId) : null, quality);
+      }
+
+      onDone();
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        setError("Upload cancelled.");
+      } else {
+        setError(err instanceof Error ? err.message : "Upload failed.");
+      }
+      setBusy(false);
+      setProgress(null);
+    } finally {
+      abortControllerRef.current = null;
+    }
+  }
+
+  return (
+    <Dialog title="Upload model" onClose={handleCancel}>
+      <form onSubmit={handleSubmit} className="dialog-form">
+        <label className={`upload-drop ${busy ? "disabled" : ""}`}>
+          <Upload />
+          <strong>{file?.name ?? "Choose a model file"}</strong>
+          <span>
+            {file
+              ? `File staged (${(file.size / (1024 * 1024)).toFixed(1)} MB) — review below.`
+              : "STEP/STP up to 500 MB; GLB/GLTF up to 250 MB"}
+          </span>
+          <input
+            type="file"
+            accept=".step,.stp,.glb,.gltf"
+            disabled={busy}
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+        </label>
+        {hint && <div className="upload-hint">{hint}</div>}
+        <label>
+          Project
+          <select
+            className="field"
+            value={projectId}
+            disabled={busy}
+            onChange={(e) => setProjectId(e.target.value)}
+          >
+            <option value="">Unsorted</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {file && /\.(step|stp)$/i.test(file.name) && (
+          <fieldset disabled={busy}>
+            <legend>Conversion quality</legend>
+            <div className="quality-options">
+              {(["low", "medium", "high"] as const).map((q) => (
+                <button
+                  type="button"
+                  className={quality === q ? "active" : ""}
+                  onClick={() => setQuality(q)}
+                  key={q}
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+        )}
+        {progress && (
+          <div className="upload-progress-container" style={{ marginTop: "12px" }}>
+            <div
+              style={{
+                background: "var(--border, #eee)",
+                borderRadius: "4px",
+                height: "8px",
+                overflow: "hidden"
+              }}
+            >
+              <div
+                style={{
+                  background: "var(--primary, #4f46e5)",
+                  width: `${progress.percent}%`,
+                  height: "100%",
+                  transition: "width 0.2s ease"
+                }}
+              />
+            </div>
+            <div style={{ fontSize: "12px", color: "var(--muted, #666)", marginTop: "4px", textAlign: "center" }}>
+              {progress.text}
+            </div>
+          </div>
+        )}
+        {error && <div className="alert error">{error}</div>}
+        <div className="dialog-actions">
+          <button type="button" className="secondary-button" onClick={handleCancel}>
+            {busy ? "Cancel Upload" : "Cancel"}
+          </button>
+          <button className="primary-button" disabled={!file || busy}>
+            {busy ? <Loader2 className="animate-spin" /> : <Upload />}
+            Upload
+          </button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
 function MoveDialog({projects,busy,onClose,onMove}:{projects:ProjectRecord[];busy:boolean;onClose:()=>void;onMove:(id:number|null)=>void}){const[id,setId]=useState("");return <Dialog title="Move to project" onClose={onClose}><div className="dialog-form"><label>Destination<select className="field" value={id} onChange={e=>setId(e.target.value)}><option value="">Unsorted</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy} onClick={()=>onMove(id?Number(id):null)}>Move</button></div></div></Dialog>}
 function ConfirmDialog({count,busy,onClose,onConfirm}:{count:number;busy:boolean;onClose:()=>void;onConfirm:()=>void}){return <Dialog title="Delete forever?" onClose={onClose}><div className="dialog-form"><p>This permanently deletes {count} item{count===1?"":"s"} and its files. This cannot be undone.</p><div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="danger-button" disabled={busy} onClick={onConfirm}>Delete forever</button></div></div></Dialog>}
 function Dialog({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){return <div className="dialog-overlay" role="dialog" aria-modal="true"><div className="dialog-card"><header><h2>{title}</h2><button className="icon-button" onClick={onClose}><X size={17}/></button></header>{children}</div></div>}

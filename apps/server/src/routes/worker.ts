@@ -14,7 +14,7 @@ import { workerJobPayload } from "../workerPayload.js";
 
 const developmentWorkerToken = "dev-worker-token";
 const workerToken = process.env.WORKER_API_TOKEN || developmentWorkerToken;
-const defaultMaxModelArtifactBytes = 1024 * 1024 * 1024;
+const defaultMaxModelArtifactBytes = 262144000;
 const maxModelArtifactBytes = readPositiveInteger(
   process.env.MAX_MODEL_ARTIFACT_BYTES,
   defaultMaxModelArtifactBytes,

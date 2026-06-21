@@ -24,14 +24,14 @@ import {
   getWorkerOutputDir,
   isSafeSlug
 } from "../storage.js";
-import { parseConversionQuality } from "../quality.js";
+import { parseConversionQuality, type ConversionQuality } from "../quality.js";
 
 const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 250 * 1024 * 1024
+    fileSize: 524288000
   },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -133,20 +133,21 @@ modelsRouter.get("/:slug", (req, res) => {
   res.json(model);
 });
 
-modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
-  if (!req.file) {
-    res.status(400).send("No model file was uploaded.");
-    return;
-  }
-
-  const sourceFilename = path.basename(req.file.originalname);
-  const sourceExt = path.extname(sourceFilename).toLowerCase();
-  const quality = parseConversionQuality(req.body?.quality);
-  const folderId = parseUploadProjectId(req.body);
-  if (folderId !== null && !getFolderById(folderId)) {
-    res.status(400).send("Selected project was not found.");
-    return;
-  }
+export async function registerModelAndJob({
+  sourceFilename,
+  sourceExt,
+  quality,
+  folderId,
+  originalSizeBytes,
+  saveOriginalFile,
+}: {
+  sourceFilename: string;
+  sourceExt: string;
+  quality: ConversionQuality;
+  folderId: number | null;
+  originalSizeBytes: number;
+  saveOriginalFile: (targetPath: string) => void | Promise<void>;
+}) {
   const slug = createSlug(sourceFilename);
   const uploadDir = getUploadDir(slug);
   const modelDir = getModelDir(slug);
@@ -155,7 +156,7 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
   fs.mkdirSync(modelDir, { recursive: true });
 
   const sourcePath = path.join(uploadDir, `original${sourceExt}`);
-  fs.writeFileSync(sourcePath, req.file.buffer);
+  await saveOriginalFile(sourcePath);
 
   const isGlb = sourceExt === ".glb";
   const isStep = sourceExt === ".step" || sourceExt === ".stp";
@@ -184,8 +185,8 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
     sourceExt,
     status,
     hasDisplayGlb: isGlb,
-    glbSizeBytes: isGlb ? req.file.size : null,
-    originalSizeBytes: req.file.size,
+    glbSizeBytes: isGlb ? originalSizeBytes : null,
+    originalSizeBytes,
     folderId
   });
 
@@ -202,12 +203,58 @@ modelsRouter.post("/", upload.single("modelFile"), (req, res) => {
         : "Uploaded GLTF source is stored without conversion."
   });
 
-  if (req.accepts(["json", "html"]) === "json") {
-    res.status(201).json(model);
-    return;
-  }
+  return model;
+}
 
-  res.redirect(303, "/admin");
+modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      res.status(400).send("No model file was uploaded.");
+      return;
+    }
+
+    const sourceFilename = path.basename(req.file.originalname);
+    const sourceExt = path.extname(sourceFilename).toLowerCase();
+    const quality = parseConversionQuality(req.body?.quality);
+    const folderId = parseUploadProjectId(req.body);
+    if (folderId !== null && !getFolderById(folderId)) {
+      res.status(400).send("Selected project was not found.");
+      return;
+    }
+
+    const isStep = sourceExt === ".step" || sourceExt === ".stp";
+    const isGlb = sourceExt === ".glb" || sourceExt === ".gltf";
+
+    if (isGlb && req.file.size > 262144000) {
+      res.status(400).send("GLB/GLTF files must be under 250 MB.");
+      return;
+    }
+    if (isStep && req.file.size > 524288000) {
+      res.status(400).send("STEP/STP files must be under 500 MB.");
+      return;
+    }
+
+    const file = req.file;
+    const model = await registerModelAndJob({
+      sourceFilename,
+      sourceExt,
+      quality,
+      folderId,
+      originalSizeBytes: file.size,
+      saveOriginalFile: (targetPath) => {
+        fs.writeFileSync(targetPath, file.buffer);
+      }
+    });
+
+    if (req.accepts(["json", "html"]) === "json") {
+      res.status(201).json(model);
+      return;
+    }
+
+    res.redirect(303, "/admin");
+  } catch (error) {
+    next(error);
+  }
 });
 
 modelsRouter.patch("/:slug", (req, res, next) => {

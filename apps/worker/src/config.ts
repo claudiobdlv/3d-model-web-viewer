@@ -38,7 +38,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     throw new Error("XCAF_COLOUR_MODE must be xcaf-baseline or step-presentation.");
   }
 
-    const glbOptimizationMode = process.env.GLB_OPTIMIZATION_MODE || "disabled";
+  const glbOptimizationMode = process.env.GLB_OPTIMIZATION_MODE || "disabled";
   if (!["disabled", "meshopt"].includes(glbOptimizationMode)) {
     throw new Error("GLB_OPTIMIZATION_MODE must be disabled or meshopt.");
   }
@@ -63,7 +63,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     keepWorkerOutput: process.env.KEEP_WORKER_OUTPUT !== "false",
     maxModelArtifactBytes: positiveInteger(
       process.env.MAX_MODEL_ARTIFACT_BYTES,
-      1024 * 1024 * 1024,
+      262144000,
       "MAX_MODEL_ARTIFACT_BYTES"
     )
   };
