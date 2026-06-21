@@ -81,10 +81,10 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   }, [projects, debouncedQuery]);
 
   const selectView = (next: View) => { setView(next); setQuery(""); setNotice(null); };
-  const runBatch = async (action: BatchAction, projectId?: number | null) => {
+  const runBatch = async (action: BatchAction, projectId?: number | null, slugs = [...selected]) => {
     setBusy(true); setError(null); setNotice(null);
     try {
-      const result = await batchModels(action, [...selected], projectId);
+      const result = await batchModels(action, slugs, projectId);
       setNotice(result.failed.length
         ? `${result.updated.length} updated. ${result.failed.map((item) => `${item.slug}: ${item.reason}`).join("; ")}`
         : `${result.updated.length} item${result.updated.length === 1 ? "" : "s"} updated.`);
@@ -96,7 +96,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
     setSelected(new Set([model.slug]));
     if (action === "moveToProject") setMoveOpen(true);
     else if (action === "deleteForever") setDeleteForeverOpen(true);
-    else window.setTimeout(() => void runBatch(action), 0);
+    else window.setTimeout(() => void runBatch(action, undefined, [model.slug]), 0);
   };
 
   return <div className="library-shell">
