@@ -916,26 +916,85 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
   );
 }
 
+function isUsefulDisplayName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+
+  const genericNames = [
+    "unnamed",
+    "unnamed part",
+    "object",
+    "mesh",
+    "node",
+    "scene",
+    "document",
+    "compound",
+    "compsolid",
+    "solid",
+    "shell",
+    "shape",
+    "primitive"
+  ];
+  if (genericNames.includes(lower)) return false;
+
+  if (/^(mesh|node|object|primitive)[ _-]?\d+$/i.test(trimmed)) return false;
+  if (/^=>\s*\[[\d:]+\]$/.test(trimmed)) return false;
+  if (/^\d+(?::\d+)+$/.test(trimmed)) return false;
+  if (/^#\d+$/.test(trimmed)) return false;
+  if (trimmed.includes(">") || trimmed.includes("/material/")) return false;
+
+  return true;
+}
+
 function selectedDisplayName(object: THREE.Object3D): string {
   const sources = metadataSources(object);
-  for (const key of ["resolvedObjectName", "blockName", "componentName", "productName", "objectName", "displayName"]) {
-    for (const source of sources) {
-      const name = readableName(source.value[key]);
-      if (name) return name;
-    }
-  }
-  const objectName = readableName(object.name);
-  if (objectName) return objectName;
+
+  // 1. resolvedObjectName / displayName if present and readable (leaf-to-root)
   for (const source of sources) {
-    const layer = readableName(firstValue(source.value, ["layerNames", "layerName", "layer"]));
+    const name = readableName(firstValue(source.value, ["resolvedObjectName", "displayName"]));
+    if (name) return name;
+  }
+
+  // 2. Block/component/instance name (leaf-to-root)
+  for (const source of sources) {
+    const blockName = readableName(firstValue(source.value, ["blockName", "instanceName", "componentInstance", "blockInstance"]));
+    if (blockName) return blockName;
+  }
+
+  // 3. Part/object/product/representation name (leaf-to-root)
+  for (const source of sources) {
+    const partName = readableName(firstValue(source.value, ["partName", "objectName", "componentName", "productName", "representationName"]));
+    if (partName) return partName;
+  }
+
+  // 4. Useful direct object.name or metadata name (leaf-to-root)
+  for (const source of sources) {
+    const name = readableName(source.value["name"]);
+    if (name) return name;
+  }
+  const directObjName = readableName(object.name);
+  if (directObjName) return directObjName;
+
+  // 5. Layer name (leaf-to-root)
+  for (const source of sources) {
+    const layer = readableName(firstValue(source.value, ["layerNames", "layerName", "layer", "layers"]));
     if (layer) return layer;
   }
-  for (const key of ["stableObjectId", "selectableId"]) {
-    for (const source of sources) {
-      const id = stableIdentifier(source.value[key]);
-      if (id) return id;
-    }
+
+  // 6. stableObjectId
+  for (const source of sources) {
+    const id = stableIdentifier(source.value["stableObjectId"]);
+    if (id) return id;
   }
+
+  // 7. selectableId
+  for (const source of sources) {
+    const id = stableIdentifier(source.value["selectableId"]);
+    if (id) return id;
+  }
+
+  // 8. "Unnamed part"
   return "Unnamed part";
 }
 
@@ -981,9 +1040,7 @@ function readableName(value: unknown): string | undefined {
   if (Array.isArray(value)) value = value.find((item) => readableName(item));
   if (typeof value !== "string") return undefined;
   const name = value.trim();
-  if (!name || /^=>\s*\[[\d:]+\]$/.test(name) || /^\d+(?::\d+)+$/.test(name)) return undefined;
-  if (/^(mesh|node|object|primitive)[ _-]?\d+$/i.test(name)) return undefined;
-  if (["document", "compound", "compsolid", "solid", "shell", "shape"].includes(name.toLowerCase())) return undefined;
+  if (!isUsefulDisplayName(name)) return undefined;
   return name;
 }
 
