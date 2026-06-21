@@ -6,10 +6,13 @@ import {
   getJobForWorker,
   claimNextWorkerJob,
   markJobFailed,
+  markJobCancelled,
   markJobProcessing,
-  markJobReady
+  markJobReady,
+  updateJobProgress,
+  deleteModelBySlug
 } from "../db.js";
-import { getLogDir, getModelDir, getUploadDir, isSafeSlug } from "../storage.js";
+import { getLogDir, getModelDir, getUploadDir, getWorkerOutputDir, isSafeSlug } from "../storage.js";
 import { workerJobPayload } from "../workerPayload.js";
 
 const developmentWorkerToken = "dev-worker-token";
@@ -100,6 +103,36 @@ workerRouter.get("/jobs/:jobId/source", (req, res) => {
   res.download(sourcePath, job.source_filename);
 });
 
+workerRouter.get("/jobs/:jobId/state", (req, res) => {
+  const job = getValidStepJob(Number(req.params.jobId));
+  if (!job) return void res.status(404).json({ error: "Worker job not found." });
+  res.json({ status: job.status, cancellationRequested: Boolean(job.cancellation_requested_at) });
+});
+
+workerRouter.post("/jobs/:jobId/progress", (req, res) => {
+  const job = getValidStepJob(Number(req.params.jobId));
+  const percent = Number(req.body?.percent);
+  const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
+  if (!job) return void res.status(404).json({ error: "Worker job not found." });
+  if (!Number.isFinite(percent) || !label) return void res.status(400).json({ error: "percent and label are required." });
+  if (!updateJobProgress(job.id, percent, label)) return void res.status(409).json({ error: "Job is no longer active." });
+  res.json({ ok: true });
+});
+
+workerRouter.post("/jobs/:jobId/cancelled", async (req, res, next) => {
+  try {
+    const job = getValidStepJob(Number(req.params.jobId));
+    if (!job) return void res.status(404).json({ error: "Worker job not found." });
+    const model = markJobCancelled(job.id);
+    if (model?.pending_delete_at) {
+      await Promise.all([getUploadDir(model.slug), getModelDir(model.slug), getLogDir(model.slug), getWorkerOutputDir(model.slug)]
+        .map((directory) => fs.promises.rm(directory, { recursive: true, force: true })));
+      deleteModelBySlug(model.slug);
+    }
+    res.json({ ok: true, status: "cancelled" });
+  } catch (error) { next(error); }
+});
+
 workerRouter.post(
   "/jobs/:jobId/complete",
   upload.fields([
@@ -121,6 +154,10 @@ workerRouter.post(
     const job = getValidStepJob(jobId);
     if (!job) {
       res.status(404).json({ error: "Worker job not found." });
+      return;
+    }
+    if (job.status !== "processing" || job.cancellation_requested_at) {
+      res.status(409).json({ error: "Job was cancelled and cannot publish artifacts." });
       return;
     }
 
@@ -162,7 +199,12 @@ workerRouter.post(
       fs.writeFileSync(path.join(logDir, "conversion.log"), conversionLog.buffer);
     }
 
-    markJobReady(job.id, "Worker completed STEP/STP conversion.", displayGlb.size);
+    if (!markJobReady(job.id, "Worker completed STEP/STP conversion.", displayGlb.size)) {
+      fs.rmSync(modelDir, { recursive: true, force: true });
+      fs.rmSync(getLogDir(job.model_slug), { recursive: true, force: true });
+      res.status(409).json({ error: "Job was cancelled while artifacts were being received; artifacts were discarded." });
+      return;
+    }
     res.json({ ok: true, status: "ready" });
   }
 );
@@ -186,6 +228,11 @@ workerRouter.post("/jobs/:jobId/fail", failureUpload.single("conversion.log"), (
     fs.writeFileSync(path.join(logDir, "conversion.log"), req.file.buffer);
   }
 
+  if (job.cancellation_requested_at || job.status === "cancelling") {
+    markJobCancelled(job.id, `Cancelled: ${message}`);
+    res.json({ ok: true, status: "cancelled" });
+    return;
+  }
   markJobFailed(job.id, message);
   res.json({ ok: true, status: "failed" });
 });

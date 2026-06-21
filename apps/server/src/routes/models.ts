@@ -11,6 +11,7 @@ import {
   listModels,
   moveModelToFolder,
   renameModel,
+  requestModelCancellation,
   restoreModel,
   saveModelDefaultView,
   trashModel,
@@ -98,6 +99,7 @@ modelsRouter.post("/batch", async (req, res) => {
       if (action === "trash") {
         if (model.deleted_at) throw new Error("Model is already in the recycling bin.");
         trashModel(slug);
+        requestModelCancellation(slug);
       } else if (action === "restore") {
         if (!model.deleted_at) throw new Error("Model is not in the recycling bin.");
         restoreModel(slug);
@@ -324,7 +326,9 @@ modelsRouter.post("/:slug/trash", (req, res) => {
   const model = getModelBySlug(slug, true);
   if (!model) return void res.status(404).json({ error: "Model not found." });
   if (model.deleted_at) return void res.status(409).json({ error: "Model is already in the recycling bin." });
-  res.json(trashModel(slug));
+  trashModel(slug);
+  requestModelCancellation(slug);
+  res.json(getModelBySlug(slug, true));
 });
 
 modelsRouter.post("/:slug/restore", (req, res) => {
@@ -474,6 +478,12 @@ async function removeModelFiles(slug: string): Promise<string[]> {
 }
 
 async function permanentlyDeleteModel(slug: string) {
+  const model = getModelBySlug(slug, true);
+  if (!model) return { deletion: { deletedJobs: 0, deletedModels: 0 }, removedPaths: [] };
+  const cancellation = requestModelCancellation(slug, true);
+  if (cancellation.active > 0) {
+    return { deletion: { deletedJobs: 0, deletedModels: 0 }, removedPaths: [], pending: true };
+  }
   const removedPaths = await removeModelFiles(slug);
   const deletion = deleteModelBySlug(slug);
   return { deletion, removedPaths };

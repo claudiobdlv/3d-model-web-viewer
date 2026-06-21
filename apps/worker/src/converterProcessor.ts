@@ -21,6 +21,8 @@ export type ConverterProcessorInput = {
   xcafColourMode: "xcaf-baseline" | "step-presentation";
   quality: ConversionQuality;
   glbOptimizationMode: GlbOptimizationMode;
+  signal?: AbortSignal;
+  onProgress?: (percent: number, label: string) => void | Promise<void>;
 };
 
 export type ConverterProcessorOutput = {
@@ -43,12 +45,14 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   console.log(`Semantic quality: ${input.quality}`);
   console.log(`Native preset: ${nativePreset}`);
 
+  throwIfAborted(input.signal);
+  await input.onProgress?.(15, "Converting - reading STEP and meshing");
   if (input.converterBackend === "occt-js") {
     await runOcctJsConverter({
       converterCli: input.converterCli,
       sourcePath: input.sourcePath,
       outputDir: jobDir,
-      quality: occtJsQualityPreset(input.quality)
+      quality: occtJsQualityPreset(input.quality), signal: input.signal
     });
   } else {
     await runXcafBaselineConverter({
@@ -56,7 +60,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       sourcePath: input.sourcePath,
       outputDir: jobDir,
       quality: input.quality,
-      xcafColourMode: input.xcafColourMode
+      xcafColourMode: input.xcafColourMode, signal: input.signal
     });
   }
 
@@ -66,6 +70,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   const materialDebugPath = path.join(jobDir, "material-debug.json");
   const conversionLogPath = path.join(jobDir, "conversion.log");
   const xcafReportPath = path.join(jobDir, "xcaf-report.json");
+  throwIfAborted(input.signal);
+  await input.onProgress?.(70, "Converting - writing raw GLB");
 
   let nativeQualityDetails: NativeQualityDetails = {
     preset: nativePreset,
@@ -96,6 +102,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   let optimizationResult: any = null;
 
   if (input.glbOptimizationMode === "meshopt") {
+    throwIfAborted(input.signal);
+    await input.onProgress?.(85, "Optimizing GLB");
     if (input.converterBackend === "xcaf-baseline") {
       await fs.promises.rename(displayGlbPath, rawGlbPath);
     }
@@ -149,6 +157,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   const reductionPercent = optimizationResult.rawSizeBytes > 0
     ? Number(((1 - optimizationResult.displaySizeBytes / optimizationResult.rawSizeBytes) * 100).toFixed(2))
     : 0;
+  throwIfAborted(input.signal);
+  await input.onProgress?.(95, "Validating final artifact");
 
   // Update stats.json to reflect the final display.glb size (optimized or fallback/disabled size) and include optimization metadata
   const statsContent = await fs.promises.readFile(statsPath, "utf8");
@@ -222,6 +232,7 @@ function runOcctJsConverter(input: {
   sourcePath: string;
   outputDir: string;
   quality: string;
+  signal?: AbortSignal;
 }): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -239,9 +250,13 @@ function runOcctJsConverter(input: {
         stdio: ["ignore", "inherit", "inherit"]
       }
     );
+    const abort = () => child.kill("SIGTERM");
+    input.signal?.addEventListener("abort", abort, { once: true });
 
     child.on("error", reject);
     child.on("exit", (code) => {
+      input.signal?.removeEventListener("abort", abort);
+      if (input.signal?.aborted) return reject(new DOMException("Conversion cancelled.", "AbortError"));
       if (code === 0) {
         resolve();
         return;
@@ -258,6 +273,7 @@ async function runXcafBaselineConverter(input: {
   outputDir: string;
   quality: ConversionQuality;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
+  signal?: AbortSignal;
 }): Promise<void> {
   const stat = await fs.promises.stat(input.xcafConverterBin).catch(() => null);
   if (!stat || !stat.isFile()) {
@@ -282,7 +298,7 @@ async function runXcafBaselineConverter(input: {
     input.xcafColourMode,
     "--colour-space",
     "raw"
-  ]);
+  ], input.signal);
 
   const conversionLogPath = path.join(input.outputDir, "conversion.log");
   const existingLog = await fs.promises.readFile(conversionLogPath, "utf8").catch(() => "");
@@ -301,14 +317,18 @@ async function runXcafBaselineConverter(input: {
   await fs.promises.writeFile(conversionLogPath, `${header}${existingLog}`);
 }
 
-function spawnProcess(command: string, args: string[]): Promise<void> {
+function spawnProcess(command: string, args: string[], signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "inherit", "inherit"]
     });
+    const abort = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", abort, { once: true });
 
     child.on("error", reject);
     child.on("exit", (code) => {
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) return reject(new DOMException("Conversion cancelled.", "AbortError"));
       if (code === 0) {
         resolve();
         return;
@@ -317,6 +337,10 @@ function spawnProcess(command: string, args: string[]): Promise<void> {
       reject(new Error(`${command} exited with code ${code ?? "unknown"}`));
     });
   });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException("Conversion cancelled.", "AbortError");
 }
 
 async function writeXcafCompatibilityFiles(input: {

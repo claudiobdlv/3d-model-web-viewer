@@ -19,6 +19,11 @@ export type ModelRecord = {
   project_name?: string | null;
   quality?: ConversionQuality | null;
   deleted_at: string | null;
+  pending_delete_at?: string | null;
+  progress_percent?: number | null;
+  progress_label?: string | null;
+  progress_updated_at?: string | null;
+  job_started_at?: string | null;
   created_at: string;
   updated_at: string;
   default_view_json?: string | null;
@@ -69,6 +74,11 @@ export type JobRecord = {
   started_at: string | null;
   completed_at: string | null;
   failed_at: string | null;
+  cancellation_requested_at: string | null;
+  worker_claimed_at: string | null;
+  progress_percent: number | null;
+  progress_label: string | null;
+  progress_updated_at: string | null;
 };
 
 export type PublicShareRecord = {
@@ -160,10 +170,16 @@ export function initDb(): void {
   ensureColumn("jobs", "completed_at", "TEXT");
   ensureColumn("jobs", "failed_at", "TEXT");
   ensureColumn("jobs", "quality", "TEXT NOT NULL DEFAULT 'medium'");
+  ensureColumn("jobs", "cancellation_requested_at", "TEXT");
+  ensureColumn("jobs", "worker_claimed_at", "TEXT");
+  ensureColumn("jobs", "progress_percent", "INTEGER");
+  ensureColumn("jobs", "progress_label", "TEXT");
+  ensureColumn("jobs", "progress_updated_at", "TEXT");
   ensureColumn("models", "folder_id", "INTEGER REFERENCES folders(id)");
   ensureColumn("models", "glb_size_bytes", "INTEGER");
   ensureColumn("models", "original_size_bytes", "INTEGER");
   ensureColumn("models", "deleted_at", "TEXT");
+  ensureColumn("models", "pending_delete_at", "TEXT");
   ensureColumn("models", "default_view_json", "TEXT");
   ensureColumn("public_shares", "public_token", "TEXT");
   db.exec(`
@@ -244,14 +260,21 @@ export function listModels(options: ModelListOptions = {}): ModelRecord[] {
 
   const sortBy = options.sortBy ?? "created_at";
   const sortDir = options.sortDir === "asc" ? "ASC" : "DESC";
-  return db.prepare(
+  const records = db.prepare(
     `SELECT models.*, models.folder_id AS project_id, folders.name AS project_name,
-            (SELECT jobs.quality FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS quality
+            (SELECT jobs.quality FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS quality,
+            (SELECT jobs.progress_percent FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS progress_percent,
+            (SELECT jobs.progress_label FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS progress_label,
+            (SELECT jobs.progress_updated_at FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS progress_updated_at,
+            (SELECT jobs.started_at FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS job_started_at
      FROM models
      LEFT JOIN folders ON folders.id = models.folder_id
      WHERE ${where.join(" AND ")}
      ORDER BY ${sortColumns[sortBy]} ${sortDir}, models.id ${sortDir}`
   ).all(...params) as ModelRecord[];
+  return records.map((model) => model.progress_percent == null || !["processing", "cancelling"].includes(model.status)
+    ? model
+    : { ...model, status: `progress|${model.status}|${model.progress_percent}|${model.progress_label || "Converting"}|${model.job_started_at || ""}` });
 }
 
 function escapeLike(value: string): string {
@@ -468,6 +491,49 @@ export function trashModel(slug: string): ModelRecord | undefined {
   return getModelBySlug(slug, true);
 }
 
+export function requestModelCancellation(slug: string, pendingDelete = false): { queued: number; active: number } {
+  const queued = db.prepare(
+    `UPDATE jobs SET status = 'cancelled', message = 'Cancelled because the model was deleted.',
+       cancellation_requested_at = COALESCE(cancellation_requested_at, CURRENT_TIMESTAMP),
+       progress_label = 'Cancelled', progress_updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP,
+       updated_at = CURRENT_TIMESTAMP WHERE model_slug = ? AND status IN ('uploaded', 'queued')`
+  ).run(slug);
+  const active = db.prepare(
+    `UPDATE jobs SET status = 'cancelling', message = 'Cancellation requested because the model was deleted.',
+       cancellation_requested_at = COALESCE(cancellation_requested_at, CURRENT_TIMESTAMP),
+       progress_label = 'Cancelling conversion', progress_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+     WHERE model_slug = ? AND status IN ('processing', 'cancelling')`
+  ).run(slug);
+  db.prepare(
+    `UPDATE models SET status = CASE WHEN ? > 0 THEN 'cancelling' WHEN ? > 0 THEN 'cancelled' ELSE status END,
+       pending_delete_at = CASE WHEN ? THEN COALESCE(pending_delete_at, CURRENT_TIMESTAMP) ELSE pending_delete_at END,
+       updated_at = CURRENT_TIMESTAMP WHERE slug = ?`
+  ).run(Number(active.changes || 0), Number(queued.changes || 0), pendingDelete ? 1 : 0, slug);
+  return { queued: Number(queued.changes || 0), active: Number(active.changes || 0) };
+}
+
+export function updateJobProgress(jobId: number, percent: number, label: string): boolean {
+  const result = db.prepare(
+    `UPDATE jobs SET progress_percent = ?, progress_label = ?, progress_updated_at = CURRENT_TIMESTAMP,
+       updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing' AND cancellation_requested_at IS NULL`
+  ).run(Math.max(0, Math.min(99, Math.round(percent))), label.slice(0, 160), jobId);
+  return result.changes === 1;
+}
+
+export function markJobCancelled(jobId: number, message = "Worker acknowledged cancellation."): ModelRecord | undefined {
+  const job = getJobForWorker(jobId);
+  if (!job) return undefined;
+  db.prepare(
+    `UPDATE jobs SET status = 'cancelled', message = ?, progress_label = 'Cancelled',
+       progress_updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND status IN ('processing', 'cancelling')`
+  ).run(message, jobId);
+  db.prepare(
+    `UPDATE models SET status = 'cancelled', has_display_glb = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+  ).run(job.model_id);
+  return getModelById(job.model_id, true);
+}
+
 export function restoreModel(slug: string): ModelRecord | undefined {
   db.prepare(
     `UPDATE models SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
@@ -560,6 +626,7 @@ export function claimNextWorkerJob(): WorkerJobRecord | undefined {
        JOIN models ON models.id = jobs.model_id
        WHERE jobs.type = 'step-to-glb'
          AND jobs.status IN ('uploaded', 'queued')
+         AND jobs.cancellation_requested_at IS NULL
          AND models.source_ext IN ('.step', '.stp')
          AND models.deleted_at IS NULL
        ORDER BY jobs.created_at ASC, jobs.id ASC
@@ -578,9 +645,13 @@ export function claimNextWorkerJob(): WorkerJobRecord | undefined {
            message = 'Worker claimed job for processing.',
            updated_at = CURRENT_TIMESTAMP,
            started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+           worker_claimed_at = CURRENT_TIMESTAMP,
+           progress_percent = 5,
+           progress_label = 'Converting - starting',
+           progress_updated_at = CURRENT_TIMESTAMP,
            completed_at = NULL,
            failed_at = NULL
-       WHERE id = ? AND status IN ('uploaded', 'queued')`
+       WHERE id = ? AND status IN ('uploaded', 'queued') AND cancellation_requested_at IS NULL`
     ).run(job.id);
 
     if (result.changes !== 1) {
@@ -634,16 +705,18 @@ export function markJobProcessing(jobId: number): void {
   ).run(jobId);
 }
 
-export function markJobReady(jobId: number, message = "Worker completed fake processing.", glbSizeBytes?: number): void {
-  db.prepare(
+export function markJobReady(jobId: number, message = "Worker completed fake processing.", glbSizeBytes?: number): boolean {
+  const result = db.prepare(
     `UPDATE jobs
      SET status = 'ready',
          message = ?,
          updated_at = CURRENT_TIMESTAMP,
          completed_at = CURRENT_TIMESTAMP,
-         failed_at = NULL
-     WHERE id = ?`
+         failed_at = NULL, progress_percent = 100, progress_label = 'Ready', progress_updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND status = 'processing' AND cancellation_requested_at IS NULL`
   ).run(message, jobId);
+
+  if (result.changes !== 1) return false;
 
   db.prepare(
     `UPDATE models
@@ -651,8 +724,9 @@ export function markJobReady(jobId: number, message = "Worker completed fake pro
          has_display_glb = 1,
          glb_size_bytes = COALESCE(?, glb_size_bytes),
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
+     WHERE id = (SELECT model_id FROM jobs WHERE id = ? AND status = 'ready') AND deleted_at IS NULL`
   ).run(glbSizeBytes ?? null, jobId);
+  return true;
 }
 
 export function markJobFailed(jobId: number, message: string): void {

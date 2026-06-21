@@ -114,7 +114,45 @@ test("asset library projects, recycling, quota, sorting, and batch actions", asy
   assert.equal((quotaAfterPermanentDelete.body as { usedBytes: number }).usedBytes, 16);
   assert.equal((quotaAfterPermanentDelete.body as { availableBytes: number }).availableBytes, 5368709104);
   assert.equal((quotaAfterPermanentDelete.body as { breakdown: { deletedBytes: number } }).breakdown.deletedBytes, 0);
+
+  const queued = await uploadStep(origin, headers, "queued-cancel.step");
+  assert.equal((await fetch(`${origin}/api/models/${queued.slug}/trash`, { method: "POST", headers })).status, 200);
+  assert.equal((db.prepare("SELECT status FROM jobs WHERE model_slug = ?").get(queued.slug) as { status: string }).status, "cancelled");
+  assert.equal(db.prepare("SELECT id FROM jobs WHERE id = (SELECT id FROM jobs WHERE model_slug = ?) AND status IN ('uploaded','queued')",).get(queued.slug), undefined);
+
+  const activeConversion = await uploadStep(origin, headers, "active-cancel.step");
+  db.prepare("UPDATE jobs SET status = 'processing' WHERE model_slug = ?").run(activeConversion.slug);
+  db.prepare("UPDATE models SET status = 'processing' WHERE slug = ?").run(activeConversion.slug);
+  const activeJobId = (db.prepare("SELECT id FROM jobs WHERE model_slug = ?").get(activeConversion.slug) as { id: number }).id;
+  const progressResponse = await fetch(`${origin}/api/worker/jobs/${activeJobId}/progress`, { method: "POST", headers: { authorization: "Bearer dev-worker-token", "content-type": "application/json" }, body: JSON.stringify({ percent: 50, label: "Converting - meshing" }) });
+  assert.equal(progressResponse.status, 200);
+  const savedProgress = db.prepare("SELECT progress_percent, progress_label FROM jobs WHERE id = ?").get(activeJobId) as { progress_percent: number; progress_label: string };
+  assert.equal(savedProgress.progress_percent, 50);
+  assert.equal(savedProgress.progress_label, "Converting - meshing");
+  assert.equal((await fetch(`${origin}/api/models/${activeConversion.slug}/trash`, { method: "POST", headers })).status, 200);
+  const activeJob = db.prepare("SELECT status, cancellation_requested_at FROM jobs WHERE model_slug = ?").get(activeConversion.slug) as { status: string; cancellation_requested_at: string | null };
+  assert.equal(activeJob.status, "cancelling");
+  assert.ok(activeJob.cancellation_requested_at);
+
+  const batchQueued = await uploadStep(origin, headers, "batch-cancel.step");
+  const batchTrash = await jsonFetch(`${origin}/api/models/batch`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ action: "trash", slugs: [batchQueued.slug] }) });
+  assert.deepEqual((batchTrash.body as { updated: string[] }).updated, [batchQueued.slug]);
+  assert.equal((db.prepare("SELECT status FROM jobs WHERE model_slug = ?").get(batchQueued.slug) as { status: string }).status, "cancelled");
+
+  const foreverQueued = await uploadStep(origin, headers, "forever-cancel.step");
+  await fetch(`${origin}/api/models/${foreverQueued.slug}/trash`, { method: "POST", headers });
+  assert.equal((await fetch(`${origin}/api/models/${foreverQueued.slug}/forever`, { method: "DELETE", headers })).status, 200);
+  assert.equal(db.prepare("SELECT id FROM jobs WHERE model_slug = ?").get(foreverQueued.slug), undefined);
 });
+
+async function uploadStep(origin: string, headers: Record<string, string>, filename: string) {
+  const form = new FormData();
+  form.set("modelFile", new Blob([Buffer.from("ISO-10303-21;ENDSEC;END-ISO-10303-21;")]), filename);
+  form.set("quality", "low");
+  const result = await jsonFetch(`${origin}/api/models`, { method: "POST", headers, body: form });
+  assert.equal(result.response.status, 201);
+  return result.body as { id: number; slug: string };
+}
 
 async function uploadGlb(
   origin: string,

@@ -187,7 +187,8 @@ export async function deleteModel(slug: string): Promise<void> {
 export async function uploadModel(
   file: File,
   folderId: number | null,
-  quality: ConversionQuality = "medium"
+  quality: ConversionQuality = "medium",
+  signal?: AbortSignal
 ): Promise<ModelRecord> {
   const form = new FormData();
   form.set("modelFile", file);
@@ -197,6 +198,7 @@ export async function uploadModel(
   const response = await fetch("/api/models", {
     method: "POST",
     body: form,
+    signal,
     headers: { accept: "application/json" }
   });
 

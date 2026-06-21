@@ -11,7 +11,7 @@ import {
   initChunkedUpload, uploadChunk, completeChunkedUpload, deleteChunkedUpload
 } from "../api";
 import { downloadPublicShareQr } from "../qr";
-import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ProjectRecord, StorageQuota } from "../types";
+import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ProjectRecord, StorageQuota, UploadTask } from "../types";
 import { activeStatuses, formatDate, formatFileSize, statusKind, statusLabel } from "../utils";
 import { ResizableHeaderCell } from "./ResizableHeaderCell";
 
@@ -68,6 +68,8 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadInFlight, setUploadInFlight] = useState(false);
+  const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
   const [moveOpen, setMoveOpen] = useState(false);
   const [deleteForeverOpen, setDeleteForeverOpen] = useState(false);
   const [stagedFile, setStagedFile] = useState<File | null>(null);
@@ -112,7 +114,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   useEffect(() => { setSelected(new Set()); void refresh(true); }, [view, debouncedQuery, sortBy, sortDir]);
   useEffect(() => {
     window.clearTimeout(polling.current);
-    polling.current = window.setTimeout(() => void refresh(false), models.some((m) => activeStatuses.has(m.status)) ? 3000 : 15000);
+    polling.current = window.setTimeout(() => void refresh(false), models.some((m) => activeStatuses.has(m.status.split("|")[1] ?? m.status)) ? 3000 : 15000);
     return () => window.clearTimeout(polling.current);
   }, [models, view, debouncedQuery, sortBy, sortDir]);
 
@@ -123,6 +125,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
 
   const selectView = (next: View) => { setView(next); setQuery(""); setNotice(null); };
   const runBatch = async (action: BatchAction, projectId?: number | null, slugs = [...selected]) => {
+    if(action==="trash"&&models.some(model=>slugs.includes(model.slug)&&["processing","cancelling"].includes(model.status.split("|")[1]??model.status))&&!window.confirm("This model is still converting. Moving it to the recycling bin will cancel the conversion."))return;
     setBusy(true); setError(null); setNotice(null);
     try {
       const result = await batchModels(action, slugs, projectId);
@@ -160,7 +163,8 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
       setError("Choose a project or All Models to upload.");
       return;
     }
-    setStagedFile(file); setUploadProjectId(projectId); setUploadHint(hint); setUploadOpen(true); setError(null);
+    if (!uploadInFlight) { setStagedFile(file); setUploadProjectId(projectId); setUploadHint(hint); }
+    setUploadOpen(true); setError(null);
   };
   const onDragEnter = (event: React.DragEvent) => {
     if (!isFileDrag(event)) return;
@@ -225,7 +229,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
         {error && <div className="alert error">{error}</div>}{notice && <div className="alert"><Check size={16}/>{notice}</div>}
         <section className={`asset-surface ${view.kind === "projects" ? "projects-surface" : ""}`}>
           {view.kind === "projects" ? <ProjectList projects={searchedProjects} dragProjectId={dragState.active ? dragState.projectId : null} onOpen={(id)=>selectView({kind:"project",id})} onRefresh={()=>refresh()} /> :
-            <AssetTable models={models} loading={loading} trash={view.kind === "trash"} selected={selected} sortBy={sortBy} sortDir={sortDir} returnTo={returnTo}
+            <AssetTable models={models} uploadTasks={uploadTasks.filter(task => view.kind === "all" || (view.kind === "unsorted" && task.projectId === null) || (view.kind === "project" && task.projectId === view.id))} loading={loading} trash={view.kind === "trash"} selected={selected} sortBy={sortBy} sortDir={sortDir} returnTo={returnTo}
               emptyTitle={view.kind === "project" ? `${title} is empty.` : view.kind === "unsorted" ? "No unsorted models." : "No models yet."}
               emptyDescription={view.kind === "project" ? "Drop STEP or GLB files here." : view.kind === "unsorted" ? "Models without a project will appear here." : "Drop STEP or GLB files here to get started."}
               onSort={(key)=>{if(sortBy===key)setSortDir(d=>d==="asc"?"desc":"asc");else{setSortBy(key);setSortDir("asc");}}}
@@ -234,7 +238,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
       </main>
     </div>
     {dragState.active && <DropUploadOverlay label={dragState.label} blocked={dragState.blocked}/>}
-    {uploadOpen && <UploadDialog projects={projects} defaultProjectId={uploadProjectId} initialFile={stagedFile} hint={uploadHint} onClose={()=>setUploadOpen(false)} onDone={async()=>{setUploadOpen(false);setStagedFile(null);setUploadHint(null);await refresh();}}/>}
+    {(uploadOpen || uploadInFlight) && <UploadDialog visible={uploadOpen} projects={projects} defaultProjectId={uploadProjectId} initialFile={stagedFile} hint={uploadHint} onClose={()=>setUploadOpen(false)} onBusyChange={setUploadInFlight} onTask={(task)=>{setUploadTasks(current=>{const exists=current.some(item=>item.clientUploadId===task.clientUploadId);return exists?current.map(item=>item.clientUploadId===task.clientUploadId?task:item):[task,...current]});if(task.stage==="queued")window.setTimeout(()=>setUploadTasks(current=>current.filter(item=>item.clientUploadId!==task.clientUploadId)),2000)}} onDone={async()=>{setUploadOpen(false);setUploadInFlight(false);setStagedFile(null);setUploadHint(null);await refresh();}}/>}
     {moveOpen && <MoveDialog projects={projects} busy={busy} onClose={()=>setMoveOpen(false)} onMove={(id)=>void runBatch("moveToProject",id)}/>}
     {deleteForeverOpen && <ConfirmDialog count={selected.size} busy={busy} onClose={()=>setDeleteForeverOpen(false)} onConfirm={()=>void runBatch("deleteForever")}/>}
   </div>;
@@ -252,27 +256,29 @@ function QuotaCard({quota}:{quota:StorageQuota|null}) {
     <div className="quota-available">{quota ? `${formatBytes(quota.availableBytes)} available` : ""}</div></div>;
 }
 
-function AssetTable({models,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];uploadTasks:UploadTask[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+  models=[...uploadTasks.map(task=>({id:-1,slug:`upload-${task.clientUploadId}`,name:task.filename.replace(/\.[^.]+$/,"") ,source_filename:task.filename,source_ext:"",status:`upload:${task.stage}:${task.percent}:${task.currentChunk}:${task.totalChunks}`,has_display_glb:0,glb_size_bytes:null,original_size_bytes:task.sizeBytes,folder_id:task.projectId,project_id:task.projectId,project_name:task.projectName,quality:task.quality,deleted_at:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString()} as ModelRecord)),...models];
   const rangeAnchor = useRef<string | null>(null);
   const [widths,setWidths]=useState<Record<ColumnKey,number>>(()=>{
     const defaults=Object.fromEntries(columnDefinitions.map(column=>[column.key,column.defaultWidth])) as Record<ColumnKey,number>;
     try { const saved=JSON.parse(localStorage.getItem(columnWidthsKey)??"{}"); return Object.fromEntries(columnDefinitions.map(column=>{const value=saved[column.key];return [column.key,typeof value==="number"&&Number.isFinite(value)?Math.min(column.maxWidth,Math.max(column.minWidth,value)):defaults[column.key]]})) as Record<ColumnKey,number>; } catch{return defaults}
   });
-  const all=models.length>0&&models.every(m=>selected.has(m.slug));
+  const selectableModels=models.filter(model=>!model.status.startsWith("upload:"));
+  const all=selectableModels.length>0&&selectableModels.every(m=>selected.has(m.slug));
   const toggle=(slug:string,shiftKey:boolean)=>{const next=new Set(selected);const shouldSelect=!next.has(slug);const anchorIndex=rangeAnchor.current?models.findIndex(model=>model.slug===rangeAnchor.current):-1;const targetIndex=models.findIndex(model=>model.slug===slug);if(shiftKey&&anchorIndex>=0&&targetIndex>=0){models.slice(Math.min(anchorIndex,targetIndex),Math.max(anchorIndex,targetIndex)+1).forEach(model=>shouldSelect?next.add(model.slug):next.delete(model.slug));}else{shouldSelect?next.add(slug):next.delete(slug);}rangeAnchor.current=slug;onSelected(next)};
   if(loading&&!models.length)return <div className="empty-state"><Loader2 className="animate-spin"/><strong>Loading assets…</strong></div>;
   if(!models.length)return <div className="empty-state"><Box/><strong>{trash?"Recycling bin is empty.":emptyTitle}</strong><span>{trash?"Deleted models will appear here.":emptyDescription}</span></div>;
   const tableWidth=104+columnDefinitions.reduce((total,column)=>total+widths[column.key],0);
   const resize=(key:ColumnKey,width:number)=>{const next={...widths,[key]:width};setWidths(next);localStorage.setItem(columnWidthsKey,JSON.stringify(next))};
-  return <div className="table-scroll"><table className="asset-table" style={{width:tableWidth,minWidth:"100%"}}><thead><tr><th className="check-cell"><input type="checkbox" checked={all} onChange={()=>onSelected(all?new Set():new Set(models.map(m=>m.slug)))} aria-label="Select all visible"/></th>
+  return <div className="table-scroll"><table className="asset-table" style={{width:tableWidth,minWidth:"100%"}}><thead><tr><th className="check-cell"><input type="checkbox" checked={all} onChange={()=>onSelected(all?new Set():new Set(selectableModels.map(m=>m.slug)))} aria-label="Select all visible"/></th>
     {columnDefinitions.map(column=><ResizableHeaderCell key={column.key} width={widths[column.key]} minWidth={column.minWidth} maxWidth={column.maxWidth} onResize={(width)=>resize(column.key,width)}>{column.sortKey?<button className="sort-button" onClick={()=>onSort(column.sortKey!)}>{column.label}{sortBy===column.sortKey&&(sortDir==="asc"?<ArrowUp/>:<ArrowDown/>)}</button>:<span>{column.label}</span>}</ResizableHeaderCell>)}<th className="action-cell">Actions</th></tr></thead>
-    <tbody>{models.map(model=>{const open=()=>{window.location.href=viewerPath(model.slug,returnTo)};return <tr key={model.slug} className={`${selected.has(model.slug)?"selected ":""}${trash?"":"clickable-row"}`} tabIndex={trash?undefined:0} role={trash?undefined:"link"} onClick={event=>{if(!trash&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}} onKeyDown={event=>{if(!trash&&event.key==="Enter"&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}}><td className="check-cell"><input type="checkbox" checked={selected.has(model.slug)} onChange={event=>toggle(model.slug,(event.nativeEvent as MouseEvent).shiftKey)} aria-label={`Select ${model.name}`}/></td>
-      <td>{trash?<div className="model-name"><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></div>:<a className="model-name" href={viewerPath(model.slug,returnTo)}><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></a>}</td>
+    <tbody>{models.map(model=>{const isUpload=model.status.startsWith("upload:");const open=()=>{if(!isUpload)window.location.href=viewerPath(model.slug,returnTo)};return <tr key={model.slug} className={`${selected.has(model.slug)?"selected ":""}${trash||isUpload?"":"clickable-row"}`} tabIndex={trash||isUpload?undefined:0} role={trash||isUpload?undefined:"link"} onClick={event=>{if(!trash&&!isUpload&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}} onKeyDown={event=>{if(!trash&&!isUpload&&event.key==="Enter"&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}}><td className="check-cell">{!isUpload&&<input type="checkbox" checked={selected.has(model.slug)} onChange={event=>toggle(model.slug,(event.nativeEvent as MouseEvent).shiftKey)} aria-label={`Select ${model.name}`}/>}</td>
+      <td>{trash||isUpload?<div className="model-name"><span className="file-icon">{isUpload?<Upload size={17}/>:<Box size={17}/>}</span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></div>:<a className="model-name" href={viewerPath(model.slug,returnTo)}><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></a>}</td>
       <td>{model.project_name??<span className="muted">Unsorted</span>}</td><td><Status status={model.status}/></td><td className="quality-cell">{model.quality??"—"}</td><td>{formatFileSize(model.glb_size_bytes)}</td><td>{formatDate(model.created_at)}</td>
-      <td className="action-cell"><RowMenu model={model} trash={trash} returnTo={returnTo} onAction={onAction} onRefresh={onRefresh}/></td></tr>})}</tbody></table></div>;
+      <td className="action-cell">{!isUpload&&<RowMenu model={model} trash={trash} returnTo={returnTo} onAction={onAction} onRefresh={onRefresh}/>}</td></tr>})}</tbody></table></div>;
 }
 
-function Status({status}:{status:string}){return <span className={`compact-status ${statusKind(status)}`}><span/>{statusLabel(status)}</span>}
+function Status({status}:{status:string}){if(status.startsWith("upload:")){const[,stage,percent,current,total]=status.split(":");return <div className={`row-progress ${stage==="failed"||stage==="cancelled"?"failed":""}`}><strong>{stage==="uploading"?`Uploading ${percent}%`:stage[0].toUpperCase()+stage.slice(1)}</strong>{Number(total)>0&&stage==="uploading"&&<small>chunk {current} of {total}</small>}<span><i style={{width:`${percent}%`}}/></span></div>}if(status.startsWith("progress|")){const[,stage,percent,label,started]=status.split("|");const minutes=started?Math.floor(Math.max(0,Date.now()-new Date(`${started}Z`).getTime())/60000):0;return <div className="row-progress"><strong>{label} - {percent}%</strong><small>{minutes?`${minutes}m elapsed`:stage==="cancelling"?"Stopping worker process":"Stage-based progress"}</small><span><i style={{width:`${percent}%`}}/></span></div>}return <span className={`compact-status ${statusKind(status)}`}><span/>{statusLabel(status)}</span>}
 
 function RowMenu({model,trash,returnTo,onAction,onRefresh}:{model:ModelRecord;trash:boolean;returnTo:string;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
   const [open,setOpen]=useState(false);
@@ -303,18 +309,24 @@ async function copyText(value:string){
 
 function DropUploadOverlay({label,blocked}:{label:string;blocked:boolean}){return <div className={`drop-upload-overlay ${blocked?"blocked":""}`}><div><Upload/><strong>{blocked?"Uploads aren't available here":"Drop to upload"}</strong><span>{blocked?"Choose a project or All Models to upload.":`to ${label}`}</span></div></div>}
 function UploadDialog({
+  visible,
   projects,
   defaultProjectId,
   initialFile,
   hint,
   onClose,
+  onBusyChange,
+  onTask,
   onDone
 }: {
+  visible: boolean;
   projects: ProjectRecord[];
   defaultProjectId: number | null;
   initialFile: File | null;
   hint: string | null;
   onClose: () => void;
+  onBusyChange: (busy: boolean) => void;
+  onTask: (task: UploadTask) => void;
   onDone: () => void;
 }) {
   const [file, setFile] = useState<File | null>(initialFile);
@@ -325,12 +337,16 @@ function UploadDialog({
   const [progress, setProgress] = useState<{ percent: number; text: string } | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const uploadIdRef = useRef<string | null>(null);
+  const taskRef = useRef<UploadTask | null>(null);
+  const updateTask = (changes: Partial<UploadTask>) => { if (!taskRef.current) return; taskRef.current={...taskRef.current,...changes}; onTask(taskRef.current); };
 
   async function handleCancel() {
     if (busy) {
       abortControllerRef.current?.abort();
       setError("Upload cancelled.");
       setBusy(false);
+      onBusyChange(false);
+      updateTask({ stage: "cancelled", error: "Upload cancelled." });
       setProgress(null);
       if (uploadIdRef.current) {
         const uid = uploadIdRef.current;
@@ -349,21 +365,28 @@ function UploadDialog({
     if (!file) return;
 
     setBusy(true);
+    onBusyChange(true);
     setError(null);
     setProgress(null);
     abortControllerRef.current = new AbortController();
 
     const isStep = /\.(step|stp)$/i.test(file.name);
     const isGlb = /\.(glb|gltf)$/i.test(file.name);
+    taskRef.current={clientUploadId:crypto.randomUUID(),uploadId:null,filename:file.name,sizeBytes:file.size,uploadedBytes:0,percent:0,currentChunk:0,totalChunks:0,stage:"initializing",projectId:projectId?Number(projectId):null,projectName:projects.find(p=>p.id===Number(projectId))?.name??null,quality};
+    onTask(taskRef.current);
 
     if (isGlb && file.size > 262144000) {
       setError("GLB/GLTF files must be under 250 MB.");
+      updateTask({ stage:"failed", error:"GLB/GLTF files must be under 250 MB." });
       setBusy(false);
+      onBusyChange(false);
       return;
     }
     if (isStep && file.size > 524288000) {
       setError("STEP/STP files must be under 500 MB.");
+      updateTask({ stage:"failed", error:"STEP/STP files must be under 500 MB." });
       setBusy(false);
+      onBusyChange(false);
       return;
     }
 
@@ -382,6 +405,7 @@ function UploadDialog({
         uploadIdRef.current = uploadId;
 
         const totalChunks = Math.ceil(file.size / chunkSizeBytes);
+        updateTask({ uploadId, totalChunks, stage: "uploading" });
 
         for (let i = 0; i < totalChunks; i++) {
           if (abortControllerRef.current?.signal.aborted) {
@@ -397,6 +421,7 @@ function UploadDialog({
             percent,
             text: `Uploading chunk ${i + 1} of ${totalChunks} - ${formatBytes(start)} of ${formatBytes(file.size)} (${percent}%)`
           });
+          updateTask({ stage:"uploading", uploadedBytes:start, percent, currentChunk:i+1, totalChunks });
 
           await uploadChunk(
             uploadId,
@@ -411,17 +436,22 @@ function UploadDialog({
                 percent: livePercent,
                 text: `Uploading chunk ${i + 1} of ${totalChunks} - ${formatBytes(uploaded)} of ${formatBytes(file.size)} (${livePercent}%)`
               });
+              updateTask({ uploadedBytes:uploaded, percent:livePercent, currentChunk:i+1 });
             }
           );
         }
 
         setProgress({ percent: 100, text: "Finalizing upload..." });
+        updateTask({ stage:"finalizing", uploadedBytes:file.size, percent:100 });
         const model = await completeChunkedUpload(uploadId);
         uploadIdRef.current = null;
         setProgress({ percent: 100, text: model.status === "ready" ? "Upload complete - Ready" : "Upload complete - Queued for conversion" });
+        updateTask({ stage:"queued", modelSlug:model.slug, percent:100 });
       } else {
         setProgress({ percent: 50, text: "Uploading file..." });
-        await uploadModel(file, projectId ? Number(projectId) : null, quality);
+        updateTask({ stage:"uploading", percent:50, currentChunk:1, totalChunks:1 });
+        const model=await uploadModel(file, projectId ? Number(projectId) : null, quality, abortControllerRef.current.signal);
+        updateTask({ stage:"queued", modelSlug:model.slug, uploadedBytes:file.size, percent:100 });
       }
 
       onDone();
@@ -432,14 +462,17 @@ function UploadDialog({
         setError(err instanceof Error ? err.message : "Upload failed.");
       }
       setBusy(false);
+      onBusyChange(false);
+      updateTask({ stage: err instanceof Error && err.name === "AbortError" ? "cancelled" : "failed", error: err instanceof Error ? err.message : "Upload failed." });
       setProgress((current) => current ? { ...current, text: `Upload failed: ${err instanceof Error ? err.message : "Unknown error."}` } : null);
     } finally {
       abortControllerRef.current = null;
     }
   }
 
+  if (!visible) return null;
   return (
-    <Dialog title="Upload model" onClose={handleCancel}>
+    <Dialog title="Upload model" onClose={onClose}>
       <form onSubmit={handleSubmit} className="dialog-form">
         <label className={`upload-drop ${busy ? "disabled" : ""}`}>
           <Upload />

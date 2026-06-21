@@ -13,6 +13,11 @@ export type ModelRecord = {
   project_name?: string | null;
   quality?: ConversionQuality | null;
   deleted_at: string | null;
+  pending_delete_at?: string | null;
+  progress_percent?: number | null;
+  progress_label?: string | null;
+  progress_updated_at?: string | null;
+  job_started_at?: string | null;
   created_at: string;
   updated_at: string;
   default_view_json?: string | null;
@@ -78,6 +83,23 @@ export type JobRecord = {
 };
 
 export type ConversionQuality = "low" | "medium" | "high";
+
+export type UploadTask = {
+  clientUploadId: string;
+  uploadId: string | null;
+  filename: string;
+  sizeBytes: number;
+  uploadedBytes: number;
+  percent: number;
+  currentChunk: number;
+  totalChunks: number;
+  stage: "initializing" | "uploading" | "finalizing" | "queued" | "failed" | "cancelled";
+  error?: string;
+  projectId: number | null;
+  projectName: string | null;
+  quality: ConversionQuality;
+  modelSlug?: string;
+};
 
 export type FolderSelection = "all" | "unsorted" | number;
 

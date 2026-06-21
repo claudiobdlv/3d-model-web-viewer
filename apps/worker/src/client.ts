@@ -19,11 +19,27 @@ export class WorkerClient {
     return payload.job;
   }
 
-  async downloadSource(job: WorkerJob, outputPath: string): Promise<void> {
-    const response = await this.request(job.downloadUrl);
+  async downloadSource(job: WorkerJob, outputPath: string, signal?: AbortSignal): Promise<void> {
+    const response = await this.request(job.downloadUrl, { signal });
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     const buffer = Buffer.from(await response.arrayBuffer());
     await fs.promises.writeFile(outputPath, buffer);
+  }
+
+  async getJobState(jobId: number): Promise<{ status: string; cancellationRequested: boolean }> {
+    const response = await this.request(`/api/worker/jobs/${jobId}/state`);
+    return response.json() as Promise<{ status: string; cancellationRequested: boolean }>;
+  }
+
+  async updateProgress(jobId: number, percent: number, label: string): Promise<void> {
+    await this.request(`/api/worker/jobs/${jobId}/progress`, {
+      method: "POST",
+      body: JSON.stringify({ percent, label })
+    });
+  }
+
+  async acknowledgeCancelled(jobId: number): Promise<void> {
+    await this.request(`/api/worker/jobs/${jobId}/cancelled`, { method: "POST" });
   }
 
   async completeJob(jobId: number, output: {
@@ -78,6 +94,7 @@ export class WorkerClient {
 
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${this.config.token}`);
+    if (typeof init.body === "string") headers.set("content-type", "application/json");
 
     const response = await fetch(url, {
       ...init,
