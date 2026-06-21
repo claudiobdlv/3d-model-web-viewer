@@ -38,21 +38,49 @@ async function handleErrorResponse(response: Response): Promise<never> {
   throw new Error(errorMessage);
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      ...(init?.body instanceof FormData ? {} : { "content-type": "application/json" }),
-      accept: "application/json",
-      ...init?.headers
-    }
-  });
+async function request<T>(url: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
+  const controller = timeoutMs ? new AbortController() : null;
+  const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      signal: controller?.signal ?? init?.signal,
+      headers: {
+        ...(init?.body instanceof FormData ? {} : { "content-type": "application/json" }),
+        accept: "application/json",
+        ...init?.headers
+      }
+    });
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error("The server did not respond in time. Please retry.");
+    throw error;
+  } finally {
+    if (timeout !== undefined) window.clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     await handleErrorResponse(response);
   }
 
   return response.json() as Promise<T>;
+}
+
+function xhrErrorMessage(xhr: XMLHttpRequest, fallback: string): string {
+  const contentType = xhr.getResponseHeader("content-type") || "";
+  const text = xhr.responseText || "";
+  if (contentType.includes("application/json") || text.trim().startsWith("{")) {
+    try {
+      const body = JSON.parse(text) as { error?: string; message?: string };
+      return body.error || body.message || fallback;
+    } catch {
+      return text || fallback;
+    }
+  }
+  if (xhr.status === 413 || text.includes("413 Payload Too Large") || text.includes("Too Large")) {
+    return "A chunk was rejected as too large. Please retry or contact the administrator.";
+  }
+  return text.trim().startsWith("<") ? `Server error (${xhr.status}). Please try again.` : text || fallback;
 }
 
 export function listFolders(): Promise<FolderRecord[]> {
@@ -190,7 +218,8 @@ export function initChunkedUpload(
     {
       method: "POST",
       body: JSON.stringify({ filename, sizeBytes, projectId, quality })
-    }
+    },
+    30_000
   );
 }
 
@@ -199,32 +228,48 @@ export async function uploadChunk(
   chunkIndex: number,
   totalChunks: number,
   chunk: Blob,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onProgress?: (uploadedBytes: number, totalBytes: number) => void
 ): Promise<void> {
   const form = new FormData();
   form.set("chunk", chunk, "chunk.bin");
 
-  const response = await fetch(
-    `/api/uploads/chunked/${encodeURIComponent(uploadId)}/chunk?chunkIndex=${chunkIndex}&totalChunks=${totalChunks}`,
-    {
-      method: "POST",
-      body: form,
-      headers: {
-        accept: "application/json"
-      },
-      signal
-    }
-  );
-
-  if (!response.ok) {
-    await handleErrorResponse(response);
-  }
+  await new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    xhr.open("POST", `/api/uploads/chunked/${encodeURIComponent(uploadId)}/chunk?chunkIndex=${chunkIndex}&totalChunks=${totalChunks}`);
+    xhr.setRequestHeader("accept", "application/json");
+    xhr.timeout = 120_000;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(Math.min(event.loaded, chunk.size), chunk.size);
+    };
+    xhr.onload = () => {
+      signal?.removeEventListener("abort", abort);
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(xhrErrorMessage(xhr, `Chunk ${chunkIndex + 1} upload failed.`)));
+    };
+    xhr.onerror = () => {
+      signal?.removeEventListener("abort", abort);
+      reject(new Error(`Network error while uploading chunk ${chunkIndex + 1}.`));
+    };
+    xhr.ontimeout = () => {
+      signal?.removeEventListener("abort", abort);
+      reject(new Error(`Chunk ${chunkIndex + 1} stalled for 2 minutes and was stopped. Please retry.`));
+    };
+    xhr.onabort = () => {
+      signal?.removeEventListener("abort", abort);
+      reject(new DOMException("Upload cancelled.", "AbortError"));
+    };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    xhr.send(form);
+  });
 }
 
 export function completeChunkedUpload(uploadId: string): Promise<ModelRecord> {
   return request<ModelRecord>(`/api/uploads/chunked/${encodeURIComponent(uploadId)}/complete`, {
     method: "POST"
-  });
+  }, 120_000);
 }
 
 export function deleteChunkedUpload(uploadId: string): Promise<void> {

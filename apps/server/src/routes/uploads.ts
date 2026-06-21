@@ -116,6 +116,8 @@ uploadsRouter.post("/init", (req, res) => {
 
     fs.writeFileSync(path.join(uploadDir, "metadata.json"), JSON.stringify(metadata, null, 2));
 
+    console.info("chunked_upload_init", { uploadId, sizeBytes: size, totalChunks, projectId: parsedFolderId, quality: parsedQuality });
+
     res.status(201).json({
       uploadId,
       chunkSizeBytes: MAX_UPLOAD_CHUNK_BYTES,
@@ -171,6 +173,8 @@ uploadsRouter.post("/:uploadId/chunk", chunkUpload.single("chunk"), (req, res) =
     // Write chunk directly to disk
     const chunkPath = path.join(uploadDir, `chunk-${chunkIndex}`);
     fs.writeFileSync(chunkPath, req.file.buffer);
+
+    console.info("chunked_upload_chunk", { uploadId, chunkIndex, totalChunks, sizeBytes: req.file.size });
 
     res.json({ ok: true });
   } catch (error) {
@@ -247,6 +251,8 @@ uploadsRouter.post("/:uploadId/complete", async (req, res, next) => {
 
     // Clean up all chunks and directory
     fs.rmSync(uploadDir, { recursive: true, force: true });
+
+    console.info("chunked_upload_complete", { uploadId, modelSlug: model.slug, sizeBytes: metadata.sizeBytes, totalChunks: metadata.totalChunks });
 
     res.status(201).json(model);
   } catch (error) {

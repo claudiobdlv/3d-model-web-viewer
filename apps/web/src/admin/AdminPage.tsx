@@ -328,21 +328,17 @@ function UploadDialog({
 
   async function handleCancel() {
     if (busy) {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-      if (uploadIdRef.current) {
-        const uid = uploadIdRef.current;
-        uploadIdRef.current = null;
-        try {
-          await deleteChunkedUpload(uid);
-        } catch (e) {
-          console.error("Failed to cleanup chunked upload:", e);
-        }
-      }
+      abortControllerRef.current?.abort();
       setError("Upload cancelled.");
       setBusy(false);
       setProgress(null);
+      if (uploadIdRef.current) {
+        const uid = uploadIdRef.current;
+        uploadIdRef.current = null;
+        void deleteChunkedUpload(uid).catch((e) => {
+          console.error("Failed to cleanup chunked upload:", e);
+        });
+      }
     } else {
       onClose();
     }
@@ -395,11 +391,11 @@ function UploadDialog({
           const start = i * chunkSizeBytes;
           const end = Math.min(start + chunkSizeBytes, file.size);
           const chunkBlob = file.slice(start, end);
-          const percent = Math.round((start / file.size) * 100);
+          const percent = Math.floor((start / file.size) * 100);
 
           setProgress({
             percent,
-            text: `Uploading chunk ${i + 1} of ${totalChunks} (${percent}%)`
+            text: `Uploading chunk ${i + 1} of ${totalChunks} - ${formatBytes(start)} of ${formatBytes(file.size)} (${percent}%)`
           });
 
           await uploadChunk(
@@ -407,13 +403,22 @@ function UploadDialog({
             i,
             totalChunks,
             chunkBlob,
-            abortControllerRef.current.signal
+            abortControllerRef.current.signal,
+            (chunkUploaded) => {
+              const uploaded = Math.min(start + chunkUploaded, file.size);
+              const livePercent = Math.floor((uploaded / file.size) * 100);
+              setProgress({
+                percent: livePercent,
+                text: `Uploading chunk ${i + 1} of ${totalChunks} - ${formatBytes(uploaded)} of ${formatBytes(file.size)} (${livePercent}%)`
+              });
+            }
           );
         }
 
         setProgress({ percent: 100, text: "Finalizing upload..." });
-        await completeChunkedUpload(uploadId);
+        const model = await completeChunkedUpload(uploadId);
         uploadIdRef.current = null;
+        setProgress({ percent: 100, text: model.status === "ready" ? "Upload complete - Ready" : "Upload complete - Queued for conversion" });
       } else {
         setProgress({ percent: 50, text: "Uploading file..." });
         await uploadModel(file, projectId ? Number(projectId) : null, quality);
@@ -427,7 +432,7 @@ function UploadDialog({
         setError(err instanceof Error ? err.message : "Upload failed.");
       }
       setBusy(false);
-      setProgress(null);
+      setProgress((current) => current ? { ...current, text: `Upload failed: ${err instanceof Error ? err.message : "Unknown error."}` } : null);
     } finally {
       abortControllerRef.current = null;
     }
@@ -486,26 +491,10 @@ function UploadDialog({
           </fieldset>
         )}
         {progress && (
-          <div className="upload-progress-container" style={{ marginTop: "12px" }}>
-            <div
-              style={{
-                background: "var(--border, #eee)",
-                borderRadius: "4px",
-                height: "8px",
-                overflow: "hidden"
-              }}
-            >
-              <div
-                style={{
-                  background: "var(--primary, #4f46e5)",
-                  width: `${progress.percent}%`,
-                  height: "100%",
-                  transition: "width 0.2s ease"
-                }}
-              />
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--muted, #666)", marginTop: "4px", textAlign: "center" }}>
-              {progress.text}
+          <div className="upload-progress" role="status" aria-live="polite">
+            <div className="upload-progress-heading"><strong>{progress.percent}%</strong><span>{progress.text}</span></div>
+            <div className="upload-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent}>
+              <span style={{ width: `${progress.percent}%` }} />
             </div>
           </div>
         )}
