@@ -118,9 +118,12 @@ struct MeshPrimitive {
   std::string displayName;
   std::string resolvedObjectName;
   std::string objectName;
+  std::string partName;
   std::string blockName;
   std::string componentName;
   std::string productName;
+  std::string representationName;
+  std::string nameSource;
   std::vector<std::string> nameCandidates;
   std::string layer;
   std::string colourSource;
@@ -221,6 +224,7 @@ struct RawStepStyleMatch {
   std::string styledTargetId;
   std::string styledTargetType;
   std::string styledTargetScope;
+  std::string styledTargetName;
   std::string colourId;
   std::string path;
   std::string confidence = "weak/name-only match";
@@ -1107,6 +1111,7 @@ class RawStepStyleResolver {
         match.styledTargetId = ref;
         match.styledTargetType = target->second.type;
         match.styledTargetScope = rawStyleTargetScope(target->second.type);
+        match.styledTargetName = normalizeDisplayWhitespace(target->second.name);
         match.confidence = rawStyleConfidenceForTarget(target->second.type);
         match.colour.lookupPath = id + " -> " + ref + " -> " + colourIds.front();
         match.path = match.colour.lookupPath;
@@ -2076,15 +2081,33 @@ void tessellateLabel(
     if (!primitiveLayer.empty()) {
       stats.layers.insert(primitiveLayer);
     }
-    const std::string topologyKey =
-        (colour.materialSource == "step_presentation_styled_item" && faceHasStepPresentationColour)
-            ? faceStepPresentationMatch.styledTargetId
+    const std::string stepObjectName =
+        faceHasStepPresentationColour && !isRawLabelName(faceStepPresentationMatch.styledTargetName)
+            ? faceStepPresentationMatch.styledTargetName
             : "";
+    const std::string faceResolvedObjectName = safeName(
+        objectName,
+        safeName(parentProductName,
+            safeName(referredName,
+                safeName(parentDisplayName, safeName(stepObjectName, safeName(layer, "Unnamed object"))))));
+    const std::string faceNameSource =
+        !objectName.empty() ? "xcaf-label" :
+        (!parentProductName.empty() ? "product" :
+         (!referredName.empty() ? "xcaf-referred-label" :
+          (!parentDisplayName.empty() ? "parent" :
+           (!stepObjectName.empty() ? "step-manifold-solid-brep" :
+            (!layer.empty() ? "layer" : "unnamed")))));
+    const std::vector<std::string> faceNameCandidates = {
+        objectName, referredName, parentDisplayName, parentProductName, stepObjectName,
+        faceStepPresentationMatch.representationName, layer,
+        labelName(label), referred.IsNull() ? "" : labelName(referred)};
+    const std::string topologyKey =
+        faceHasStepPresentationColour ? faceStepPresentationMatch.styledTargetId : "";
     const std::string selectableId = effectiveInstancePath;
 
     const ExportObjectKey key = {
         labelPath,
-        displayName,
+        faceResolvedObjectName,
         primitiveLayer,
         colourKey(colour),
         colour.materialSource,
@@ -2093,16 +2116,19 @@ void tessellateLabel(
     auto found = primitiveByKey.find(key);
     if (found == primitiveByKey.end()) {
       MeshPrimitive primitive;
-      primitive.name = displayName + " " + colour.source;
+      primitive.name = faceResolvedObjectName + " " + colour.source;
       primitive.labelPath = labelPath;
       primitive.instancePath = effectiveInstancePath;
-      primitive.displayName = displayName;
-      primitive.resolvedObjectName = resolvedObjectName;
+      primitive.displayName = faceResolvedObjectName;
+      primitive.resolvedObjectName = faceResolvedObjectName;
       primitive.objectName = objectName;
+      primitive.partName = stepObjectName;
       primitive.blockName = parentDisplayName;
       primitive.componentName = safeName(parentProductName, referredName);
       primitive.productName = parentProductName;
-      primitive.nameCandidates = nameCandidates;
+      primitive.representationName = faceStepPresentationMatch.representationName;
+      primitive.nameSource = faceNameSource;
+      primitive.nameCandidates = faceNameCandidates;
       primitive.layer = primitiveLayer;
       primitive.colourSource = colour.source;
       primitive.materialSource = colour.materialSource;
@@ -2110,7 +2136,7 @@ void tessellateLabel(
       primitive.colourType = colour.colourType;
       primitive.fallbackReason = colour.fallbackReason;
       primitive.originalStepLabel = referredPath.empty() ? labelPath : referredPath;
-      primitive.originalStepName = safeName(referredName, displayName);
+      primitive.originalStepName = safeName(stepObjectName, safeName(referredName, faceResolvedObjectName));
       primitive.parentLabelPath = parentLabelPath;
       primitive.shapeType = shapeTypeName(sourceShape.ShapeType());
       primitive.transformSource = transformSource;
@@ -2163,7 +2189,7 @@ void tessellateLabel(
       primitive.rawStepTargetType = rawStepHasColour ? rawStepMatch.styledTargetType : "";
       primitive.rawStepTargetScope = rawStepHasColour ? rawStepMatch.styledTargetScope : "";
       primitive.rawStepTargetPath = rawStepHasColour ? rawStepMatch.path : "";
-      if (colour.materialSource == "step_presentation_styled_item" && faceHasStepPresentationColour) {
+      if (faceHasStepPresentationColour) {
         primitive.rawStepMappingConfidence = faceStepPresentationMatch.confidence;
         primitive.rawStepStyledItemId = faceStepPresentationMatch.styledItemId;
         primitive.rawStepTargetId = faceStepPresentationMatch.styledTargetId;
@@ -2172,7 +2198,7 @@ void tessellateLabel(
         primitive.rawStepTargetPath = faceStepPresentationMatch.path;
       }
       primitive.rawStepRejectedReason =
-          (rawStepHasColour || (colour.materialSource == "step_presentation_styled_item" && faceHasStepPresentationColour))
+          (rawStepHasColour || faceHasStepPresentationColour)
               ? ""
               : rawStepRejectedMatch.rejectedReason;
       primitive.geometrySource = faceGeometrySource;
@@ -2482,9 +2508,12 @@ void writeGlb(
     json << "\"displayName\":"; writeString(json, primitive.displayName); json << ",";
     json << "\"resolvedObjectName\":"; writeString(json, primitive.resolvedObjectName); json << ",";
     json << "\"objectName\":"; writeString(json, primitive.objectName); json << ",";
+    json << "\"partName\":"; writeString(json, primitive.partName); json << ",";
     json << "\"blockName\":"; writeString(json, primitive.blockName); json << ",";
     json << "\"componentName\":"; writeString(json, primitive.componentName); json << ",";
     json << "\"productName\":"; writeString(json, primitive.productName); json << ",";
+    json << "\"representationName\":"; writeString(json, primitive.representationName); json << ",";
+    json << "\"nameSource\":"; writeString(json, primitive.nameSource); json << ",";
     json << "\"nameCandidates\":"; writeStringVector(json, primitive.nameCandidates, 20); json << ",";
     json << "\"layer\":"; writeString(json, primitive.layer); json << ",";
     json << "\"layerNames\":"; writeString(json, primitive.layer); json << ",";
@@ -2544,9 +2573,12 @@ void writeGlb(
     json << "\"displayName\":"; writeString(json, primitives[i].displayName); json << ",";
     json << "\"resolvedObjectName\":"; writeString(json, primitives[i].resolvedObjectName); json << ",";
     json << "\"objectName\":"; writeString(json, primitives[i].objectName); json << ",";
+    json << "\"partName\":"; writeString(json, primitives[i].partName); json << ",";
     json << "\"blockName\":"; writeString(json, primitives[i].blockName); json << ",";
     json << "\"componentName\":"; writeString(json, primitives[i].componentName); json << ",";
     json << "\"productName\":"; writeString(json, primitives[i].productName); json << ",";
+    json << "\"representationName\":"; writeString(json, primitives[i].representationName); json << ",";
+    json << "\"nameSource\":"; writeString(json, primitives[i].nameSource); json << ",";
     json << "\"nameCandidates\":"; writeStringVector(json, primitives[i].nameCandidates, 20); json << ",";
     json << "\"layerNames\":"; writeString(json, primitives[i].layer); json << ",";
     json << "\"xcafLabelPath\":"; writeString(json, primitives[i].labelPath); json << ",";
@@ -3176,9 +3208,12 @@ void writeReport(
     out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
     out << "\"resolvedObjectName\": "; writeString(out, primitive.resolvedObjectName); out << ", ";
     out << "\"objectName\": "; writeString(out, primitive.objectName); out << ", ";
+    out << "\"partName\": "; writeString(out, primitive.partName); out << ", ";
     out << "\"blockName\": "; writeString(out, primitive.blockName); out << ", ";
     out << "\"componentName\": "; writeString(out, primitive.componentName); out << ", ";
     out << "\"productName\": "; writeString(out, primitive.productName); out << ", ";
+    out << "\"representationName\": "; writeString(out, primitive.representationName); out << ", ";
+    out << "\"nameSource\": "; writeString(out, primitive.nameSource); out << ", ";
     out << "\"nameCandidates\": "; writeStringVector(out, primitive.nameCandidates, 20); out << ", ";
     out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
     out << "\"originalStepLabel\": "; writeString(out, primitive.originalStepLabel); out << ", ";
@@ -3262,9 +3297,12 @@ void writeReport(
     out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
     out << "\"resolvedObjectName\": "; writeString(out, primitive.resolvedObjectName); out << ", ";
     out << "\"objectName\": "; writeString(out, primitive.objectName); out << ", ";
+    out << "\"partName\": "; writeString(out, primitive.partName); out << ", ";
     out << "\"blockName\": "; writeString(out, primitive.blockName); out << ", ";
     out << "\"componentName\": "; writeString(out, primitive.componentName); out << ", ";
     out << "\"productName\": "; writeString(out, primitive.productName); out << ", ";
+    out << "\"representationName\": "; writeString(out, primitive.representationName); out << ", ";
+    out << "\"nameSource\": "; writeString(out, primitive.nameSource); out << ", ";
     out << "\"nameCandidates\": "; writeStringVector(out, primitive.nameCandidates, 20); out << ", ";
     out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
     out << "\"finalColour\": "; writeString(out, colourKey(primitive.colour)); out << ", ";
