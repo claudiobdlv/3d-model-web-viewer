@@ -125,19 +125,19 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
           <div className="heading-actions">{view.kind === "projects" && <button className="secondary-button" onClick={async () => { const name=window.prompt("Project name"); if(name){await createProject(name); await refresh();}}}><Plus size={16}/> New project</button>}
             <button className="icon-button" onClick={() => refresh(true)} title="Refresh"><RefreshCw className={loading ? "animate-spin" : ""} size={17}/></button></div>
         </div>
-        {selected.size > 0 && <BatchToolbar trash={view.kind === "trash"} count={selected.size} busy={busy} onClear={() => setSelected(new Set())} onMove={() => setMoveOpen(true)} onTrash={() => void runBatch("trash")} onRestore={() => void runBatch("restore")} onDelete={() => setDeleteForeverOpen(true)}/>} 
+        {selected.size > 0 && <BatchToolbar trash={view.kind === "trash"} count={selected.size} busy={busy} onClear={() => setSelected(new Set())} onMove={() => setMoveOpen(true)} onTrash={() => void runBatch("trash")} onRestore={() => void runBatch("restore")} onDelete={() => setDeleteForeverOpen(true)}/>}
         {error && <div className="alert error">{error}</div>}{notice && <div className="alert"><Check size={16}/>{notice}</div>}
         <section className="asset-surface">
           {view.kind === "projects" ? <ProjectList projects={searchedProjects} onOpen={(id)=>selectView({kind:"project",id})} onRefresh={()=>refresh()} /> :
             <AssetTable models={models} loading={loading} trash={view.kind === "trash"} selected={selected} sortBy={sortBy} sortDir={sortDir}
               onSort={(key)=>{if(sortBy===key)setSortDir(d=>d==="asc"?"desc":"asc");else{setSortBy(key);setSortDir("asc");}}}
-              onSelected={setSelected} onAction={rowAction} onRefresh={()=>refresh(false)}/>} 
+              onSelected={setSelected} onAction={rowAction} onRefresh={()=>refresh(false)}/>}
         </section>
       </main>
     </div>
     {uploadOpen && <UploadDialog projects={projects} defaultProjectId={view.kind === "project" ? view.id : null} onClose={()=>setUploadOpen(false)} onDone={async()=>{setUploadOpen(false);await refresh();}}/>}
-    {moveOpen && <MoveDialog projects={projects} busy={busy} onClose={()=>setMoveOpen(false)} onMove={(id)=>void runBatch("moveToProject",id)}/>} 
-    {deleteForeverOpen && <ConfirmDialog count={selected.size} busy={busy} onClose={()=>setDeleteForeverOpen(false)} onConfirm={()=>void runBatch("deleteForever")}/>} 
+    {moveOpen && <MoveDialog projects={projects} busy={busy} onClose={()=>setMoveOpen(false)} onMove={(id)=>void runBatch("moveToProject",id)}/>}
+    {deleteForeverOpen && <ConfirmDialog count={selected.size} busy={busy} onClose={()=>setDeleteForeverOpen(false)} onConfirm={()=>void runBatch("deleteForever")}/>}
   </div>;
 }
 
