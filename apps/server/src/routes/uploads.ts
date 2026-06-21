@@ -25,7 +25,7 @@ const uuidRegex = /^[a-f0-9-]{36}$/;
 const chunkUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: MAX_UPLOAD_CHUNK_BYTES
+    fileSize: MAX_UPLOAD_CHUNK_BYTES + 1024 * 1024
   }
 });
 
