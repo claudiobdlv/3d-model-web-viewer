@@ -141,7 +141,10 @@ app.delete("/api/models/:id/share", requireAdmin, (req, res) => {
 app.use("/api/models", requireAdmin, modelsRouter);
 app.use("/api/folders", requireAdmin, foldersRouter);
 app.use("/api/projects", requireAdmin, projectsRouter);
-app.get("/api/storage/quota", requireAdmin, (_req, res) => res.json(getStorageQuota()));
+app.get("/api/storage/quota", requireAdmin, (_req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.json(getStorageQuota());
+});
 app.use("/api/jobs", requireAdmin, jobsRouter);
 app.use("/api/worker", workerRouter);
 

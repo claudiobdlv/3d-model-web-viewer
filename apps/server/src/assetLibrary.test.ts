@@ -109,6 +109,11 @@ test("asset library projects, recycling, quota, sorting, and batch actions", asy
   assert.equal(fs.existsSync(uploadDir), false);
   assert.equal(fs.existsSync(modelDir), false);
   assert.equal(db.prepare("SELECT id FROM models WHERE slug = ?").get(unsorted.slug), undefined);
+  const quotaAfterPermanentDelete = await jsonFetch(`${origin}/api/storage/quota`, { headers });
+  assert.equal(quotaAfterPermanentDelete.response.headers.get("cache-control"), "private, no-store");
+  assert.equal((quotaAfterPermanentDelete.body as { usedBytes: number }).usedBytes, 16);
+  assert.equal((quotaAfterPermanentDelete.body as { availableBytes: number }).availableBytes, 5368709104);
+  assert.equal((quotaAfterPermanentDelete.body as { breakdown: { deletedBytes: number } }).breakdown.deletedBytes, 0);
 });
 
 async function uploadGlb(

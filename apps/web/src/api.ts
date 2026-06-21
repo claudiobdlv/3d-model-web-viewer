@@ -69,7 +69,7 @@ export async function deleteProject(projectId: number): Promise<void> {
 }
 
 export function getStorageQuota(): Promise<StorageQuota> {
-  return request<StorageQuota>("/api/storage/quota");
+  return request<StorageQuota>("/api/storage/quota", { cache: "no-store" });
 }
 
 export function batchModels(action: BatchAction, slugs: string[], projectId?: number | null): Promise<BatchResult> {
