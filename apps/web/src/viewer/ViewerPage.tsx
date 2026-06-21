@@ -104,6 +104,7 @@ function MarqueeText({ text }: { text: string }) {
 export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: string; theme?: "dark" | "light"; toggleTheme?: () => void }) {
   const isPublic = !!publicToken;
   const slug = useMemo(() => window.location.pathname.split("/").filter(Boolean).pop() ?? "", []);
+  const adminReturnPath = useMemo(() => { const candidate=new URLSearchParams(window.location.search).get("returnTo"); return candidate?.startsWith("/admin") ? candidate : "/admin"; }, []);
   const [model, setModel] = useState<ModelRecord | PublicModel | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState("none");
@@ -775,7 +776,7 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
     <div className="w-screen overflow-hidden" style={{ height: "100dvh", background: "var(--bg)", color: "var(--text)" }}>
       <header className="relative z-20 flex min-h-12 sm:min-h-14 items-center justify-between gap-3 border-b px-3 md:px-4" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
         <div className="flex min-w-0 items-center gap-3">
-          {!isPublic ? <><a className="secondary-button" href="/admin"><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
+          {!isPublic ? <><a className="secondary-button" href={adminReturnPath}><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
           <div className="min-w-0">
             <h1 className="truncate font-display text-lg font-bold text-[var(--accent)] leading-tight">{model?.name ?? "Model viewer"}</h1>
 

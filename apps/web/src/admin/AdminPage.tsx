@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ArchiveRestore, ArrowDown, ArrowUp, Box, Check, ChevronRight, Download, Folder,
   FolderOpen, HardDrive, List, Loader2, Menu, Moon, MoreVertical, Pencil, Plus,
@@ -15,29 +16,51 @@ import { ResizableHeaderCell } from "./ResizableHeaderCell";
 
 type View = { kind: "all" | "projects" | "unsorted" | "trash" } | { kind: "project"; id: number };
 type SortBy = NonNullable<ModelListParams["sortBy"]>;
-type ColumnKey = "name" | "project" | "status" | "quality" | "glbSize" | "originalSize" | "created" | "updated";
+type ColumnKey = "name" | "project" | "status" | "quality" | "glbSize" | "created";
 const columnDefinitions: Array<{ key: ColumnKey; label: string; sortKey?: SortBy; defaultWidth: number; minWidth: number; maxWidth: number }> = [
   { key: "name", label: "Name", sortKey: "name", defaultWidth: 280, minWidth: 190, maxWidth: 520 },
   { key: "project", label: "Project", sortKey: "project", defaultWidth: 150, minWidth: 100, maxWidth: 320 },
   { key: "status", label: "Status", sortKey: "status", defaultWidth: 120, minWidth: 100, maxWidth: 220 },
   { key: "quality", label: "Quality", defaultWidth: 90, minWidth: 78, maxWidth: 150 },
   { key: "glbSize", label: "GLB size", sortKey: "glb_size_bytes", defaultWidth: 105, minWidth: 88, maxWidth: 180 },
-  { key: "originalSize", label: "Original size", sortKey: "original_size_bytes", defaultWidth: 120, minWidth: 100, maxWidth: 190 },
-  { key: "created", label: "Created", sortKey: "created_at", defaultWidth: 145, minWidth: 120, maxWidth: 220 },
-  { key: "updated", label: "Updated", sortKey: "updated_at", defaultWidth: 145, minWidth: 120, maxWidth: 220 }
+  { key: "created", label: "Date", sortKey: "created_at", defaultWidth: 145, minWidth: 120, maxWidth: 220 }
 ];
 const columnWidthsKey = "modelbase.assetTable.columnWidths.v1";
 const supportedModelFile = /\.(step|stp|glb|gltf)$/i;
+const validSortKeys = new Set<SortBy>(["name", "project", "status", "glb_size_bytes", "created_at"]);
+
+function initialAdminState() {
+  const params = new URLSearchParams(window.location.search);
+  const kind = params.get("view");
+  const projectId = Number(params.get("projectId"));
+  const view: View = kind === "projects" || kind === "unsorted" || kind === "trash" ? { kind }
+    : kind === "project" && Number.isInteger(projectId) && projectId > 0 ? { kind: "project", id: projectId } : { kind: "all" };
+  const requestedSort = params.get("sort");
+  return { view, query: params.get("q") ?? "", sortBy: requestedSort && validSortKeys.has(requestedSort as SortBy) ? requestedSort as SortBy : "created_at" as SortBy, sortDir: params.get("dir") === "asc" ? "asc" as const : "desc" as const };
+}
+
+function adminPath(view: View, query: string, sortBy: SortBy, sortDir: "asc" | "desc") {
+  const params = new URLSearchParams();
+  if (view.kind !== "all") params.set("view", view.kind);
+  if (view.kind === "project") params.set("projectId", String(view.id));
+  if (query.trim()) params.set("q", query.trim());
+  if (sortBy !== "created_at") params.set("sort", sortBy);
+  if (sortDir !== "desc") params.set("dir", sortDir);
+  return `/admin${params.size ? `?${params}` : ""}`;
+}
+
+function viewerPath(slug: string, returnTo: string) { return `/3dviewer/${encodeURIComponent(slug)}?returnTo=${encodeURIComponent(returnTo)}`; }
 
 export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; toggleTheme: () => void }) {
-  const [view, setView] = useState<View>({ kind: "all" });
+  const initial = useMemo(initialAdminState, []);
+  const [view, setView] = useState<View>(initial.view);
   const [models, setModels] = useState<ModelRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [quota, setQuota] = useState<StorageQuota | null>(null);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initial.query);
   const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [sortBy, setSortBy] = useState<SortBy>("created_at");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [sortBy, setSortBy] = useState<SortBy>(initial.sortBy);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(initial.sortDir);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -52,6 +75,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   const [dragState, setDragState] = useState<{ active: boolean; projectId: number | null; label: string; blocked: boolean }>({ active: false, projectId: null, label: "Unsorted", blocked: false });
   const polling = useRef<number | undefined>(undefined);
   const dragDepth = useRef(0);
+  const searchInput = useRef<HTMLInputElement>(null);
 
   const project = view.kind === "project" ? projects.find((item) => item.id === view.id) : undefined;
   const title = view.kind === "all" ? "All models" : view.kind === "projects" ? "Projects" :
@@ -61,6 +85,9 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 280);
     return () => window.clearTimeout(timer);
   }, [query]);
+
+  const returnTo = useMemo(() => adminPath(view, query, sortBy, sortDir), [view, query, sortBy, sortDir]);
+  useEffect(() => { window.history.replaceState(null, "", returnTo); }, [returnTo]);
 
   const refresh = async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -169,7 +196,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   return <div className={`library-shell ${dragState.active ? "is-file-dragging" : ""}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
     <header className="library-header">
       <div className="brand"><span className="brand-mark"><Box size={20}/></span><strong>ModelBase</strong></div>
-      <label className="global-search"><Search size={18}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${view.kind === "projects" ? "projects" : "models"}`} /></label>
+      <label className="global-search"><Search size={18}/><input ref={searchInput} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${view.kind === "projects" ? "projects" : "models"}`} />{query && <button type="button" className="search-clear" aria-label="Clear search" onClick={() => { setQuery(""); searchInput.current?.focus(); }}><X size={15}/></button>}</label>
       <button className="icon-button" onClick={toggleTheme} title="Toggle theme">{theme === "dark" ? <Sun size={17}/> : <Moon size={17}/>}</button>
       <button className="primary-button" onClick={() => openUpload()}><Upload size={16}/> Upload</button>
     </header>
@@ -187,16 +214,16 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
       </aside>
       <main className="library-main">
         <div className="library-heading">
-          <div><div className="breadcrumbs">{view.kind === "project" && <><button onClick={() => selectView({kind:"projects"})}>Projects</button><ChevronRight size={14}/></>}<span>{title}</span></div>
+          <div>{view.kind === "project" && <div className="breadcrumbs"><button onClick={() => selectView({kind:"projects"})}>Projects</button><ChevronRight size={14}/></div>}
             <h1>{title}</h1>{view.kind === "trash" && <p>Items in the recycling bin still count toward storage.</p>}</div>
           <div className="heading-actions">{view.kind === "projects" && <button className="secondary-button" onClick={async () => { const name=window.prompt("Project name"); if(name){await createProject(name); await refresh();}}}><Plus size={16}/> New project</button>}
             <button className="icon-button" onClick={() => refresh(true)} title="Refresh"><RefreshCw className={loading ? "animate-spin" : ""} size={17}/></button></div>
         </div>
         {selected.size > 0 && <BatchToolbar trash={view.kind === "trash"} count={selected.size} busy={busy} onClear={() => setSelected(new Set())} onMove={() => setMoveOpen(true)} onTrash={() => void runBatch("trash")} onRestore={() => void runBatch("restore")} onDelete={() => setDeleteForeverOpen(true)}/>}
         {error && <div className="alert error">{error}</div>}{notice && <div className="alert"><Check size={16}/>{notice}</div>}
-        <section className="asset-surface">
+        <section className={`asset-surface ${view.kind === "projects" ? "projects-surface" : ""}`}>
           {view.kind === "projects" ? <ProjectList projects={searchedProjects} dragProjectId={dragState.active ? dragState.projectId : null} onOpen={(id)=>selectView({kind:"project",id})} onRefresh={()=>refresh()} /> :
-            <AssetTable models={models} loading={loading} trash={view.kind === "trash"} selected={selected} sortBy={sortBy} sortDir={sortDir}
+            <AssetTable models={models} loading={loading} trash={view.kind === "trash"} selected={selected} sortBy={sortBy} sortDir={sortDir} returnTo={returnTo}
               emptyTitle={view.kind === "project" ? `${title} is empty.` : view.kind === "unsorted" ? "No unsorted models." : "No models yet."}
               emptyDescription={view.kind === "project" ? "Drop STEP or GLB files here." : view.kind === "unsorted" ? "Models without a project will appear here." : "Drop STEP or GLB files here to get started."}
               onSort={(key)=>{if(sortBy===key)setSortDir(d=>d==="asc"?"desc":"asc");else{setSortBy(key);setSortDir("asc");}}}
@@ -223,36 +250,40 @@ function QuotaCard({quota}:{quota:StorageQuota|null}) {
     <div className="quota-available">{quota ? `${formatBytes(quota.availableBytes)} available` : ""}</div></div>;
 }
 
-function AssetTable({models,loading,trash,selected,sortBy,sortDir,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+function AssetTable({models,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+  const rangeAnchor = useRef<string | null>(null);
   const [widths,setWidths]=useState<Record<ColumnKey,number>>(()=>{
     const defaults=Object.fromEntries(columnDefinitions.map(column=>[column.key,column.defaultWidth])) as Record<ColumnKey,number>;
-    try{return {...defaults,...JSON.parse(localStorage.getItem(columnWidthsKey)??"{}")}}catch{return defaults}
+    try { const saved=JSON.parse(localStorage.getItem(columnWidthsKey)??"{}"); return Object.fromEntries(columnDefinitions.map(column=>{const value=saved[column.key];return [column.key,typeof value==="number"&&Number.isFinite(value)?Math.min(column.maxWidth,Math.max(column.minWidth,value)):defaults[column.key]]})) as Record<ColumnKey,number>; } catch{return defaults}
   });
   const all=models.length>0&&models.every(m=>selected.has(m.slug));
-  const toggle=(slug:string)=>{const next=new Set(selected);next.has(slug)?next.delete(slug):next.add(slug);onSelected(next)};
+  const toggle=(slug:string,shiftKey:boolean)=>{const next=new Set(selected);const shouldSelect=!next.has(slug);const anchorIndex=rangeAnchor.current?models.findIndex(model=>model.slug===rangeAnchor.current):-1;const targetIndex=models.findIndex(model=>model.slug===slug);if(shiftKey&&anchorIndex>=0&&targetIndex>=0){models.slice(Math.min(anchorIndex,targetIndex),Math.max(anchorIndex,targetIndex)+1).forEach(model=>shouldSelect?next.add(model.slug):next.delete(model.slug));}else{shouldSelect?next.add(slug):next.delete(slug);}rangeAnchor.current=slug;onSelected(next)};
   if(loading&&!models.length)return <div className="empty-state"><Loader2 className="animate-spin"/><strong>Loading assets…</strong></div>;
   if(!models.length)return <div className="empty-state"><Box/><strong>{trash?"Recycling bin is empty.":emptyTitle}</strong><span>{trash?"Deleted models will appear here.":emptyDescription}</span></div>;
   const tableWidth=104+columnDefinitions.reduce((total,column)=>total+widths[column.key],0);
   const resize=(key:ColumnKey,width:number)=>{const next={...widths,[key]:width};setWidths(next);localStorage.setItem(columnWidthsKey,JSON.stringify(next))};
   return <div className="table-scroll"><table className="asset-table" style={{width:tableWidth,minWidth:"100%"}}><thead><tr><th className="check-cell"><input type="checkbox" checked={all} onChange={()=>onSelected(all?new Set():new Set(models.map(m=>m.slug)))} aria-label="Select all visible"/></th>
     {columnDefinitions.map(column=><ResizableHeaderCell key={column.key} width={widths[column.key]} minWidth={column.minWidth} maxWidth={column.maxWidth} onResize={(width)=>resize(column.key,width)}>{column.sortKey?<button className="sort-button" onClick={()=>onSort(column.sortKey!)}>{column.label}{sortBy===column.sortKey&&(sortDir==="asc"?<ArrowUp/>:<ArrowDown/>)}</button>:<span>{column.label}</span>}</ResizableHeaderCell>)}<th className="action-cell">Actions</th></tr></thead>
-    <tbody>{models.map(model=><tr key={model.slug} className={selected.has(model.slug)?"selected":""}><td className="check-cell"><input type="checkbox" checked={selected.has(model.slug)} onChange={()=>toggle(model.slug)} aria-label={`Select ${model.name}`}/></td>
-      <td><a className="model-name" href={`/3dviewer/${encodeURIComponent(model.slug)}`}><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></a></td>
-      <td>{model.project_name??<span className="muted">Unsorted</span>}</td><td><Status status={model.status}/></td><td className="quality-cell">{model.quality??"—"}</td><td>{formatFileSize(model.glb_size_bytes)}</td><td>{formatFileSize(model.original_size_bytes)}</td><td>{formatDate(model.created_at)}</td><td>{formatDate(model.updated_at)}</td>
-      <td className="action-cell"><RowMenu model={model} trash={trash} onAction={onAction} onRefresh={onRefresh}/></td></tr>)}</tbody></table></div>;
+    <tbody>{models.map(model=><tr key={model.slug} className={selected.has(model.slug)?"selected":""}><td className="check-cell"><input type="checkbox" checked={selected.has(model.slug)} onChange={event=>toggle(model.slug,(event.nativeEvent as MouseEvent).shiftKey)} aria-label={`Select ${model.name}`}/></td>
+      <td><a className="model-name" href={viewerPath(model.slug,returnTo)}><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></a></td>
+      <td>{model.project_name??<span className="muted">Unsorted</span>}</td><td><Status status={model.status}/></td><td className="quality-cell">{model.quality??"—"}</td><td>{formatFileSize(model.glb_size_bytes)}</td><td>{formatDate(model.created_at)}</td>
+      <td className="action-cell"><RowMenu model={model} trash={trash} returnTo={returnTo} onAction={onAction} onRefresh={onRefresh}/></td></tr>)}</tbody></table></div>;
 }
 
 function Status({status}:{status:string}){return <span className={`compact-status ${statusKind(status)}`}><span/>{statusLabel(status)}</span>}
 
-function RowMenu({model,trash,onAction,onRefresh}:{model:ModelRecord;trash:boolean;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+function RowMenu({model,trash,returnTo,onAction,onRefresh}:{model:ModelRecord;trash:boolean;returnTo:string;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
   const [open,setOpen]=useState(false);
-  return <div className="row-menu"><button className="menu-button" onClick={()=>setOpen(!open)} aria-label={`Actions for ${model.name}`}><MoreVertical size={17}/></button>{open&&<><button className="menu-backdrop" onClick={()=>setOpen(false)}/><div className="menu-popover">
-    {!trash&&<><a href={`/3dviewer/${encodeURIComponent(model.slug)}`}><Box/>Open viewer</a><a className={!model.has_display_glb?"disabled":""} href={model.has_display_glb?`/downloads/${encodeURIComponent(model.slug)}/display.glb`:undefined}><Download/>Download GLB</a><a href={`/admin/logs/${encodeURIComponent(model.slug)}/conversion.log`}><List/>Log</a>
+  const buttonRef=useRef<HTMLButtonElement>(null); const menuRef=useRef<HTMLDivElement>(null); const [position,setPosition]=useState({top:0,left:0});
+  useEffect(()=>{if(!open)return;const place=()=>{const button=buttonRef.current;if(!button)return;const rect=button.getBoundingClientRect();const width=210;const height=menuRef.current?.offsetHeight??(trash?126:270);const gap=5;setPosition({left:Math.max(8,Math.min(window.innerWidth-width-8,rect.right-width)),top:rect.bottom+gap+height<=window.innerHeight-8?rect.bottom+gap:Math.max(8,rect.top-height-gap)});};place();const close=(event:PointerEvent)=>{const target=event.target as Node;if(!buttonRef.current?.contains(target)&&!menuRef.current?.contains(target))setOpen(false)};const escape=(event:KeyboardEvent)=>{if(event.key==="Escape")setOpen(false)};window.addEventListener("resize",place);window.addEventListener("scroll",place,true);document.addEventListener("pointerdown",close);document.addEventListener("keydown",escape);return()=>{window.removeEventListener("resize",place);window.removeEventListener("scroll",place,true);document.removeEventListener("pointerdown",close);document.removeEventListener("keydown",escape)}},[open,trash]);
+  const menu=open?createPortal(<div ref={menuRef} className="menu-popover" style={position} onClick={event=>{if((event.target as Element).closest("a"))setOpen(false)}}>
+    {!trash&&<><a href={viewerPath(model.slug,returnTo)}><Box/>Open viewer</a><a className={!model.has_display_glb?"disabled":""} href={model.has_display_glb?`/downloads/${encodeURIComponent(model.slug)}/display.glb`:undefined}><Download/>Download GLB</a><a href={`/admin/logs/${encodeURIComponent(model.slug)}/conversion.log`}><List/>Log</a>
       <button onClick={async()=>{const name=window.prompt("Model name",model.name);if(name&&name!==model.name){await renameModel(model.slug,name);onRefresh()}setOpen(false)}}><Pencil/>Rename</button>
       <button onClick={()=>{onAction(model,"moveToProject");setOpen(false)}}><FolderOpen/>Move to project</button><button className="danger-item" onClick={()=>{onAction(model,"trash");setOpen(false)}}><Trash2/>Move to recycling bin</button></>}
     {trash&&<><button onClick={()=>{onAction(model,"restore");setOpen(false)}}><ArchiveRestore/>Restore</button><button className="danger-item" onClick={()=>{onAction(model,"deleteForever");setOpen(false)}}><Trash2/>Delete forever</button></>}
     <button onClick={async()=>{const share=await createPublicShare(model.id);await downloadPublicShareQr(share.url,model.slug);setOpen(false)}} className={trash?"hidden":""}><Menu/>Download QR link</button>
-  </div></>}</div>;
+  </div>,document.body):null;
+  return <div className="row-menu"><button ref={buttonRef} className="menu-button" onClick={()=>setOpen(!open)} aria-expanded={open} aria-label={`Actions for ${model.name}`}><MoreVertical size={17}/></button>{menu}</div>;
 }
 
 function ProjectList({projects,dragProjectId,onOpen,onRefresh}:{projects:ProjectRecord[];dragProjectId:number|null;onOpen:(id:number)=>void;onRefresh:()=>void}) {
