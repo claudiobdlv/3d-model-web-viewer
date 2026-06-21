@@ -11,15 +11,23 @@ import {
 import { downloadPublicShareQr } from "../qr";
 import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ProjectRecord, StorageQuota } from "../types";
 import { activeStatuses, formatDate, formatFileSize, statusKind, statusLabel } from "../utils";
+import { ResizableHeaderCell } from "./ResizableHeaderCell";
 
 type View = { kind: "all" | "projects" | "unsorted" | "trash" } | { kind: "project"; id: number };
 type SortBy = NonNullable<ModelListParams["sortBy"]>;
-const sortable: Array<{ key: SortBy; label: string }> = [
-  { key: "name", label: "Name" }, { key: "project", label: "Project" },
-  { key: "status", label: "Status" }, { key: "glb_size_bytes", label: "GLB size" },
-  { key: "original_size_bytes", label: "Original size" }, { key: "created_at", label: "Created" },
-  { key: "updated_at", label: "Updated" }
+type ColumnKey = "name" | "project" | "status" | "quality" | "glbSize" | "originalSize" | "created" | "updated";
+const columnDefinitions: Array<{ key: ColumnKey; label: string; sortKey?: SortBy; defaultWidth: number; minWidth: number; maxWidth: number }> = [
+  { key: "name", label: "Name", sortKey: "name", defaultWidth: 280, minWidth: 190, maxWidth: 520 },
+  { key: "project", label: "Project", sortKey: "project", defaultWidth: 150, minWidth: 100, maxWidth: 320 },
+  { key: "status", label: "Status", sortKey: "status", defaultWidth: 120, minWidth: 100, maxWidth: 220 },
+  { key: "quality", label: "Quality", defaultWidth: 90, minWidth: 78, maxWidth: 150 },
+  { key: "glbSize", label: "GLB size", sortKey: "glb_size_bytes", defaultWidth: 105, minWidth: 88, maxWidth: 180 },
+  { key: "originalSize", label: "Original size", sortKey: "original_size_bytes", defaultWidth: 120, minWidth: 100, maxWidth: 190 },
+  { key: "created", label: "Created", sortKey: "created_at", defaultWidth: 145, minWidth: 120, maxWidth: 220 },
+  { key: "updated", label: "Updated", sortKey: "updated_at", defaultWidth: 145, minWidth: 120, maxWidth: 220 }
 ];
+const columnWidthsKey = "modelbase.assetTable.columnWidths.v1";
+const supportedModelFile = /\.(step|stp|glb|gltf)$/i;
 
 export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; toggleTheme: () => void }) {
   const [view, setView] = useState<View>({ kind: "all" });
@@ -38,7 +46,12 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   const [uploadOpen, setUploadOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
   const [deleteForeverOpen, setDeleteForeverOpen] = useState(false);
+  const [stagedFile, setStagedFile] = useState<File | null>(null);
+  const [uploadProjectId, setUploadProjectId] = useState<number | null>(null);
+  const [uploadHint, setUploadHint] = useState<string | null>(null);
+  const [dragState, setDragState] = useState<{ active: boolean; projectId: number | null; label: string; blocked: boolean }>({ active: false, projectId: null, label: "Unsorted", blocked: false });
   const polling = useRef<number | undefined>(undefined);
+  const dragDepth = useRef(0);
 
   const project = view.kind === "project" ? projects.find((item) => item.id === view.id) : undefined;
   const title = view.kind === "all" ? "All models" : view.kind === "projects" ? "Projects" :
@@ -99,12 +112,66 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
     else window.setTimeout(() => void runBatch(action, undefined, [model.slug]), 0);
   };
 
-  return <div className="library-shell">
+  const defaultDropTarget = () => {
+    if (view.kind === "trash") return { projectId: null, label: "Recycling bin", blocked: true };
+    if (view.kind === "project") return { projectId: view.id, label: project?.name ?? "Project", blocked: false };
+    return { projectId: null, label: "Unsorted", blocked: false };
+  };
+  const dropTargetFromEvent = (event: React.DragEvent) => {
+    const element = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-drop-project-id]") : null;
+    if (element) {
+      const projectId = Number(element.dataset.dropProjectId);
+      const target = projects.find((item) => item.id === projectId);
+      if (target) return { projectId, label: target.name, blocked: false };
+    }
+    return defaultDropTarget();
+  };
+  const isFileDrag = (event: React.DragEvent) => Array.from(event.dataTransfer.types).includes("Files");
+  const openUpload = (file: File | null = null, projectId = view.kind === "project" ? view.id : null, hint: string | null = null) => {
+    if (view.kind === "trash") {
+      setError("Choose a project or All Models to upload.");
+      return;
+    }
+    setStagedFile(file); setUploadProjectId(projectId); setUploadHint(hint); setUploadOpen(true); setError(null);
+  };
+  const onDragEnter = (event: React.DragEvent) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault(); dragDepth.current += 1;
+    const target = dropTargetFromEvent(event);
+    setDragState({ active: true, ...target });
+  };
+  const onDragOver = (event: React.DragEvent) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = dragState.blocked ? "none" : "copy";
+    const target = dropTargetFromEvent(event);
+    setDragState((current) => current.projectId === target.projectId && current.blocked === target.blocked ? current : { active: true, ...target });
+  };
+  const onDragLeave = (event: React.DragEvent) => {
+    if (!isFileDrag(event)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragState((current) => ({ ...current, active: false }));
+  };
+  const onDrop = (event: React.DragEvent) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault(); dragDepth.current = 0;
+    const target = dropTargetFromEvent(event);
+    setDragState({ active: false, ...target });
+    if (target.blocked) { setError("Choose a project or All Models to upload."); return; }
+    const files = Array.from(event.dataTransfer.files);
+    const file = files[0];
+    if (!file || !supportedModelFile.test(file.name)) {
+      setError("That file type is not supported. Choose a STEP, STP, GLB, or GLTF file.");
+      return;
+    }
+    openUpload(file, target.projectId, files.length > 1 ? `Only ${file.name} was staged; ${files.length - 1} additional file${files.length === 2 ? " was" : "s were"} ignored.` : null);
+  };
+
+  return <div className={`library-shell ${dragState.active ? "is-file-dragging" : ""}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
     <header className="library-header">
       <div className="brand"><span className="brand-mark"><Box size={20}/></span><strong>ModelBase</strong></div>
       <label className="global-search"><Search size={18}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${view.kind === "projects" ? "projects" : "models"}`} /></label>
       <button className="icon-button" onClick={toggleTheme} title="Toggle theme">{theme === "dark" ? <Sun size={17}/> : <Moon size={17}/>}</button>
-      <button className="primary-button" onClick={() => setUploadOpen(true)}><Upload size={16}/> Upload</button>
+      <button className="primary-button" onClick={() => openUpload()}><Upload size={16}/> Upload</button>
     </header>
     <div className="library-layout">
       <aside className="library-sidebar">
@@ -128,14 +195,17 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
         {selected.size > 0 && <BatchToolbar trash={view.kind === "trash"} count={selected.size} busy={busy} onClear={() => setSelected(new Set())} onMove={() => setMoveOpen(true)} onTrash={() => void runBatch("trash")} onRestore={() => void runBatch("restore")} onDelete={() => setDeleteForeverOpen(true)}/>}
         {error && <div className="alert error">{error}</div>}{notice && <div className="alert"><Check size={16}/>{notice}</div>}
         <section className="asset-surface">
-          {view.kind === "projects" ? <ProjectList projects={searchedProjects} onOpen={(id)=>selectView({kind:"project",id})} onRefresh={()=>refresh()} /> :
+          {view.kind === "projects" ? <ProjectList projects={searchedProjects} dragProjectId={dragState.active ? dragState.projectId : null} onOpen={(id)=>selectView({kind:"project",id})} onRefresh={()=>refresh()} /> :
             <AssetTable models={models} loading={loading} trash={view.kind === "trash"} selected={selected} sortBy={sortBy} sortDir={sortDir}
+              emptyTitle={view.kind === "project" ? `${title} is empty.` : view.kind === "unsorted" ? "No unsorted models." : "No models yet."}
+              emptyDescription={view.kind === "project" ? "Drop STEP or GLB files here." : view.kind === "unsorted" ? "Models without a project will appear here." : "Drop STEP or GLB files here to get started."}
               onSort={(key)=>{if(sortBy===key)setSortDir(d=>d==="asc"?"desc":"asc");else{setSortBy(key);setSortDir("asc");}}}
               onSelected={setSelected} onAction={rowAction} onRefresh={()=>refresh(false)}/>}
         </section>
       </main>
     </div>
-    {uploadOpen && <UploadDialog projects={projects} defaultProjectId={view.kind === "project" ? view.id : null} onClose={()=>setUploadOpen(false)} onDone={async()=>{setUploadOpen(false);await refresh();}}/>}
+    {dragState.active && <DropUploadOverlay label={dragState.label} blocked={dragState.blocked}/>}
+    {uploadOpen && <UploadDialog projects={projects} defaultProjectId={uploadProjectId} initialFile={stagedFile} hint={uploadHint} onClose={()=>setUploadOpen(false)} onDone={async()=>{setUploadOpen(false);setStagedFile(null);setUploadHint(null);await refresh();}}/>}
     {moveOpen && <MoveDialog projects={projects} busy={busy} onClose={()=>setMoveOpen(false)} onMove={(id)=>void runBatch("moveToProject",id)}/>}
     {deleteForeverOpen && <ConfirmDialog count={selected.size} busy={busy} onClose={()=>setDeleteForeverOpen(false)} onConfirm={()=>void runBatch("deleteForever")}/>}
   </div>;
@@ -153,16 +223,22 @@ function QuotaCard({quota}:{quota:StorageQuota|null}) {
     <div className="quota-available">{quota ? `${formatBytes(quota.availableBytes)} available` : ""}</div></div>;
 }
 
-function AssetTable({models,loading,trash,selected,sortBy,sortDir,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+function AssetTable({models,loading,trash,selected,sortBy,sortDir,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+  const [widths,setWidths]=useState<Record<ColumnKey,number>>(()=>{
+    const defaults=Object.fromEntries(columnDefinitions.map(column=>[column.key,column.defaultWidth])) as Record<ColumnKey,number>;
+    try{return {...defaults,...JSON.parse(localStorage.getItem(columnWidthsKey)??"{}")}}catch{return defaults}
+  });
   const all=models.length>0&&models.every(m=>selected.has(m.slug));
   const toggle=(slug:string)=>{const next=new Set(selected);next.has(slug)?next.delete(slug):next.add(slug);onSelected(next)};
   if(loading&&!models.length)return <div className="empty-state"><Loader2 className="animate-spin"/><strong>Loading assets…</strong></div>;
-  if(!models.length)return <div className="empty-state"><Box/><strong>{trash?"Recycling bin is empty.":"No models here yet."}</strong><span>{trash?"Deleted models will appear here.":"Upload a model or choose another view."}</span></div>;
-  return <div className="table-scroll"><table className="asset-table"><thead><tr><th className="check-cell"><input type="checkbox" checked={all} onChange={()=>onSelected(all?new Set():new Set(models.map(m=>m.slug)))} aria-label="Select all visible"/></th>
-    {sortable.map(c=><th key={c.key}><button className="sort-button" onClick={()=>onSort(c.key)}>{c.label}{sortBy===c.key&&(sortDir==="asc"?<ArrowUp/>:<ArrowDown/>)}</button></th>)}<th className="action-cell">Actions</th></tr></thead>
+  if(!models.length)return <div className="empty-state"><Box/><strong>{trash?"Recycling bin is empty.":emptyTitle}</strong><span>{trash?"Deleted models will appear here.":emptyDescription}</span></div>;
+  const tableWidth=104+columnDefinitions.reduce((total,column)=>total+widths[column.key],0);
+  const resize=(key:ColumnKey,width:number)=>{const next={...widths,[key]:width};setWidths(next);localStorage.setItem(columnWidthsKey,JSON.stringify(next))};
+  return <div className="table-scroll"><table className="asset-table" style={{width:tableWidth,minWidth:"100%"}}><thead><tr><th className="check-cell"><input type="checkbox" checked={all} onChange={()=>onSelected(all?new Set():new Set(models.map(m=>m.slug)))} aria-label="Select all visible"/></th>
+    {columnDefinitions.map(column=><ResizableHeaderCell key={column.key} width={widths[column.key]} minWidth={column.minWidth} maxWidth={column.maxWidth} onResize={(width)=>resize(column.key,width)}>{column.sortKey?<button className="sort-button" onClick={()=>onSort(column.sortKey!)}>{column.label}{sortBy===column.sortKey&&(sortDir==="asc"?<ArrowUp/>:<ArrowDown/>)}</button>:<span>{column.label}</span>}</ResizableHeaderCell>)}<th className="action-cell">Actions</th></tr></thead>
     <tbody>{models.map(model=><tr key={model.slug} className={selected.has(model.slug)?"selected":""}><td className="check-cell"><input type="checkbox" checked={selected.has(model.slug)} onChange={()=>toggle(model.slug)} aria-label={`Select ${model.name}`}/></td>
       <td><a className="model-name" href={`/3dviewer/${encodeURIComponent(model.slug)}`}><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></a></td>
-      <td>{model.project_name??<span className="muted">Unsorted</span>}</td><td><Status status={model.status}/></td><td>{formatFileSize(model.glb_size_bytes)}</td><td>{formatFileSize(model.original_size_bytes)}</td><td>{formatDate(model.created_at)}</td><td>{formatDate(model.updated_at)}</td>
+      <td>{model.project_name??<span className="muted">Unsorted</span>}</td><td><Status status={model.status}/></td><td className="quality-cell">{model.quality??"—"}</td><td>{formatFileSize(model.glb_size_bytes)}</td><td>{formatFileSize(model.original_size_bytes)}</td><td>{formatDate(model.created_at)}</td><td>{formatDate(model.updated_at)}</td>
       <td className="action-cell"><RowMenu model={model} trash={trash} onAction={onAction} onRefresh={onRefresh}/></td></tr>)}</tbody></table></div>;
 }
 
@@ -179,14 +255,15 @@ function RowMenu({model,trash,onAction,onRefresh}:{model:ModelRecord;trash:boole
   </div></>}</div>;
 }
 
-function ProjectList({projects,onOpen,onRefresh}:{projects:ProjectRecord[];onOpen:(id:number)=>void;onRefresh:()=>void}) {
+function ProjectList({projects,dragProjectId,onOpen,onRefresh}:{projects:ProjectRecord[];dragProjectId:number|null;onOpen:(id:number)=>void;onRefresh:()=>void}) {
   if(!projects.length)return <div className="empty-state"><Folder/><strong>No projects yet.</strong><span>Create a project to organise your models.</span></div>;
-  return <div className="project-list">{projects.map(p=><div className="project-row" key={p.id} onDoubleClick={()=>onOpen(p.id)}><button className="project-open" onClick={()=>onOpen(p.id)}><span className="project-folder"><Folder size={20}/></span><span><strong>{p.name}</strong><small>{p.model_count} model{p.model_count===1?"":"s"}</small></span></button><span>{formatBytes(p.total_size_bytes)}</span><span>Updated {formatDate(p.updated_at)}</span><div className="project-actions"><button className="icon-button" title="Rename" onClick={async()=>{const name=window.prompt("Project name",p.name);if(name&&name!==p.name){await renameProject(p.id,name);onRefresh()}}}><Pencil size={15}/></button><button className="icon-button" title={p.model_count?"Move all models out before deleting":"Delete empty project"} disabled={p.model_count>0} onClick={async()=>{if(window.confirm(`Delete empty project “${p.name}”?`)){await deleteProject(p.id);onRefresh()}}}><Trash2 size={15}/></button></div></div>)}</div>;
+  return <div className="project-list">{projects.map(p=><div className={`project-row ${dragProjectId===p.id?"drop-target":""}`} data-drop-project-id={p.id} key={p.id} onDoubleClick={()=>onOpen(p.id)}><button className="project-open" onClick={()=>onOpen(p.id)}><span className="project-folder"><Folder size={20}/></span><span><strong>{p.name}</strong><small>{p.model_count} model{p.model_count===1?"":"s"}</small></span></button><span>{formatBytes(p.total_size_bytes)}</span><span>Updated {formatDate(p.updated_at)}</span><div className="project-actions"><button className="icon-button" title="Rename" onClick={async()=>{const name=window.prompt("Project name",p.name);if(name&&name!==p.name){await renameProject(p.id,name);onRefresh()}}}><Pencil size={15}/></button><button className="icon-button" title={p.model_count?"Move all models out before deleting":"Delete empty project"} disabled={p.model_count>0} onClick={async()=>{if(window.confirm(`Delete empty project “${p.name}”?`)){await deleteProject(p.id);onRefresh()}}}><Trash2 size={15}/></button></div></div>)}</div>;
 }
 
 function BatchToolbar({trash,count,busy,onClear,onMove,onTrash,onRestore,onDelete}:{trash:boolean;count:number;busy:boolean;onClear:()=>void;onMove:()=>void;onTrash:()=>void;onRestore:()=>void;onDelete:()=>void}){return <div className="batch-toolbar"><strong>{count} selected</strong><span className="batch-spacer"/>{trash?<><button onClick={onRestore} disabled={busy}><ArchiveRestore/>Restore</button><button className="danger-action" onClick={onDelete} disabled={busy}><Trash2/>Delete forever</button></>:<><button onClick={onMove} disabled={busy}><FolderOpen/>Move to project</button><button onClick={onTrash} disabled={busy}><Trash2/>Move to recycling bin</button></>}<button className="batch-close" onClick={onClear}><X/></button></div>}
 
-function UploadDialog({projects,defaultProjectId,onClose,onDone}:{projects:ProjectRecord[];defaultProjectId:number|null;onClose:()=>void;onDone:()=>void}){const[file,setFile]=useState<File|null>(null);const[projectId,setProjectId]=useState(defaultProjectId?String(defaultProjectId):"");const[quality,setQuality]=useState<ConversionQuality>("medium");const[busy,setBusy]=useState(false);const[error,setError]=useState<string|null>(null);return <Dialog title="Upload model" onClose={onClose}><form onSubmit={async e=>{e.preventDefault();if(!file)return;setBusy(true);setError(null);try{await uploadModel(file,projectId?Number(projectId):null,quality);onDone()}catch(r){setError(r instanceof Error?r.message:"Upload failed");setBusy(false)}}} className="dialog-form"><label className="upload-drop"><Upload/><strong>{file?.name??"Choose a model file"}</strong><span>STEP, STP, GLB or GLTF up to 250 MB</span><input type="file" accept=".step,.stp,.glb,.gltf" onChange={e=>setFile(e.target.files?.[0]??null)}/></label><label>Project<select className="field" value={projectId} onChange={e=>setProjectId(e.target.value)}><option value="">Unsorted</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><fieldset><legend>Conversion quality</legend><div className="quality-options">{(["low","medium","high"] as const).map(q=><button type="button" className={quality===q?"active":""} onClick={()=>setQuality(q)} key={q}>{q}</button>)}</div></fieldset>{error&&<div className="alert error">{error}</div>}<div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!file||busy}>{busy?<Loader2 className="animate-spin"/>:<Upload/>}Upload</button></div></form></Dialog>}
+function DropUploadOverlay({label,blocked}:{label:string;blocked:boolean}){return <div className={`drop-upload-overlay ${blocked?"blocked":""}`}><div><Upload/><strong>{blocked?"Uploads aren't available here":"Drop to upload"}</strong><span>{blocked?"Choose a project or All Models to upload.":`to ${label}`}</span></div></div>}
+function UploadDialog({projects,defaultProjectId,initialFile,hint,onClose,onDone}:{projects:ProjectRecord[];defaultProjectId:number|null;initialFile:File|null;hint:string|null;onClose:()=>void;onDone:()=>void}){const[file,setFile]=useState<File|null>(initialFile);const[projectId,setProjectId]=useState(defaultProjectId?String(defaultProjectId):"");const[quality,setQuality]=useState<ConversionQuality>("medium");const[busy,setBusy]=useState(false);const[error,setError]=useState<string|null>(null);return <Dialog title="Upload model" onClose={onClose}><form onSubmit={async e=>{e.preventDefault();if(!file)return;setBusy(true);setError(null);try{await uploadModel(file,projectId?Number(projectId):null,quality);onDone()}catch(r){setError(r instanceof Error?r.message:"Upload failed");setBusy(false)}}} className="dialog-form"><label className="upload-drop"><Upload/><strong>{file?.name??"Choose a model file"}</strong><span>{file?"File staged — review the project and quality below.":"STEP, STP, GLB or GLTF up to 250 MB"}</span><input type="file" accept=".step,.stp,.glb,.gltf" onChange={e=>setFile(e.target.files?.[0]??null)}/></label>{hint&&<div className="upload-hint">{hint}</div>}<label>Project<select className="field" value={projectId} onChange={e=>setProjectId(e.target.value)}><option value="">Unsorted</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><fieldset><legend>Conversion quality</legend><div className="quality-options">{(["low","medium","high"] as const).map(q=><button type="button" className={quality===q?"active":""} onClick={()=>setQuality(q)} key={q}>{q}</button>)}</div></fieldset>{error&&<div className="alert error">{error}</div>}<div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!file||busy}>{busy?<Loader2 className="animate-spin"/>:<Upload/>}Upload</button></div></form></Dialog>}
 function MoveDialog({projects,busy,onClose,onMove}:{projects:ProjectRecord[];busy:boolean;onClose:()=>void;onMove:(id:number|null)=>void}){const[id,setId]=useState("");return <Dialog title="Move to project" onClose={onClose}><div className="dialog-form"><label>Destination<select className="field" value={id} onChange={e=>setId(e.target.value)}><option value="">Unsorted</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy} onClick={()=>onMove(id?Number(id):null)}>Move</button></div></div></Dialog>}
 function ConfirmDialog({count,busy,onClose,onConfirm}:{count:number;busy:boolean;onClose:()=>void;onConfirm:()=>void}){return <Dialog title="Delete forever?" onClose={onClose}><div className="dialog-form"><p>This permanently deletes {count} item{count===1?"":"s"} and its files. This cannot be undone.</p><div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="danger-button" disabled={busy} onClick={onConfirm}>Delete forever</button></div></div></Dialog>}
 function Dialog({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){return <div className="dialog-overlay" role="dialog" aria-modal="true"><div className="dialog-card"><header><h2>{title}</h2><button className="icon-button" onClick={onClose}><X size={17}/></button></header>{children}</div></div>}

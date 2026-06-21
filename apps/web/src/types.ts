@@ -11,6 +11,7 @@ export type ModelRecord = {
   folder_id: number | null;
   project_id: number | null;
   project_name?: string | null;
+  quality?: ConversionQuality | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;

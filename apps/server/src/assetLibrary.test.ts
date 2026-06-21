@@ -63,6 +63,7 @@ test("asset library projects, recycling, quota, sorting, and batch actions", asy
 
   const sorted = await jsonFetch(`${origin}/api/models?sortBy=name&sortDir=asc&q=assigned`, { headers });
   assert.deepEqual((sorted.body as Array<{ slug: string }>).map((model) => model.slug), [assigned.slug]);
+  assert.equal((sorted.body as Array<{ quality: string }>)[0]?.quality, "medium");
   const unsortedList = await jsonFetch(`${origin}/api/models?view=unsorted`, { headers });
   assert.deepEqual((unsortedList.body as Array<{ slug: string }>).map((model) => model.slug), [unsorted.slug]);
 

@@ -17,6 +17,7 @@ export type ModelRecord = {
   folder_id: number | null;
   project_id: number | null;
   project_name?: string | null;
+  quality?: ConversionQuality | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -244,7 +245,8 @@ export function listModels(options: ModelListOptions = {}): ModelRecord[] {
   const sortBy = options.sortBy ?? "created_at";
   const sortDir = options.sortDir === "asc" ? "ASC" : "DESC";
   return db.prepare(
-    `SELECT models.*, models.folder_id AS project_id, folders.name AS project_name
+    `SELECT models.*, models.folder_id AS project_id, folders.name AS project_name,
+            (SELECT jobs.quality FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS quality
      FROM models
      LEFT JOIN folders ON folders.id = models.folder_id
      WHERE ${where.join(" AND ")}
