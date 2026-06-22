@@ -306,12 +306,496 @@ struct RepeatedComponentGroup {
   std::vector<std::size_t> primitiveIndices;
 };
 
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <unordered_map>
+#include <set>
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#else
+#include <unistd.h>
+#endif
+
+size_t getMemoryUsageBytes() {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS pmc;
+  if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+    return pmc.WorkingSetSize;
+  }
+#else
+  long rss = 0;
+  FILE* fp = fopen("/proc/self/statm", "r");
+  if (fp) {
+    if (fscanf(fp, "%*d%ld", &rss) == 1) {
+      fclose(fp);
+      return (size_t)rss * sysconf(_SC_PAGESIZE);
+    }
+    fclose(fp);
+  }
+#endif
+  return 0;
+}
+
 std::ofstream logOut;
+std::mutex logMutex;
 
 void logLine(const std::string& message) {
+  std::lock_guard<std::mutex> lock(logMutex);
   const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  logOut << std::put_time(std::localtime(&now), "%F %T") << " " << message << "\n";
-  logOut.flush();
+  if (logOut.is_open()) {
+    logOut << std::put_time(std::localtime(&now), "%F %T") << " " << message << "\n";
+    logOut.flush();
+  }
+  std::cout << message << std::endl;
+}
+
+class Watchdog {
+ public:
+  Watchdog() : stop_(false) {
+    thread_ = std::thread(&Watchdog::run, this);
+  }
+
+  ~Watchdog() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  void setStage(const std::string& stageName) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stageName_ = stageName;
+    startTime_ = std::chrono::system_clock::now();
+    warnedThresholds_.clear();
+  }
+
+ private:
+  void run() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (!stop_) {
+      cv_.wait_for(lock, std::chrono::seconds(10), [this] { return stop_; });
+      if (stop_) break;
+
+      if (stageName_.empty()) continue;
+
+      auto elapsed = std::chrono::system_clock::now() - startTime_;
+      double elapsedMins = std::chrono::duration<double>(elapsed).count() / 60.0;
+
+      for (int threshold : {5, 15, 30, 60}) {
+        if (elapsedMins >= threshold && warnedThresholds_.find(threshold) == warnedThresholds_.end()) {
+          std::string msg = "WARNING: Stage '" + stageName_ + 
+                            "' has been active for over " + std::to_string(threshold) + 
+                            " minutes (current elapsed: " + std::to_string(static_cast<int>(elapsedMins)) + " mins)";
+          lock.unlock();
+          logLine(msg);
+          lock.lock();
+          warnedThresholds_.insert(threshold);
+        }
+      }
+    }
+  }
+
+  std::thread thread_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::string stageName_;
+  std::chrono::system_clock::time_point startTime_;
+  std::set<int> warnedThresholds_;
+  bool stop_;
+};
+
+class Profiler {
+ public:
+  struct Stage {
+    std::string name;
+    std::chrono::system_clock::time_point startTime;
+    std::chrono::system_clock::time_point endTime;
+    size_t startMem = 0;
+    size_t endMem = 0;
+    bool completed = false;
+    std::map<std::string, std::string> counters;
+  };
+
+  Profiler(const std::filesystem::path& outputPath) : path_(outputPath) {}
+
+  void startStage(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& stage : stages_) {
+      if (!stage.completed && stage.name == name) {
+        return; // already active
+      }
+    }
+    Stage s;
+    s.name = name;
+    s.startTime = std::chrono::system_clock::now();
+    s.startMem = getMemoryUsageBytes();
+    stages_.push_back(s);
+    writeJson();
+  }
+
+  void endStage(const std::string& name, const std::map<std::string, std::string>& counters = {}) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& stage : stages_) {
+      if (stage.name == name && !stage.completed) {
+        stage.endTime = std::chrono::system_clock::now();
+        stage.endMem = getMemoryUsageBytes();
+        stage.completed = true;
+        stage.counters = counters;
+        break;
+      }
+    }
+    writeJson();
+  }
+
+  void writeJson() {
+    std::ofstream out(path_);
+    if (!out) return;
+    out << "[\n";
+    for (size_t i = 0; i < stages_.size(); ++i) {
+      const auto& stage = stages_[i];
+      out << "  {\n";
+      out << "    \"stage\": \"" << jsonEscape(stage.name) << "\",\n";
+      out << "    \"start_time\": \"" << formatTime(stage.startTime) << "\",\n";
+      if (stage.completed) {
+        out << "    \"end_time\": \"" << formatTime(stage.endTime) << "\",\n";
+        double ms = std::chrono::duration<double, std::milli>(stage.endTime - stage.startTime).count();
+        out << "    \"elapsed_ms\": " << ms << ",\n";
+        out << "    \"start_memory_bytes\": " << stage.startMem << ",\n";
+        out << "    \"end_memory_bytes\": " << stage.endMem << ",\n";
+      } else {
+        out << "    \"end_time\": null,\n";
+        out << "    \"elapsed_ms\": null,\n";
+        out << "    \"start_memory_bytes\": " << stage.startMem << ",\n";
+        out << "    \"end_memory_bytes\": null,\n";
+      }
+      out << "    \"completed\": " << (stage.completed ? "true" : "false") << ",\n";
+      out << "    \"counters\": {\n";
+      size_t countIndex = 0;
+      for (const auto& [k, v] : stage.counters) {
+        out << "      \"" << jsonEscape(k) << "\": \"" << jsonEscape(v) << "\"";
+        if (++countIndex < stage.counters.size()) out << ",";
+        out << "\n";
+      }
+      out << "    }\n";
+      out << "  }";
+      if (i + 1 < stages_.size()) out << ",";
+      out << "\n";
+    }
+    out << "]\n";
+  }
+
+ private:
+  std::filesystem::path path_;
+  std::vector<Stage> stages_;
+  std::mutex mutex_;
+
+  static std::string formatTime(std::chrono::system_clock::time_point tp) {
+    auto t = std::chrono::system_clock::to_time_t(tp);
+    std::ostringstream ss;
+    ss << std::put_time(std::localtime(&t), "%F %T");
+    return ss.str();
+  }
+};
+
+struct BodyInventoryItem {
+  int id = 0;
+  std::string type;
+  bool hasLabel = false;
+  std::string labelEntry;
+  std::string name;
+  int faceCount = 0;
+  int edgeCount = 0;
+  int vertexCount = 0;
+  double xmin = 0, ymin = 0, zmin = 0;
+  double xmax = 0, ymax = 0, zmax = 0;
+  double diagonal = 0;
+  bool hasColor = false;
+  double colorR = 0, colorG = 0, colorB = 0, colorA = 1.0;
+};
+
+// Global cache statistics
+std::atomic<uint64_t> styleCacheHits{0};
+std::atomic<uint64_t> styleCacheMisses{0};
+std::atomic<uint64_t> subshapeCacheHits{0};
+std::atomic<uint64_t> subshapeCacheMisses{0};
+std::atomic<uint64_t> styledFacesCount{0};
+std::atomic<uint64_t> fallbackColorsCount{0};
+
+int meshedCount = 0;
+int totalShapesToMesh = 0;
+
+void countLeafLabels(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_LabelSequence& freeShapes, int& count) {
+  count = 0;
+  struct Helper {
+    static void count(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_Label& label, int& c) {
+      TDF_LabelSequence children;
+      bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
+      if (!hasChildren && shapeTool->IsReference(label)) {
+        TDF_Label referred;
+        if (shapeTool->GetReferredShape(label, referred)) {
+          hasChildren = shapeTool->GetComponents(referred, children, Standard_False);
+        }
+      }
+      if (hasChildren && children.Length() > 0) {
+        for (Standard_Integer i = 1; i <= children.Length(); ++i) {
+          count(shapeTool, children.Value(i), c);
+        }
+      } else {
+        c++;
+      }
+    }
+  };
+  for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
+    Helper::count(shapeTool, freeShapes.Value(i), count);
+  }
+}
+
+void scanTopology(const TopoDS_Shape& shape,
+                  int& compounds, int& compsolids, int& solids, int& shells, int& faces, int& edges, int& vertices,
+                  int& uniqueCompounds, int& uniqueCompsolids, int& uniqueSolids, int& uniqueShells, int& uniqueFaces, int& uniqueEdges, int& uniqueVertices) {
+  compounds = 0; compsolids = 0; solids = 0; shells = 0; faces = 0; edges = 0; vertices = 0;
+  uniqueCompounds = 0; uniqueCompsolids = 0; uniqueSolids = 0; uniqueShells = 0; uniqueFaces = 0; uniqueEdges = 0; uniqueVertices = 0;
+
+  TopTools_MapOfShape mapCompounds;
+  TopTools_MapOfShape mapCompsolids;
+  TopTools_MapOfShape mapSolids;
+  TopTools_MapOfShape mapShells;
+  TopTools_MapOfShape mapFaces;
+  TopTools_MapOfShape mapEdges;
+  TopTools_MapOfShape mapVertices;
+
+  for (TopExp_Explorer exp(shape, TopAbs_COMPOUND); exp.More(); exp.Next()) {
+    compounds++;
+    mapCompounds.Add(exp.Current());
+  }
+  for (TopExp_Explorer exp(shape, TopAbs_COMPSOLID); exp.More(); exp.Next()) {
+    compsolids++;
+    mapCompsolids.Add(exp.Current());
+  }
+  for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next()) {
+    solids++;
+    mapSolids.Add(exp.Current());
+  }
+  for (TopExp_Explorer exp(shape, TopAbs_SHELL); exp.More(); exp.Next()) {
+    shells++;
+    mapShells.Add(exp.Current());
+  }
+  for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+    faces++;
+    mapFaces.Add(exp.Current());
+  }
+  for (TopExp_Explorer exp(shape, TopAbs_EDGE); exp.More(); exp.Next()) {
+    edges++;
+    mapEdges.Add(exp.Current());
+  }
+  for (TopExp_Explorer exp(shape, TopAbs_VERTEX); exp.More(); exp.Next()) {
+    vertices++;
+    mapVertices.Add(exp.Current());
+  }
+
+  uniqueCompounds = mapCompounds.Extent();
+  uniqueCompsolids = mapCompsolids.Extent();
+  uniqueSolids = mapSolids.Extent();
+  uniqueShells = mapShells.Extent();
+  uniqueFaces = mapFaces.Extent();
+  uniqueEdges = mapEdges.Extent();
+  uniqueVertices = mapVertices.Extent();
+}
+
+void recursiveInventory(const TopoDS_Shape& shape,
+                        const Handle(XCAFDoc_ShapeTool)& shapeTool,
+                        const Handle(XCAFDoc_ColorTool)& colourTool,
+                        std::vector<BodyInventoryItem>& items) {
+  TopTools_MapOfShape mapSolids;
+  for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next()) {
+    mapSolids.Add(exp.Current());
+  }
+
+  std::vector<TopoDS_Shape> candidates;
+  if (mapSolids.Extent() > 0) {
+    for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next()) {
+      if (mapSolids.Remove(exp.Current())) {
+        candidates.push_back(exp.Current());
+      }
+    }
+  } else {
+    TopTools_MapOfShape mapShells;
+    for (TopExp_Explorer exp(shape, TopAbs_SHELL); exp.More(); exp.Next()) {
+      mapShells.Add(exp.Current());
+    }
+    if (mapShells.Extent() > 0) {
+      for (TopExp_Explorer exp(shape, TopAbs_SHELL); exp.More(); exp.Next()) {
+        if (mapShells.Remove(exp.Current())) {
+          candidates.push_back(exp.Current());
+        }
+      }
+    } else {
+      TopTools_MapOfShape mapFaces;
+      for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+        mapFaces.Add(exp.Current());
+      }
+      for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+        if (mapFaces.Remove(exp.Current())) {
+          candidates.push_back(exp.Current());
+        }
+      }
+    }
+  }
+
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    const auto& candidate = candidates[i];
+    BodyInventoryItem item;
+    item.id = static_cast<int>(items.size());
+    item.type = shapeTypeName(candidate.ShapeType());
+
+    TopTools_MapOfShape candidateFaces;
+    TopTools_MapOfShape candidateEdges;
+    TopTools_MapOfShape candidateVertices;
+    for (TopExp_Explorer exp(candidate, TopAbs_FACE); exp.More(); exp.Next()) candidateFaces.Add(exp.Current());
+    for (TopExp_Explorer exp(candidate, TopAbs_EDGE); exp.More(); exp.Next()) candidateEdges.Add(exp.Current());
+    for (TopExp_Explorer exp(candidate, TopAbs_VERTEX); exp.More(); exp.Next()) candidateVertices.Add(exp.Current());
+
+    item.faceCount = candidateFaces.Extent();
+    item.edgeCount = candidateEdges.Extent();
+    item.vertexCount = candidateVertices.Extent();
+
+    Bnd_Box box;
+    BRepBndLib::Add(candidate, box);
+    if (!box.IsVoid()) {
+      Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+      box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+      item.xmin = xmin; item.ymin = ymin; item.zmin = zmin;
+      item.xmax = xmax; item.ymax = ymax; item.zmax = zmax;
+      double dx = xmax - xmin;
+      double dy = ymax - ymin;
+      double dz = zmax - zmin;
+      item.diagonal = std::sqrt(dx*dx + dy*dy + dz*dz);
+    }
+
+    TDF_Label label;
+    if (shapeTool->FindShape(candidate, label)) {
+      item.hasLabel = true;
+      item.labelEntry = labelEntry(label);
+      item.name = readableLabelName(label);
+      Colour col;
+      if (findLabelColour(colourTool, label, col)) {
+        item.hasColor = true;
+        item.colorR = col.r;
+        item.colorG = col.g;
+        item.colorB = col.b;
+        item.colorA = col.a;
+      }
+    }
+
+    items.push_back(item);
+  }
+}
+
+void writeBodyInventory(const std::filesystem::path& path,
+                        int compounds, int compsolids, int solids, int shells, int faces, int edges, int vertices,
+                        int uniqueCompounds, int uniqueCompsolids, int uniqueSolids, int uniqueShells, int uniqueFaces, int uniqueEdges, int uniqueVertices,
+                        const std::vector<BodyInventoryItem>& items) {
+  std::ofstream out(path);
+  if (!out) return;
+  out << "{\n";
+  out << "  \"traversedCounts\": {\n";
+  out << "    \"compounds\": " << compounds << ",\n";
+  out << "    \"compsolids\": " << compsolids << ",\n";
+  out << "    \"solids\": " << solids << ",\n";
+  out << "    \"shells\": " << shells << ",\n";
+  out << "    \"faces\": " << faces << ",\n";
+  out << "    \"edges\": " << edges << ",\n";
+  out << "    \"vertices\": " << vertices << "\n";
+  out << "  },\n";
+  out << "  \"uniqueCounts\": {\n";
+  out << "    \"compounds\": " << uniqueCompounds << ",\n";
+  out << "    \"compsolids\": " << uniqueCompsolids << ",\n";
+  out << "    \"solids\": " << uniqueSolids << ",\n";
+  out << "    \"shells\": " << uniqueShells << ",\n";
+  out << "    \"faces\": " << uniqueFaces << ",\n";
+  out << "    \"edges\": " << uniqueEdges << ",\n";
+  out << "    \"vertices\": " << uniqueVertices << "\n";
+  out << "  },\n";
+  out << "  \"candidatesCount\": " << items.size() << ",\n";
+  out << "  \"candidates\": [\n";
+  for (size_t i = 0; i < items.size(); ++i) {
+    const auto& item = items[i];
+    out << "    {\n";
+    out << "      \"id\": " << item.id << ",\n";
+    out << "      \"type\": \"" << jsonEscape(item.type) << "\",\n";
+    out << "      \"has_xcaf_label\": " << (item.hasLabel ? "true" : "false") << ",\n";
+    out << "      \"label_entry\": \"" << jsonEscape(item.labelEntry) << "\",\n";
+    out << "      \"name\": \"" << jsonEscape(item.name) << "\",\n";
+    out << "      \"faces\": " << item.faceCount << ",\n";
+    out << "      \"edges\": " << item.edgeCount << ",\n";
+    out << "      \"vertices\": " << item.vertexCount << ",\n";
+    out << "      \"bbox\": [" << item.xmin << ", " << item.ymin << ", " << item.zmin << ", " 
+                           << item.xmax << ", " << item.ymax << ", " << item.zmax << "],\n";
+    out << "      \"bbox_diagonal\": " << item.diagonal << ",\n";
+    out << "      \"has_color\": " << (item.hasColor ? "true" : "false") << ",\n";
+    out << "      \"color\": [" << item.colorR << ", " << item.colorG << ", " << item.colorB << ", " << item.colorA << "]\n";
+    out << "    }";
+    if (i + 1 < items.size()) out << ",";
+    out << "\n";
+  }
+  out << "  ]\n";
+  out << "}\n";
+}
+
+void writeMaterialStyleProfile(const std::filesystem::path& path,
+                               const RawStepStyleResolver& styles,
+                               const Stats& stats) {
+  std::ofstream out(path);
+  if (!out) return;
+  out << "{\n";
+  out << "  \"summary\": {\n";
+  out << "    \"entities\": " << stats.rawStepEntities << ",\n";
+  out << "    \"styledItems\": " << stats.rawStepStyledItems << ",\n";
+  out << "    \"colours\": " << stats.rawStepColours << ",\n";
+  out << "    \"representationColours\": " << stats.rawStepRepresentationColours << ",\n";
+  out << "    \"colourUses\": " << stats.rawStepColourUses << ",\n";
+  out << "    \"ambiguousRejects\": " << stats.rawStepAmbiguousRepresentationRejects << ",\n";
+  out << "    \"broadRejects\": " << stats.rawStepBroadRepresentationRejects << "\n";
+  out << "  },\n";
+  out << "  \"colourAudit\": [\n";
+  size_t auditIndex = 0;
+  for (const auto& [id, audit] : styles.colourAudit()) {
+    out << "    {\n";
+    out << "      \"colourId\": \"" << jsonEscape(audit.colourId) << "\",\n";
+    out << "      \"colour\": [" << audit.colour.r << ", " << audit.colour.g << ", " << audit.colour.b << ", " << audit.colour.a << "],\n";
+    out << "      \"styledItemIds\": [\n";
+    for (size_t k = 0; k < audit.styledItemIds.size(); ++k) {
+      out << "        \"" << jsonEscape(audit.styledItemIds[k]) << "\"";
+      if (k + 1 < audit.styledItemIds.size()) out << ",";
+      out << "\n";
+    }
+    out << "      ],\n";
+    out << "      \"mappedObjectNames\": [\n";
+    for (size_t k = 0; k < audit.mappedObjectNames.size(); ++k) {
+      out << "        \"" << jsonEscape(audit.mappedObjectNames[k]) << "\"";
+      if (k + 1 < audit.mappedObjectNames.size()) out << ",";
+      out << "\n";
+    }
+    out << "      ]\n";
+    out << "    }";
+    if (++auditIndex < styles.colourAudit().size()) out << ",";
+    out << "\n";
+  }
+  out << "  ]\n";
+  out << "}\n";
 }
 
 std::string jsonEscape(const std::string& value) {
@@ -935,13 +1419,24 @@ std::string pathToString(const std::vector<std::string>& path, const std::map<st
 
 class RawStepStyleResolver {
  public:
-  void load(const std::string& inputPath) {
+  void load(const std::string& inputPath, Profiler* profiler = nullptr) {
+    if (profiler) profiler->startStage("Raw STEP style parse");
     entities_ = parseRawStepEntities(inputPath);
+    if (profiler) profiler->endStage("Raw STEP style parse", {{"entities", std::to_string(entities_.size())}});
+
+    if (profiler) profiler->startStage("Raw STEP style index build");
     reverseRefs_ = buildReverseStepRefs(entities_);
     buildStyledItemIndex();
     buildRepresentationIndex();
     buildProductNameIndex();
     buildLayerTargetNameIndex();
+    if (profiler) {
+      profiler->endStage("Raw STEP style index build", {
+        {"styledItems", std::to_string(styledItemCount_)},
+        {"colours", std::to_string(colourCount_)},
+        {"representationColours", std::to_string(representationColourCount_)}
+      });
+    }
   }
 
   int entityCount() const { return static_cast<int>(entities_.size()); }
@@ -1524,6 +2019,10 @@ ColourModeConfig parseColourMode(const std::string& value) {
 struct CliOptions {
   ColourSpaceConfig colourSpace = parseColourSpace("raw");
   ColourModeConfig colourMode = parseColourMode("experimental");
+  bool parallelMesh = true;
+  bool debugSuperCoarseMesh = false;
+  bool debugSkipRawStepStyles = false;
+  bool debugDisableStyleCache = false;
 };
 
 CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
@@ -1544,6 +2043,21 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
       options.colourMode = parseColourMode(argv[++i]);
     } else if (arg.rfind("--colour-mode=", 0) == 0) {
       options.colourMode = parseColourMode(arg.substr(std::string("--colour-mode=").size()));
+    } else if (arg == "--parallel-mesh") {
+      if (i + 1 >= argc) {
+        throw std::runtime_error("--parallel-mesh requires on or off");
+      }
+      std::string val = argv[++i];
+      options.parallelMesh = (val == "on");
+    } else if (arg.rfind("--parallel-mesh=", 0) == 0) {
+      std::string val = arg.substr(std::string("--parallel-mesh=").size());
+      options.parallelMesh = (val == "on");
+    } else if (arg == "--debug-super-coarse-mesh") {
+      options.debugSuperCoarseMesh = true;
+    } else if (arg == "--debug-skip-raw-step-styles") {
+      options.debugSkipRawStepStyles = true;
+    } else if (arg == "--debug-disable-style-cache") {
+      options.debugDisableStyleCache = true;
     } else {
       throw std::runtime_error("Unknown argument: " + arg);
     }
@@ -1696,6 +2210,8 @@ void collectColouredSubshapes(
 bool matchingSubshapeColour(
     const TopoDS_Face& face,
     const std::vector<SubshapeColourCandidate>& candidates,
+    const std::unordered_map<TopoDS_TShape*, size_t>& subshapeFaceCache,
+    const bool useCache,
     Colour& colour,
     std::vector<LayerInfo>& layers,
     bool& matchedHasColour,
@@ -1704,6 +2220,29 @@ bool matchingSubshapeColour(
     std::string& matchedLabelPath,
     std::string& matchedName,
     std::string& matchedNameSource) {
+  if (useCache && face.TShape()) {
+    auto found = subshapeFaceCache.find(face.TShape().get());
+    if (found != subshapeFaceCache.end()) {
+      subshapeCacheHits++;
+      size_t idx = found->second;
+      const auto& candidate = candidates[idx];
+      colour = candidate.colour;
+      if (colour.lookupPath.empty()) {
+        colour.lookupPath = candidate.labelPath;
+      }
+      layers = candidate.layers;
+      matchedHasColour = candidate.hasColour;
+      matchedHasLayerColour = candidate.hasLayerColour;
+      matchedLayerColour = candidate.layerColour;
+      matchedLabelPath = candidate.labelPath;
+      matchedName = isRawLabelName(candidate.displayName) ? "" : normalizeDisplayWhitespace(candidate.displayName);
+      matchedNameSource = matchedName.empty() ? "" : candidate.nameSource;
+      return true;
+    }
+    subshapeCacheMisses++;
+    return false;
+  }
+
   for (const auto& candidate : candidates) {
     if (face.IsSame(candidate.shape)) {
       colour = candidate.colour;
@@ -1889,8 +2428,23 @@ std::vector<StyledTopologyColour> mapStepPresentationToSubshapes(
 bool stepPresentationColourForFace(
     const TopoDS_Face& face,
     const std::vector<StyledTopologyColour>& styledTopologyColours,
+    const std::unordered_map<TopoDS_TShape*, size_t>& styledFaceCache,
+    const bool useCache,
     RawStepStyleMatch& match,
     std::string& geometrySource) {
+  if (useCache && face.TShape()) {
+    auto found = styledFaceCache.find(face.TShape().get());
+    if (found != styledFaceCache.end()) {
+      styleCacheHits++;
+      size_t idx = found->second;
+      match = styledTopologyColours[idx].match;
+      geometrySource = styledTopologyColours[idx].geometrySource;
+      return true;
+    }
+    styleCacheMisses++;
+    return false;
+  }
+
   for (const auto& candidate : styledTopologyColours) {
     if (face.IsSame(candidate.shape)) {
       match = candidate.match;
@@ -1913,7 +2467,7 @@ void tessellateLabel(
     const Handle(XCAFDoc_ColorTool)& colourTool,
     const Handle(XCAFDoc_LayerTool)& layerTool,
     const RawStepStyleResolver* rawStepStyles,
-    const ColourModeConfig& colourMode,
+    const CliOptions& cliOptions,
     const TDF_Label& label,
     const Quality& quality,
     const std::string& instancePath,
@@ -1925,8 +2479,8 @@ void tessellateLabel(
     const std::string& parentChain,
     const std::string& parentDisplayName,
     const std::string& parentProductName,
-  std::vector<MeshPrimitive>& primitives,
-  Stats& stats) {
+    std::vector<MeshPrimitive>& primitives,
+    Stats& stats) {
   stats.labelsProcessed += 1;
   TDF_Label referred;
   TopoDS_Shape sourceShape = shapeForLabel(shapeTool, label, referred);
@@ -1979,14 +2533,14 @@ void tessellateLabel(
   RawStepStyleMatch rawStepMatch;
   RawStepStyleMatch rawStepRejectedMatch;
   Colour rawStepColour;
-  const bool rawStepHasColour = rawStepStyles != nullptr &&
+  const bool rawStepHasColour = !cliOptions.debugSkipRawStepStyles && rawStepStyles != nullptr &&
       rawStepStyles->findForNames(
           rawStyleNames,
           rawStepMatch,
           rawStepRejectedMatch);
   if (rawStepHasColour) {
     rawStepColour = rawStepMatch.colour;
-    if (colourMode.mode == ColourMode::StepPresentation) {
+    if (cliOptions.colourMode.mode == ColourMode::StepPresentation) {
       rawStepColour = linearizedStepPresentationColour(rawStepColour);
       rawStepColour.source = "step_presentation_styled_item";
       rawStepColour.materialSource = "step_presentation_styled_item";
@@ -1998,9 +2552,9 @@ void tessellateLabel(
         " targetType=" + rawStepMatch.styledTargetType +
         " targetScope=" + rawStepMatch.styledTargetScope;
   }
-  const auto styledTopologyColours = mapStepPresentationToSubshapes(
+  const auto styledTopologyColours = cliOptions.debugSkipRawStepStyles ? std::vector<StyledTopologyColour>() : mapStepPresentationToSubshapes(
       rawStepStyles,
-      colourMode,
+      cliOptions.colourMode,
       sourceShape,
       rawStyleNames,
       rawStepRejectedMatch);
@@ -2054,9 +2608,84 @@ void tessellateLabel(
   baseCandidateColours = appendCandidateSummary(baseCandidateColours, "ancestor", ancestorHasCandidateColour, ancestorCandidate);
   baseCandidateColours = appendCandidateSummary(baseCandidateColours, "labelOrAncestorLayer", layerHasCandidateColour, layerCandidate);
 
+  // Build caches for O(1) shape lookups
+  std::unordered_map<TopoDS_TShape*, size_t> styledFaceCache;
+  std::unordered_map<TopoDS_TShape*, size_t> subshapeFaceCache;
+
+  if (!cliOptions.debugDisableStyleCache) {
+    // 1. Build styledFaceCache
+    for (size_t idx = 0; idx < styledTopologyColours.size(); ++idx) {
+      const auto& candidate = styledTopologyColours[idx];
+      if (candidate.shape.IsNull()) continue;
+      
+      auto bindTShape = [&](const TopoDS_Shape& s) {
+        if (!s.IsNull() && s.TShape()) {
+          auto* ptr = s.TShape().get();
+          if (styledFaceCache.find(ptr) == styledFaceCache.end()) {
+            styledFaceCache[ptr] = idx;
+          }
+        }
+      };
+
+      if (candidate.shape.ShapeType() == TopAbs_FACE) {
+        bindTShape(candidate.shape);
+      } else {
+        for (TopExp_Explorer exp(candidate.shape, TopAbs_FACE); exp.More(); exp.Next()) {
+          bindTShape(exp.Current());
+        }
+      }
+    }
+
+    // 2. Build subshapeFaceCache
+    for (size_t idx = 0; idx < subshapeColours.size(); ++idx) {
+      const auto& candidate = subshapeColours[idx];
+      if (candidate.shape.IsNull()) continue;
+
+      auto bindTShape = [&](const TopoDS_Shape& s) {
+        if (!s.IsNull() && s.TShape()) {
+          auto* ptr = s.TShape().get();
+          if (subshapeFaceCache.find(ptr) == subshapeFaceCache.end()) {
+            subshapeFaceCache[ptr] = idx;
+          }
+        }
+      };
+
+      if (candidate.shape.ShapeType() == TopAbs_FACE) {
+        bindTShape(candidate.shape);
+      } else {
+        for (TopExp_Explorer exp(candidate.shape, TopAbs_FACE); exp.More(); exp.Next()) {
+          bindTShape(exp.Current());
+        }
+      }
+    }
+  }
+
+  meshedCount++;
+  double linDeflect = quality.linearDeflection;
+  double angDeflect = quality.angularDeflection;
+  bool relDeflect = quality.relative;
+  if (cliOptions.debugSuperCoarseMesh) {
+    linDeflect = 5.0;
+    angDeflect = 1.5;
+    relDeflect = true;
+  }
+
+  logLine("Meshing shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
+          ": name=" + displayName + " path=" + labelPath +
+          " linearDeflection=" + std::to_string(linDeflect) +
+          " angularDeflection=" + std::to_string(angDeflect) +
+          " relative=" + (relDeflect ? "true" : "false") +
+          " parallel=" + (cliOptions.parallelMesh ? "true" : "false"));
+
   try {
-    BRepMesh_IncrementalMesh mesh(renderShape, quality.linearDeflection, quality.relative, quality.angularDeflection, Standard_True);
+    const auto meshStarted = std::chrono::steady_clock::now();
+    BRepMesh_IncrementalMesh mesh(renderShape, linDeflect, relDeflect, angDeflect, cliOptions.parallelMesh ? Standard_True : Standard_False);
     mesh.Perform();
+    const auto meshFinished = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(meshFinished - meshStarted).count();
+    
+    logLine("Meshed shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
+            ": elapsedMs=" + std::to_string(ms));
     stats.shapesTessellated += 1;
   } catch (const Standard_Failure& failure) {
     logLine("Tessellation failed for " + labelPath + ": " + failure.GetMessageString());
@@ -2095,8 +2724,8 @@ void tessellateLabel(
     std::string matchedSubshapeNameSource;
     RawStepStyleMatch faceStepPresentationMatch;
     std::string faceGeometrySource = "simple shape";
-    const bool faceHasStepPresentationColour =
-        stepPresentationColourForFace(sourceFace, styledTopologyColours, faceStepPresentationMatch, faceGeometrySource);
+    const bool faceHasStepPresentationColour = !cliOptions.debugSkipRawStepStyles &&
+        stepPresentationColourForFace(sourceFace, styledTopologyColours, styledFaceCache, !cliOptions.debugDisableStyleCache, faceStepPresentationMatch, faceGeometrySource);
     if (firstColourForShape(colourTool, sourceFace, "face_", "face/subshape", labelPath + "/face/" + std::to_string(faceIndex), faceColour)) {
       colour = faceColour;
       hasColour = true;
@@ -2104,6 +2733,8 @@ void tessellateLabel(
     } else if (matchingSubshapeColour(
                    sourceFace,
                    subshapeColours,
+                   subshapeFaceCache,
+                   !cliOptions.debugDisableStyleCache,
                    faceColour,
                    matchedSubshapeLayers,
                    matchedSubshapeHasColour,
@@ -2123,12 +2754,12 @@ void tessellateLabel(
     } else if (!labelHasColour && referredHasColour) {
       colour = referredColour;
       hasColour = true;
-    } else if (!labelHasColour && faceHasStepPresentationColour && colourMode.mode == ColourMode::StepPresentation) {
+    } else if (!labelHasColour && faceHasStepPresentationColour && cliOptions.colourMode.mode == ColourMode::StepPresentation) {
       colour = faceStepPresentationMatch.colour;
       hasColour = true;
       stats.rawStepColourUses += 1;
       stats.rawStepMappingConfidenceCounts[faceStepPresentationMatch.confidence] += 1;
-    } else if (!labelHasColour && rawStepHasColour && colourMode.applyRawStepStyles) {
+    } else if (!labelHasColour && rawStepHasColour && cliOptions.colourMode.applyRawStepStyles) {
       colour = rawStepColour;
       hasColour = true;
       stats.rawStepColourUses += 1;
@@ -2136,24 +2767,27 @@ void tessellateLabel(
     } else if (!labelHasColour && ancestorHasCandidateColour) {
       colour = ancestorCandidate;
       hasColour = true;
-    } else if (!labelHasColour && matchedSubshapeHasLayerColour && colourMode.applyLayerColours) {
+    } else if (!labelHasColour && matchedSubshapeHasLayerColour && cliOptions.colourMode.applyLayerColours) {
       colour = matchedSubshapeLayerColour;
       colour.source = "subshape_layer_" + colour.source;
       colour.materialSource = "layer";
       hasColour = true;
       primitiveLayer = firstLayerName(matchedSubshapeLayers).empty() ? primitiveLayer : firstLayerName(matchedSubshapeLayers);
-    } else if (!labelHasColour && layerHasCandidateColour && colourMode.applyLayerColours) {
+    } else if (!labelHasColour && layerHasCandidateColour && cliOptions.colourMode.applyLayerColours) {
       colour = layerCandidate;
       hasColour = true;
     }
 
     if (!hasColour) {
       stats.defaultMaterialUses += 1;
+      fallbackColorsCount++;
       colour = defaultColour(
-          colourMode.mode == ColourMode::XcafBaseline
+          cliOptions.colourMode.mode == ColourMode::XcafBaseline
               ? "no direct XCAF face/subshape, owning label/body, referred/original label, instance/component label, or explicit inherited ancestor colour found; raw STEP styles and layer colours are diagnostic-only in xcaf-baseline"
               : "no face/subshape, label, referred-label, ancestor, or layer colour found",
           labelPath + "/face/" + std::to_string(faceIndex));
+    } else {
+      styledFacesCount++;
     }
     if (!primitiveLayer.empty()) {
       stats.layers.insert(primitiveLayer);
@@ -2331,7 +2965,7 @@ void traverse(
     const Handle(XCAFDoc_ColorTool)& colourTool,
     const Handle(XCAFDoc_LayerTool)& layerTool,
     const RawStepStyleResolver* rawStepStyles,
-    const ColourModeConfig& colourMode,
+    const CliOptions& cliOptions,
     const TDF_Label& label,
     const Quality& quality,
     const std::string& instancePath,
@@ -2398,7 +3032,7 @@ void traverse(
           colourTool,
           layerTool,
           rawStepStyles,
-          colourMode,
+          cliOptions,
           children.Value(i),
           quality,
           currentInstancePath,
@@ -2421,11 +3055,11 @@ void traverse(
       colourTool,
       layerTool,
       rawStepStyles,
-      colourMode,
+      cliOptions,
       label,
       quality,
       currentInstancePath,
-      accumulatedLocation,
+      childAccumulatedLocation,
       transformSource,
       hasInheritedColour,
       inheritedColour,
@@ -2501,7 +3135,9 @@ int addIndexBuffer(
 void writeGlb(
     const std::filesystem::path& outputPath,
     const std::vector<MeshPrimitive>& primitives,
-    const ColourSpaceConfig& colourSpace) {
+    const ColourSpaceConfig& colourSpace,
+    Profiler* profiler = nullptr) {
+  if (profiler) profiler->startStage("GLB primitive generation");
   std::vector<std::uint8_t> bin;
   std::vector<BufferViewInfo> views;
   std::vector<AccessorInfo> accessors;
@@ -2714,6 +3350,15 @@ void writeGlb(
     jsonText.push_back(' ');
   }
 
+  if (profiler) {
+    profiler->endStage("GLB primitive generation", {
+      {"primitives", std::to_string(primitives.size())},
+      {"binBytes", std::to_string(bin.size())},
+      {"jsonBytes", std::to_string(jsonText.size())}
+    });
+    profiler->startStage("GLB write");
+  }
+
   std::ofstream out(outputPath, std::ios::binary);
   if (!out) {
     throw std::runtime_error("Could not open GLB path for writing: " + outputPath.string());
@@ -2736,6 +3381,10 @@ void writeGlb(
   out.write(reinterpret_cast<const char*>(&binLength), sizeof(binLength));
   out.write(reinterpret_cast<const char*>(&binType), sizeof(binType));
   out.write(reinterpret_cast<const char*>(bin.data()), static_cast<std::streamsize>(bin.size()));
+
+  if (profiler) {
+    profiler->endStage("GLB write", {{"bytes", std::to_string(totalLength)}});
+  }
 }
 
 std::vector<DefaultGroup> buildDefaultGroups(const std::vector<MeshPrimitive>& primitives) {
@@ -3469,8 +4118,8 @@ void writeReport(
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3 || argc > 8) {
-    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear]\n";
+  if (argc < 3 || argc > 14) {
+    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear] [--parallel-mesh on|off] [--debug-super-coarse-mesh] [--debug-skip-raw-step-styles] [--debug-disable-style-cache]\n";
     return 2;
   }
 
@@ -3490,6 +4139,9 @@ int main(int argc, char** argv) {
       throw std::runtime_error("Could not open conversion.log for writing");
     }
 
+    Profiler profiler(outputDir / "conversion-profile.json");
+    Watchdog watchdog;
+
     logLine("Starting native XCAF STEP to GLB prototype");
     logLine("Input: " + inputPath);
     logLine("Quality: " + quality.name +
@@ -3500,6 +4152,11 @@ int main(int argc, char** argv) {
     logLine("Colour mode: " + colourMode.name +
             " applyRawStepStyles=" + (colourMode.applyRawStepStyles ? "true" : "false") +
             " applyLayerColours=" + (colourMode.applyLayerColours ? "true" : "false"));
+    logLine("Parallel mesh: " + (cliOptions.parallelMesh ? std::string("on") : std::string("off")));
+    logLine("Debug super coarse mesh: " + (cliOptions.debugSuperCoarseMesh ? std::string("true") : std::string("false")));
+    logLine("Debug skip raw STEP styles: " + (cliOptions.debugSkipRawStepStyles ? std::string("true") : std::string("false")));
+    logLine("Debug disable style cache: " + (cliOptions.debugDisableStyleCache ? std::string("true") : std::string("false")));
+    logLine("Hardware concurrency: " + std::to_string(std::thread::hardware_concurrency()));
 
     Interface_Static::SetIVal("read.step.assembly.level", 1);
 
@@ -3513,24 +4170,38 @@ int main(int argc, char** argv) {
     reader.SetLayerMode(Standard_True);
     reader.SetMatMode(Standard_True);
 
-    logLine("Reading STEP with STEPCAFControl_Reader");
+    logLine("STEP read start");
+    watchdog.setStage("Reading STEP");
+    profiler.startStage("Reading STEP");
     const IFSelect_ReturnStatus status = reader.ReadFile(inputPath.c_str());
     if (status != IFSelect_RetDone) {
       throw std::runtime_error("STEP read failed with status " + std::to_string(static_cast<int>(status)));
     }
+    logLine("STEP read end");
+    profiler.endStage("Reading STEP", {
+      {"status", std::to_string(static_cast<int>(status))},
+      {"bytes", std::to_string(std::filesystem::file_size(inputPath))}
+    });
 
-    logLine("Transferring STEP into XCAF document");
+    logLine("XCAF doc transfer start");
+    watchdog.setStage("Transferring XCAF");
+    profiler.startStage("Transferring XCAF");
     if (!reader.Transfer(doc)) {
       throw std::runtime_error("STEP transfer into XCAF document failed");
     }
+    logLine("XCAF doc transfer end");
+    profiler.endStage("Transferring XCAF");
 
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     Handle(XCAFDoc_ColorTool) colourTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
     Handle(XCAFDoc_LayerTool) layerTool = XCAFDoc_DocumentTool::LayerTool(doc->Main());
 
-    logLine("Parsing raw STEP presentation styles");
     RawStepStyleResolver rawStepStyles;
-    rawStepStyles.load(inputPath);
+    if (!cliOptions.debugSkipRawStepStyles) {
+      logLine("Parsing raw STEP presentation styles");
+      watchdog.setStage("Parsing STEP styles");
+      rawStepStyles.load(inputPath, &profiler);
+    }
 
     TDF_LabelSequence freeShapes;
     shapeTool->GetFreeShapes(freeShapes);
@@ -3548,6 +4219,53 @@ int main(int argc, char** argv) {
             " styledItems=" + std::to_string(stats.rawStepStyledItems) +
             " colours=" + std::to_string(stats.rawStepColours) +
             " representationColourLinks=" + std::to_string(stats.rawStepRepresentationColours));
+
+    logLine("Recursive topology/body scan start");
+    watchdog.setStage("Scanning topology");
+    profiler.startStage("Recursive topology/body scan");
+    int traversedCompounds = 0, traversedCompsolids = 0, traversedSolids = 0, traversedShells = 0, traversedFaces = 0, traversedEdges = 0, traversedVertices = 0;
+    int uniqueCompounds = 0, uniqueCompsolids = 0, uniqueSolids = 0, uniqueShells = 0, uniqueFaces = 0, uniqueEdges = 0, uniqueVertices = 0;
+    std::vector<BodyInventoryItem> inventoryItems;
+
+    for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
+      TDF_Label referred;
+      TopoDS_Shape freeShape = shapeForLabel(shapeTool, freeShapes.Value(i), referred);
+      if (freeShape.IsNull()) continue;
+
+      int comp = 0, compsol = 0, sol = 0, sh = 0, f = 0, e = 0, v = 0;
+      int ucomp = 0, ucompsol = 0, usol = 0, ush = 0, uf = 0, ue = 0, uv = 0;
+      scanTopology(freeShape, comp, compsol, sol, sh, f, e, v, ucomp, ucompsol, usol, ush, uf, ue, uv);
+      
+      traversedCompounds += comp; traversedCompsolids += compsol; traversedSolids += sol; traversedShells += sh; traversedFaces += f; traversedEdges += e; traversedVertices += v;
+      uniqueCompounds += ucomp; uniqueCompsolids += ucompsol; uniqueSolids += usol; uniqueShells += ush; uniqueFaces += uf; uniqueEdges += ue; uniqueVertices += uv;
+
+      recursiveInventory(freeShape, shapeTool, colourTool, inventoryItems);
+    }
+    
+    writeBodyInventory(outputDir / "body-inventory.json",
+                       traversedCompounds, traversedCompsolids, traversedSolids, traversedShells, traversedFaces, traversedEdges, traversedVertices,
+                       uniqueCompounds, uniqueCompsolids, uniqueSolids, uniqueShells, uniqueFaces, uniqueEdges, uniqueVertices,
+                       inventoryItems);
+
+    logLine("Recursive topology/body scan end: bodies=" + std::to_string(inventoryItems.size()) +
+            " compounds=" + std::to_string(uniqueCompounds) +
+            " solids=" + std::to_string(uniqueSolids) +
+            " faces=" + std::to_string(uniqueFaces));
+
+    profiler.endStage("Recursive topology/body scan", {
+      {"bodies", std::to_string(inventoryItems.size())},
+      {"unique_compounds", std::to_string(uniqueCompounds)},
+      {"unique_solids", std::to_string(uniqueSolids)},
+      {"unique_faces", std::to_string(uniqueFaces)}
+    });
+
+    logLine("Recursive XCAF label traversal start");
+    watchdog.setStage("Applying styles");
+    profiler.startStage("XCAF label traversal");
+    
+    countLeafLabels(shapeTool, freeShapes, totalShapesToMesh);
+    logLine("Total leaf shapes to mesh: " + std::to_string(totalShapesToMesh));
+
     Colour noInheritedColour;
     std::vector<LayerInfo> noInheritedLayers;
     for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
@@ -3556,7 +4274,7 @@ int main(int argc, char** argv) {
           colourTool,
           layerTool,
           &rawStepStyles,
-          colourMode,
+          cliOptions,
           freeShapes.Value(i),
           quality,
           "",
@@ -3572,13 +4290,34 @@ int main(int argc, char** argv) {
           stats);
     }
 
+    logLine("Recursive XCAF label traversal end: primitives=" + std::to_string(primitives.size()));
+    profiler.endStage("XCAF label traversal", {
+      {"primitives", std::to_string(primitives.size())},
+      {"labelsProcessed", std::to_string(stats.labelsProcessed)},
+      {"shapesTessellated", std::to_string(stats.shapesTessellated)},
+      {"styleCacheHits", std::to_string(styleCacheHits)},
+      {"styleCacheMisses", std::to_string(styleCacheMisses)},
+      {"subshapeCacheHits", std::to_string(subshapeCacheHits)},
+      {"subshapeCacheMisses", std::to_string(subshapeCacheMisses)},
+      {"styledFaces", std::to_string(styledFacesCount)},
+      {"fallbackColors", std::to_string(fallbackColorsCount)}
+    });
+
     if (primitives.empty()) {
       throw std::runtime_error("No renderable triangulated primitives were produced");
     }
 
+    logLine("Cache statistics: styledFaceCacheHits=" + std::to_string(styleCacheHits) +
+            " styledFaceCacheMisses=" + std::to_string(styleCacheMisses) +
+            " subshapeCacheHits=" + std::to_string(subshapeCacheHits) +
+            " subshapeCacheMisses=" + std::to_string(subshapeCacheMisses));
+    logLine("Color mapping statistics: styledFaces=" + std::to_string(styledFacesCount) +
+            " fallbackColors=" + std::to_string(fallbackColorsCount));
+
     logLine("Writing display.glb");
+    watchdog.setStage("Writing GLB");
     const auto glbPath = outputDir / "display.glb";
-    writeGlb(glbPath, primitives, colourSpace);
+    writeGlb(glbPath, primitives, colourSpace, &profiler);
 
     const auto finished = std::chrono::steady_clock::now();
     stats.conversionSeconds = std::chrono::duration<double>(finished - started).count();
@@ -3586,6 +4325,10 @@ int main(int argc, char** argv) {
 
     logLine("Writing xcaf-report.json");
     writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, colourMode, stats, rawStepStyles.colourAudit(), primitives, glbSize);
+
+    logLine("Writing material-style-profile.json");
+    writeMaterialStyleProfile(outputDir / "material-style-profile.json", rawStepStyles, stats);
+
     logLine("Done: primitives=" + std::to_string(stats.primitivesExported) +
             " triangles=" + std::to_string(stats.triangles) +
             " glbBytes=" + std::to_string(glbSize));

@@ -60,7 +60,9 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       sourcePath: input.sourcePath,
       outputDir: jobDir,
       quality: input.quality,
-      xcafColourMode: input.xcafColourMode, signal: input.signal
+      xcafColourMode: input.xcafColourMode,
+      signal: input.signal,
+      onProgress: input.onProgress
     });
   }
 
@@ -274,6 +276,7 @@ async function runXcafBaselineConverter(input: {
   quality: ConversionQuality;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
   signal?: AbortSignal;
+  onProgress?: (percent: number, label: string) => void | Promise<void>;
 }): Promise<void> {
   const stat = await fs.promises.stat(input.xcafConverterBin).catch(() => null);
   if (!stat || !stat.isFile()) {
@@ -290,7 +293,7 @@ async function runXcafBaselineConverter(input: {
   console.log(`Native XCAF quality: ${nativeQuality}`);
   console.log(`Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`);
 
-  await spawnProcess(input.xcafConverterBin, [
+  const args = [
     input.sourcePath,
     input.outputDir,
     nativeQuality,
@@ -298,7 +301,23 @@ async function runXcafBaselineConverter(input: {
     input.xcafColourMode,
     "--colour-space",
     "raw"
-  ], input.signal);
+  ];
+
+  // Read environment flags and push them to args
+  const parallelMesh = process.env.XCAF_PARALLEL_MESH === "off" ? "off" : "on";
+  args.push("--parallel-mesh", parallelMesh);
+
+  if (process.env.DEBUG_SUPER_COARSE_MESH === "true") {
+    args.push("--debug-super-coarse-mesh");
+  }
+  if (process.env.DEBUG_SKIP_RAW_STEP_STYLES === "true") {
+    args.push("--debug-skip-raw-step-styles");
+  }
+  if (process.env.DEBUG_DISABLE_STYLE_CACHE === "true") {
+    args.push("--debug-disable-style-cache");
+  }
+
+  await spawnProcess(input.xcafConverterBin, args, input.signal, input.onProgress);
 
   const conversionLogPath = path.join(input.outputDir, "conversion.log");
   const existingLog = await fs.promises.readFile(conversionLogPath, "utf8").catch(() => "");
@@ -317,12 +336,78 @@ async function runXcafBaselineConverter(input: {
   await fs.promises.writeFile(conversionLogPath, `${header}${existingLog}`);
 }
 
-function spawnProcess(command: string, args: string[], signal?: AbortSignal): Promise<void> {
+function spawnProcess(
+  command: string,
+  args: string[],
+  signal?: AbortSignal,
+  onProgress?: (percent: number, label: string) => void | Promise<void>
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      stdio: ["ignore", "inherit", "inherit"]
+      stdio: ["ignore", "pipe", "inherit"]
     });
-    const abort = () => child.kill("SIGTERM");
+
+    let buffer = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      // Forward to standard output so it is visible in console
+      process.stdout.write(chunk);
+
+      buffer += chunk.toString("utf8");
+      let boundary = buffer.lastIndexOf("\n");
+      if (boundary !== -1) {
+        const lines = buffer.substring(0, boundary).split("\n");
+        buffer = buffer.substring(boundary + 1);
+
+        for (let line of lines) {
+          line = line.trim();
+          if (!line) continue;
+
+          // Parse progress stages
+          if (line.includes("STEP read start")) {
+            onProgress?.(18, "Reading STEP file");
+          } else if (line.includes("STEP read end")) {
+            onProgress?.(25, "Completed reading STEP file");
+          } else if (line.includes("XCAF doc transfer start")) {
+            onProgress?.(27, "Transferring STEP to XCAF document");
+          } else if (line.includes("XCAF doc transfer end")) {
+            onProgress?.(32, "Completed XCAF document transfer");
+          } else if (line.includes("Parsing raw STEP presentation styles")) {
+            onProgress?.(35, "Parsing STEP presentation styles");
+          } else if (line.includes("Recursive topology/body scan start")) {
+            onProgress?.(38, "Scanning assembly topology");
+          } else if (line.includes("Recursive topology/body scan end")) {
+            onProgress?.(42, "Completed assembly topology scan");
+          } else if (line.includes("Recursive XCAF label traversal start")) {
+            onProgress?.(45, "Traversing shapes and generating mesh");
+          } else if (line.includes("Recursive XCAF label traversal end")) {
+            onProgress?.(65, "Completed shape traversal and meshing");
+          } else if (line.includes("Writing display.glb")) {
+            onProgress?.(67, "Writing GLB file");
+          } else if (line.includes("Writing xcaf-report.json")) {
+            onProgress?.(69, "Writing XCAF report");
+          } else if (line.includes("Done:")) {
+            onProgress?.(70, "Conversion finished");
+          } else {
+            // Regex match for meshing shape
+            // format: "Meshing shape X / Y: name=..." or "Meshed shape X / Y: elapsedMs=..."
+            const meshMatch = line.match(/(?:Meshing|Meshed) shape (\d+) \/ (\d+)/i);
+            if (meshMatch) {
+              const current = parseInt(meshMatch[1], 10);
+              const total = parseInt(meshMatch[2], 10);
+              if (total > 0) {
+                const fraction = current / total;
+                const percent = Math.min(65, Math.floor(45 + fraction * 20));
+                onProgress?.(percent, `Meshing shape ${current} of ${total}`);
+              }
+            }
+          }
+        }
+      }
+    });
+
+    const abort = () => {
+      child.kill("SIGTERM");
+    };
     signal?.addEventListener("abort", abort, { once: true });
 
     child.on("error", reject);
@@ -342,7 +427,6 @@ function spawnProcess(command: string, args: string[], signal?: AbortSignal): Pr
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("Conversion cancelled.", "AbortError");
 }
-
 async function writeXcafCompatibilityFiles(input: {
   reportPath: string;
   statsPath: string;
