@@ -346,6 +346,13 @@ size_t getMemoryUsageBytes() {
   return 0;
 }
 
+class RawStepStyleResolver;
+std::string jsonEscape(const std::string& value);
+std::string shapeTypeName(const TopAbs_ShapeEnum type);
+std::string labelEntry(const TDF_Label& label);
+std::string readableLabelName(const TDF_Label& label);
+bool findLabelColour(const Handle(XCAFDoc_ColorTool)& colourTool, const TDF_Label& label, Colour& colour);
+
 std::ofstream logOut;
 std::mutex logMutex;
 
