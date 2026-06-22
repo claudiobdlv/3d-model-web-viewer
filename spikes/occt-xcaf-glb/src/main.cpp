@@ -543,6 +543,25 @@ std::atomic<uint64_t> subshapeCacheMisses{0};
 std::atomic<uint64_t> styledFacesCount{0};
 std::atomic<uint64_t> fallbackColorsCount{0};
 
+struct TShapeColorKey {
+  TopoDS_TShape* tshape;
+  XCAFDoc_ColorType type;
+  bool operator==(const TShapeColorKey& o) const {
+    return tshape == o.tshape && type == o.type;
+  }
+};
+
+struct TShapeColorKeyHash {
+  std::size_t operator()(const TShapeColorKey& k) const {
+    return std::hash<void*>()(k.tshape) ^ (std::hash<int>()(static_cast<int>(k.type)) << 1);
+  }
+};
+
+std::unordered_map<TShapeColorKey, Colour, TShapeColorKeyHash> shapeColorCache;
+bool globalDisableStyleCache = false;
+std::atomic<uint64_t> shapeColorCacheHits{0};
+std::atomic<uint64_t> shapeColorCacheMisses{0};
+
 int meshedCount = 0;
 int totalShapesToMesh = 0;
 
@@ -1891,6 +1910,53 @@ bool firstColourForLabel(
   return false;
 }
 
+void buildColorCache(const Handle(XCAFDoc_ColorTool)& colourTool, const Handle(XCAFDoc_ShapeTool)& shapeTool) {
+  TDF_LabelSequence colors;
+  colourTool->GetColors(colors);
+  for (Standard_Integer i = 1; i <= colors.Length(); ++i) {
+    TDF_Label colorLabel = colors.Value(i);
+    TDF_LabelSequence shapes;
+    colourTool->GetShapesOfColor(colorLabel, shapes);
+    for (Standard_Integer j = 1; j <= shapes.Length(); ++j) {
+      TDF_Label shapeLabel = shapes.Value(j);
+      TopoDS_Shape S = shapeTool->GetShape(shapeLabel);
+      if (!S.IsNull() && S.TShape()) {
+        for (auto type : {XCAFDoc_ColorSurf, XCAFDoc_ColorGen, XCAFDoc_ColorCurv}) {
+          Quantity_ColorRGBA rgba;
+          if (colourTool->GetColor(shapeLabel, type, rgba)) {
+            Colour c;
+            c.r = rgba.GetRGB().Red();
+            c.g = rgba.GetRGB().Green();
+            c.b = rgba.GetRGB().Blue();
+            c.a = rgba.Alpha();
+            c.source = "cached_shape_colour";
+            c.materialSource = "face/subshape";
+            c.lookupPath = labelEntry(shapeLabel);
+            c.colourType = (type == XCAFDoc_ColorSurf ? "surface" : (type == XCAFDoc_ColorGen ? "generic" : "curve"));
+            c.fallbackReason.clear();
+            shapeColorCache[{S.TShape().get(), type}] = c;
+          } else {
+            Quantity_Color rgb;
+            if (colourTool->GetColor(shapeLabel, type, rgb)) {
+              Colour c;
+              c.r = rgb.Red();
+              c.g = rgb.Green();
+              c.b = rgb.Blue();
+              c.a = 1.0;
+              c.source = "cached_shape_colour";
+              c.materialSource = "face/subshape";
+              c.lookupPath = labelEntry(shapeLabel);
+              c.colourType = (type == XCAFDoc_ColorSurf ? "surface" : (type == XCAFDoc_ColorGen ? "generic" : "curve"));
+              c.fallbackReason.clear();
+              shapeColorCache[{S.TShape().get(), type}] = c;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 bool firstColourForShape(
     const Handle(XCAFDoc_ColorTool)& colourTool,
     const TopoDS_Shape& shape,
@@ -1898,6 +1964,26 @@ bool firstColourForShape(
     const std::string& materialSource,
     const std::string& lookupPath,
     Colour& colour) {
+  if (!globalDisableStyleCache && shape.TShape()) {
+    for (const auto& item : std::vector<std::pair<XCAFDoc_ColorType, std::string>>{
+             {XCAFDoc_ColorSurf, "surface"},
+             {XCAFDoc_ColorGen, "generic"},
+             {XCAFDoc_ColorCurv, "curve"}}) {
+      auto found = shapeColorCache.find({shape.TShape().get(), item.first});
+      if (found != shapeColorCache.end()) {
+        shapeColorCacheHits++;
+        colour = found->second;
+        colour.source = prefix + item.second;
+        colour.materialSource = materialSource;
+        colour.lookupPath = lookupPath;
+        colour.colourType = item.second;
+        colour.fallbackReason.clear();
+        return true;
+      }
+    }
+    shapeColorCacheMisses++;
+  }
+
   for (const auto& item : std::vector<std::pair<XCAFDoc_ColorType, std::string>>{
            {XCAFDoc_ColorSurf, "surface"},
            {XCAFDoc_ColorGen, "generic"},
@@ -4207,6 +4293,15 @@ int main(int argc, char** argv) {
     Handle(XCAFDoc_ColorTool) colourTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
     Handle(XCAFDoc_LayerTool) layerTool = XCAFDoc_DocumentTool::LayerTool(doc->Main());
 
+    globalDisableStyleCache = cliOptions.debugDisableStyleCache;
+    if (!globalDisableStyleCache) {
+      logLine("Building shape/subshape color cache start");
+      profiler.startStage("Build color cache");
+      buildColorCache(colourTool, shapeTool);
+      logLine("Building shape/subshape color cache end: cachedCount=" + std::to_string(shapeColorCache.size()));
+      profiler.endStage("Build color cache", {{"cached_shapes", std::to_string(shapeColorCache.size())}});
+    }
+
     RawStepStyleResolver rawStepStyles;
     if (!cliOptions.debugSkipRawStepStyles) {
       logLine("Parsing raw STEP presentation styles");
@@ -4310,6 +4405,8 @@ int main(int argc, char** argv) {
       {"styleCacheMisses", std::to_string(styleCacheMisses)},
       {"subshapeCacheHits", std::to_string(subshapeCacheHits)},
       {"subshapeCacheMisses", std::to_string(subshapeCacheMisses)},
+      {"shapeColorCacheHits", std::to_string(shapeColorCacheHits)},
+      {"shapeColorCacheMisses", std::to_string(shapeColorCacheMisses)},
       {"styledFaces", std::to_string(styledFacesCount)},
       {"fallbackColors", std::to_string(fallbackColorsCount)}
     });
@@ -4321,7 +4418,9 @@ int main(int argc, char** argv) {
     logLine("Cache statistics: styledFaceCacheHits=" + std::to_string(styleCacheHits) +
             " styledFaceCacheMisses=" + std::to_string(styleCacheMisses) +
             " subshapeCacheHits=" + std::to_string(subshapeCacheHits) +
-            " subshapeCacheMisses=" + std::to_string(subshapeCacheMisses));
+            " subshapeCacheMisses=" + std::to_string(subshapeCacheMisses) +
+            " shapeColorCacheHits=" + std::to_string(shapeColorCacheHits) +
+            " shapeColorCacheMisses=" + std::to_string(shapeColorCacheMisses));
     logLine("Color mapping statistics: styledFaces=" + std::to_string(styledFacesCount) +
             " fallbackColors=" + std::to_string(fallbackColorsCount));
 
