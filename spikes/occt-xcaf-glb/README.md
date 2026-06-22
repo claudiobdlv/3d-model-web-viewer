@@ -45,3 +45,15 @@ python3 spikes/occt-xcaf-glb/compare_simple_assembly.py \
 
 The runner uses Docker when available, otherwise it falls back to a local CMake
 build with OpenCascade development packages already installed.
+
+Validate naming invariants in a generated report with:
+
+```bash
+python3 spikes/occt-xcaf-glb/verify_name_regression.py /tmp/test1/xcaf-report.json \
+  --expect-display 'COPPER TUBE - 1/2"' \
+  --expect-display 'COPPER TUBE - 3"'
+
+python3 spikes/occt-xcaf-glb/verify_name_regression.py /tmp/u843/xcaf-report.json \
+  --layer-display-contains 'COPPER TUBE' \
+  --minimum-layer-boundaries 80
+```

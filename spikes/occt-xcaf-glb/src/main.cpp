@@ -146,6 +146,7 @@ struct MeshPrimitive {
   std::string referredLabelLayers;
   std::string ancestorLayers;
   std::string matchedSubshapeLayers;
+  std::string matchedSubshapeLabelPath;
   std::string candidateColours;
   std::string instanceLabelColour;
   std::string referredLabelColour;
@@ -1641,7 +1642,8 @@ bool matchingSubshapeColour(
     std::vector<LayerInfo>& layers,
     bool& matchedHasColour,
     bool& matchedHasLayerColour,
-    Colour& matchedLayerColour) {
+    Colour& matchedLayerColour,
+    std::string& matchedLabelPath) {
   for (const auto& candidate : candidates) {
     if (face.IsSame(candidate.shape)) {
       colour = candidate.colour;
@@ -1652,6 +1654,7 @@ bool matchingSubshapeColour(
       matchedHasColour = candidate.hasColour;
       matchedHasLayerColour = candidate.hasLayerColour;
       matchedLayerColour = candidate.layerColour;
+      matchedLabelPath = candidate.labelPath;
       return true;
     }
     for (TopExp_Explorer explorer(candidate.shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
@@ -1664,6 +1667,7 @@ bool matchingSubshapeColour(
         matchedHasColour = candidate.hasColour;
         matchedHasLayerColour = candidate.hasLayerColour;
         matchedLayerColour = candidate.layerColour;
+        matchedLabelPath = candidate.labelPath;
         return true;
       }
     }
@@ -2019,6 +2023,7 @@ void tessellateLabel(
     bool matchedSubshapeHasColour = false;
     bool matchedSubshapeHasLayerColour = false;
     Colour matchedSubshapeLayerColour;
+    std::string matchedSubshapeLabelPath;
     RawStepStyleMatch faceStepPresentationMatch;
     std::string faceGeometrySource = "simple shape";
     const bool faceHasStepPresentationColour =
@@ -2034,7 +2039,8 @@ void tessellateLabel(
                    matchedSubshapeLayers,
                    matchedSubshapeHasColour,
                    matchedSubshapeHasLayerColour,
-                   matchedSubshapeLayerColour) &&
+                   matchedSubshapeLayerColour,
+                   matchedSubshapeLabelPath) &&
                matchedSubshapeHasColour) {
       colour = faceColour;
       hasColour = true;
@@ -2089,21 +2095,26 @@ void tessellateLabel(
         objectName,
         safeName(parentProductName,
             safeName(referredName,
-                safeName(parentDisplayName, safeName(stepObjectName, safeName(layer, "Unnamed object"))))));
+                safeName(parentDisplayName, safeName(stepObjectName, safeName(primitiveLayer, "Unnamed object"))))));
     const std::string faceNameSource =
         !objectName.empty() ? "xcaf-label" :
         (!parentProductName.empty() ? "product" :
          (!referredName.empty() ? "xcaf-referred-label" :
           (!parentDisplayName.empty() ? "parent" :
            (!stepObjectName.empty() ? "step-manifold-solid-brep" :
-            (!layer.empty() ? "layer" : "unnamed")))));
+            (!primitiveLayer.empty() ? "layer" : "unnamed")))));
     const std::vector<std::string> faceNameCandidates = {
         objectName, referredName, parentDisplayName, parentProductName, stepObjectName,
-        faceStepPresentationMatch.representationName, layer,
+        faceStepPresentationMatch.representationName, primitiveLayer,
         labelName(label), referred.IsNull() ? "" : labelName(referred)};
     const std::string topologyKey =
-        faceHasStepPresentationColour ? faceStepPresentationMatch.styledTargetId : "";
-    const std::string selectableId = effectiveInstancePath;
+        faceHasStepPresentationColour
+            ? faceStepPresentationMatch.styledTargetId
+            : (faceNameSource == "layer" ? matchedSubshapeLabelPath : "");
+    const std::string selectableId = effectiveInstancePath +
+        (topologyKey.empty() ? "" : "/subshape/" + topologyKey);
+    const std::string stableTopologySuffix =
+        faceHasStepPresentationColour ? "/step-target/" + faceStepPresentationMatch.styledTargetId : "";
 
     const ExportObjectKey key = {
         labelPath,
@@ -2118,7 +2129,7 @@ void tessellateLabel(
       MeshPrimitive primitive;
       primitive.name = faceResolvedObjectName + " " + colour.source;
       primitive.labelPath = labelPath;
-      primitive.instancePath = effectiveInstancePath;
+      primitive.instancePath = selectableId;
       primitive.displayName = faceResolvedObjectName;
       primitive.resolvedObjectName = faceResolvedObjectName;
       primitive.objectName = objectName;
@@ -2152,6 +2163,7 @@ void tessellateLabel(
       primitive.referredLabelLayers = layerNames(referredLayers);
       primitive.ancestorLayers = layerNames(inheritedLayers);
       primitive.matchedSubshapeLayers = layerNames(matchedSubshapeLayers);
+      primitive.matchedSubshapeLabelPath = matchedSubshapeLabelPath;
       primitive.candidateColours = appendCandidateSummary(
           baseCandidateColours,
           "matchedSubshapeLayer",
@@ -2206,7 +2218,7 @@ void tessellateLabel(
       primitive.ancestorHasColour = hasInheritedColour;
       primitive.faceOrSubshapeHasColour = faceOrSubshapeHasColour;
       primitive.stableObjectId = selectableId + "/material/" + colourKey(colour) +
-          (topologyKey.empty() ? "" : "/step-target/" + topologyKey);
+          stableTopologySuffix;
       primitive.colour = colour;
       primitives.push_back(std::move(primitive));
       const std::size_t index = primitives.size() - 1;
@@ -2531,6 +2543,7 @@ void writeGlb(
     json << "\"referredLabelLayers\":"; writeString(json, primitive.referredLabelLayers); json << ",";
     json << "\"ancestorLayers\":"; writeString(json, primitive.ancestorLayers); json << ",";
     json << "\"matchedSubshapeLayers\":"; writeString(json, primitive.matchedSubshapeLayers); json << ",";
+    json << "\"matchedSubshapeLabelPath\":"; writeString(json, primitive.matchedSubshapeLabelPath); json << ",";
     json << "\"rawStepMappingConfidence\":"; writeString(json, primitive.rawStepMappingConfidence); json << ",";
     json << "\"rawStepStyledItemId\":"; writeString(json, primitive.rawStepStyledItemId); json << ",";
     json << "\"stepStyledItemId\":"; writeString(json, primitive.rawStepStyledItemId); json << ",";
@@ -3178,6 +3191,7 @@ void writeReport(
       out << "\"referredLabelLayers\": "; writeString(out, primitive.referredLabelLayers); out << ", ";
       out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
       out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
+      out << "\"matchedSubshapeLabelPath\": "; writeString(out, primitive.matchedSubshapeLabelPath); out << ", ";
       out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
       out << "\"rawStepMappingConfidence\": "; writeString(out, primitive.rawStepMappingConfidence); out << ", ";
       out << "\"rawStepStyledItemId\": "; writeString(out, primitive.rawStepStyledItemId); out << ", ";
@@ -3228,6 +3242,7 @@ void writeReport(
     out << "\"referredLabelLayers\": "; writeString(out, primitive.referredLabelLayers); out << ", ";
     out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
     out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
+    out << "\"matchedSubshapeLabelPath\": "; writeString(out, primitive.matchedSubshapeLabelPath); out << ", ";
     out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
     out << "\"rawStepMappingConfidence\": "; writeString(out, primitive.rawStepMappingConfidence); out << ", ";
     out << "\"rawStepStyledItemId\": "; writeString(out, primitive.rawStepStyledItemId); out << ", ";
@@ -3319,6 +3334,7 @@ void writeReport(
     out << "\"referredLabelLayers\": "; writeString(out, primitive.referredLabelLayers); out << ", ";
     out << "\"ancestorLayers\": "; writeString(out, primitive.ancestorLayers); out << ", ";
     out << "\"matchedSubshapeLayers\": "; writeString(out, primitive.matchedSubshapeLayers); out << ", ";
+    out << "\"matchedSubshapeLabelPath\": "; writeString(out, primitive.matchedSubshapeLabelPath); out << ", ";
     out << "\"candidateColours\": "; writeString(out, primitive.candidateColours); out << ", ";
     out << "\"rawStepMappingConfidence\": "; writeString(out, primitive.rawStepMappingConfidence); out << ", ";
     out << "\"rawStepStyledItemId\": "; writeString(out, primitive.rawStepStyledItemId); out << ", ";
