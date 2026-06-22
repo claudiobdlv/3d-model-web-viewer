@@ -54,6 +54,6 @@ python3 spikes/occt-xcaf-glb/verify_name_regression.py /tmp/test1/xcaf-report.js
   --expect-display 'COPPER TUBE - 3"'
 
 python3 spikes/occt-xcaf-glb/verify_name_regression.py /tmp/u843/xcaf-report.json \
-  --layer-display-contains 'COPPER TUBE' \
+  --layer-part-contains 'COPPER TUBE' \
   --minimum-layer-boundaries 80
 ```

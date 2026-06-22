@@ -11,7 +11,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("report", type=Path)
     parser.add_argument("--expect-display", action="append", default=[])
     parser.add_argument("--expect-display-contains", action="append", default=[])
-    parser.add_argument("--layer-display-contains")
+    parser.add_argument("--layer-part-contains")
+    parser.add_argument("--expected-part-prefix", default="COPPER TUBE -")
     parser.add_argument("--minimum-layer-boundaries", type=int, default=1)
     return parser.parse_args()
 
@@ -31,23 +32,26 @@ def main() -> int:
         if not any(expected.casefold() in value.casefold() for value in displays):
             raise AssertionError(f"missing display name containing: {expected!r}")
 
-    if args.layer_display_contains:
-        needle = args.layer_display_contains.casefold()
+    if args.layer_part_contains:
+        needle = args.layer_part_contains.casefold()
         matches = [
             item
             for item in objects
             if needle in str(item.get("layer", "")).casefold()
         ]
         if not matches:
-            raise AssertionError(f"no layer contains: {args.layer_display_contains!r}")
+            raise AssertionError(f"no layer contains: {args.layer_part_contains!r}")
         bad_names = [
             item
             for item in matches
-            if item.get("displayName") != item.get("layer") or item.get("nameSource") != "layer"
+            if item.get("displayName") != item.get("partName")
+            or item.get("partName") != item.get("matchedSubshapeName")
+            or item.get("nameSource") not in {"step-layer-target-brep", "xcaf-subshape"}
+            or not str(item.get("partName", "")).casefold().startswith(args.expected_part_prefix.casefold())
         ]
         if bad_names:
             raise AssertionError(
-                f"{len(bad_names)} matching layer objects did not use the layer fallback name"
+                f"{len(bad_names)} matching objects did not use their XCAF subshape part name"
             )
         boundaries = {
             str(item.get("matchedSubshapeLabelPath", ""))
@@ -67,7 +71,7 @@ def main() -> int:
         if len(selectable_ids) < len(boundaries):
             raise AssertionError("distinct matched subshapes were merged into selectable IDs")
         print(
-            f"layer fallback matches={len(matches)} "
+            f"part-name matches={len(matches)} "
             f"subshapeBoundaries={len(boundaries)} selectableIds={len(selectable_ids)}"
         )
 
