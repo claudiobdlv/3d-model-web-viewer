@@ -1911,48 +1911,68 @@ bool firstColourForLabel(
 }
 
 void buildColorCache(const Handle(XCAFDoc_ColorTool)& colourTool, const Handle(XCAFDoc_ShapeTool)& shapeTool) {
-  TDF_LabelSequence colors;
-  colourTool->GetColors(colors);
-  for (Standard_Integer i = 1; i <= colors.Length(); ++i) {
-    TDF_Label colorLabel = colors.Value(i);
-    TDF_LabelSequence shapes;
-    colourTool->GetShapesOfColor(colorLabel, shapes);
-    for (Standard_Integer j = 1; j <= shapes.Length(); ++j) {
-      TDF_Label shapeLabel = shapes.Value(j);
-      TopoDS_Shape S = shapeTool->GetShape(shapeLabel);
-      if (!S.IsNull() && S.TShape()) {
-        for (auto type : {XCAFDoc_ColorSurf, XCAFDoc_ColorGen, XCAFDoc_ColorCurv}) {
-          Quantity_ColorRGBA rgba;
-          if (colourTool->GetColor(shapeLabel, type, rgba)) {
+  std::set<std::string> visitedLabels;
+  
+  auto processLabel = [&](const TDF_Label& label) {
+    const std::string entry = labelEntry(label);
+    if (visitedLabels.find(entry) != visitedLabels.end()) {
+      return;
+    }
+    visitedLabels.insert(entry);
+    
+    TopoDS_Shape S = shapeTool->GetShape(label);
+    if (!S.IsNull() && S.TShape()) {
+      for (auto type : {XCAFDoc_ColorSurf, XCAFDoc_ColorGen, XCAFDoc_ColorCurv}) {
+        Quantity_ColorRGBA rgba;
+        if (colourTool->GetColor(label, type, rgba)) {
+          Colour c;
+          c.r = rgba.GetRGB().Red();
+          c.g = rgba.GetRGB().Green();
+          c.b = rgba.GetRGB().Blue();
+          c.a = rgba.Alpha();
+          c.source = "cached_shape_colour";
+          c.materialSource = "face/subshape";
+          c.lookupPath = entry;
+          c.colourType = (type == XCAFDoc_ColorSurf ? "surface" : (type == XCAFDoc_ColorGen ? "generic" : "curve"));
+          c.fallbackReason.clear();
+          shapeColorCache[{S.TShape().get(), type}] = c;
+        } else {
+          Quantity_Color rgb;
+          if (colourTool->GetColor(label, type, rgb)) {
             Colour c;
-            c.r = rgba.GetRGB().Red();
-            c.g = rgba.GetRGB().Green();
-            c.b = rgba.GetRGB().Blue();
-            c.a = rgba.Alpha();
+            c.r = rgb.Red();
+            c.g = rgb.Green();
+            c.b = rgb.Blue();
+            c.a = 1.0;
             c.source = "cached_shape_colour";
             c.materialSource = "face/subshape";
-            c.lookupPath = labelEntry(shapeLabel);
+            c.lookupPath = entry;
             c.colourType = (type == XCAFDoc_ColorSurf ? "surface" : (type == XCAFDoc_ColorGen ? "generic" : "curve"));
             c.fallbackReason.clear();
             shapeColorCache[{S.TShape().get(), type}] = c;
-          } else {
-            Quantity_Color rgb;
-            if (colourTool->GetColor(shapeLabel, type, rgb)) {
-              Colour c;
-              c.r = rgb.Red();
-              c.g = rgb.Green();
-              c.b = rgb.Blue();
-              c.a = 1.0;
-              c.source = "cached_shape_colour";
-              c.materialSource = "face/subshape";
-              c.lookupPath = labelEntry(shapeLabel);
-              c.colourType = (type == XCAFDoc_ColorSurf ? "surface" : (type == XCAFDoc_ColorGen ? "generic" : "curve"));
-              c.fallbackReason.clear();
-              shapeColorCache[{S.TShape().get(), type}] = c;
-            }
           }
         }
       }
+    }
+  };
+
+  TDF_LabelSequence shapes;
+  shapeTool->GetShapes(shapes);
+  for (Standard_Integer i = 1; i <= shapes.Length(); ++i) {
+    TDF_Label mainLabel = shapes.Value(i);
+    processLabel(mainLabel);
+    for (TDF_ChildIterator it(mainLabel, Standard_True); it.More(); it.Next()) {
+      processLabel(it.Value());
+    }
+  }
+
+  TDF_LabelSequence freeShapes;
+  shapeTool->GetFreeShapes(freeShapes);
+  for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
+    TDF_Label mainLabel = freeShapes.Value(i);
+    processLabel(mainLabel);
+    for (TDF_ChildIterator it(mainLabel, Standard_True); it.More(); it.Next()) {
+      processLabel(it.Value());
     }
   }
 }
