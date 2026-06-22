@@ -51,6 +51,25 @@
 #include <tuple>
 #include <vector>
 
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <unordered_map>
+#include <set>
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#else
+#include <unistd.h>
+#endif
+
 namespace {
 
 struct Colour {
@@ -306,24 +325,6 @@ struct RepeatedComponentGroup {
   std::vector<std::size_t> primitiveIndices;
 };
 
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include <unordered_map>
-#include <set>
-#include <Bnd_Box.hxx>
-#include <BRepBndLib.hxx>
-#include <TopTools_MapOfShape.hxx>
-#include <TopTools_DataMapOfShapeInteger.hxx>
-
-#if defined(_WIN32)
-#include <windows.h>
-#include <psapi.h>
-#pragma comment(lib, "psapi.lib")
-#else
-#include <unistd.h>
-#endif
 
 size_t getMemoryUsageBytes() {
 #if defined(_WIN32)
