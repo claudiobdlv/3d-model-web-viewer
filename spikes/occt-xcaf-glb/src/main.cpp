@@ -352,6 +352,7 @@ std::string shapeTypeName(const TopAbs_ShapeEnum type);
 std::string labelEntry(const TDF_Label& label);
 std::string readableLabelName(const TDF_Label& label);
 bool findLabelColour(const Handle(XCAFDoc_ColorTool)& colourTool, const TDF_Label& label, Colour& colour);
+void writeMaterialStyleProfile(const std::filesystem::path& path, const RawStepStyleResolver& styles, const Stats& stats);
 
 std::ofstream logOut;
 std::mutex logMutex;
@@ -763,48 +764,7 @@ void writeBodyInventory(const std::filesystem::path& path,
   out << "}\n";
 }
 
-void writeMaterialStyleProfile(const std::filesystem::path& path,
-                               const RawStepStyleResolver& styles,
-                               const Stats& stats) {
-  std::ofstream out(path);
-  if (!out) return;
-  out << "{\n";
-  out << "  \"summary\": {\n";
-  out << "    \"entities\": " << stats.rawStepEntities << ",\n";
-  out << "    \"styledItems\": " << stats.rawStepStyledItems << ",\n";
-  out << "    \"colours\": " << stats.rawStepColours << ",\n";
-  out << "    \"representationColours\": " << stats.rawStepRepresentationColours << ",\n";
-  out << "    \"colourUses\": " << stats.rawStepColourUses << ",\n";
-  out << "    \"ambiguousRejects\": " << stats.rawStepAmbiguousRepresentationRejects << ",\n";
-  out << "    \"broadRejects\": " << stats.rawStepBroadRepresentationRejects << "\n";
-  out << "  },\n";
-  out << "  \"colourAudit\": [\n";
-  size_t auditIndex = 0;
-  for (const auto& [id, audit] : styles.colourAudit()) {
-    out << "    {\n";
-    out << "      \"colourId\": \"" << jsonEscape(audit.colourId) << "\",\n";
-    out << "      \"colour\": [" << audit.colour.r << ", " << audit.colour.g << ", " << audit.colour.b << ", " << audit.colour.a << "],\n";
-    out << "      \"styledItemIds\": [\n";
-    for (size_t k = 0; k < audit.styledItemIds.size(); ++k) {
-      out << "        \"" << jsonEscape(audit.styledItemIds[k]) << "\"";
-      if (k + 1 < audit.styledItemIds.size()) out << ",";
-      out << "\n";
-    }
-    out << "      ],\n";
-    out << "      \"mappedObjectNames\": [\n";
-    for (size_t k = 0; k < audit.mappedObjectNames.size(); ++k) {
-      out << "        \"" << jsonEscape(audit.mappedObjectNames[k]) << "\"";
-      if (k + 1 < audit.mappedObjectNames.size()) out << ",";
-      out << "\n";
-    }
-    out << "      ]\n";
-    out << "    }";
-    if (++auditIndex < styles.colourAudit().size()) out << ",";
-    out << "\n";
-  }
-  out << "  ]\n";
-  out << "}\n";
-}
+
 
 std::string jsonEscape(const std::string& value) {
   std::ostringstream out;
@@ -4119,6 +4079,49 @@ void writeReport(
   out << "    \"Prototype writes one GLB node per component/material bucket, with duplicated triangle vertices to preserve sharp CAD normals and face colour identity.\",\n";
   out << "    \"Assembly hierarchy is flattened to renderable nodes; label paths and stableObjectId are preserved in node extras for later selection work.\",\n";
   out << "    \"Material rules are not used; uncoloured geometry receives a neutral grey fallback.\"\n";
+  out << "  ]\n";
+  out << "}\n";
+}
+
+void writeMaterialStyleProfile(const std::filesystem::path& path,
+                               const RawStepStyleResolver& styles,
+                               const Stats& stats) {
+  std::ofstream out(path);
+  if (!out) return;
+  out << "{\n";
+  out << "  \"summary\": {\n";
+  out << "    \"entities\": " << stats.rawStepEntities << ",\n";
+  out << "    \"styledItems\": " << stats.rawStepStyledItems << ",\n";
+  out << "    \"colours\": " << stats.rawStepColours << ",\n";
+  out << "    \"representationColours\": " << stats.rawStepRepresentationColours << ",\n";
+  out << "    \"colourUses\": " << stats.rawStepColourUses << ",\n";
+  out << "    \"ambiguousRejects\": " << stats.rawStepAmbiguousRepresentationRejects << ",\n";
+  out << "    \"broadRejects\": " << stats.rawStepBroadRepresentationRejects << "\n";
+  out << "  },\n";
+  out << "  \"colourAudit\": [\n";
+  size_t auditIndex = 0;
+  for (const auto& [id, audit] : styles.colourAudit()) {
+    out << "    {\n";
+    out << "      \"colourId\": \"" << jsonEscape(audit.colourId) << "\",\n";
+    out << "      \"colour\": [" << audit.colour.r << ", " << audit.colour.g << ", " << audit.colour.b << ", " << audit.colour.a << "],\n";
+    out << "      \"styledItemIds\": [\n";
+    for (size_t k = 0; k < audit.styledItemIds.size(); ++k) {
+      out << "        \"" << jsonEscape(audit.styledItemIds[k]) << "\"";
+      if (k + 1 < audit.styledItemIds.size()) out << ",";
+      out << "\n";
+    }
+    out << "      ],\n";
+    out << "      \"mappedObjectNames\": [\n";
+    for (size_t k = 0; k < audit.mappedObjectNames.size(); ++k) {
+      out << "        \"" << jsonEscape(audit.mappedObjectNames[k]) << "\"";
+      if (k + 1 < audit.mappedObjectNames.size()) out << ",";
+      out << "\n";
+    }
+    out << "      ]\n";
+    out << "    }";
+    if (++auditIndex < styles.colourAudit().size()) out << ",";
+    out << "\n";
+  }
   out << "  ]\n";
   out << "}\n";
 }
