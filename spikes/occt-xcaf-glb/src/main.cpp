@@ -232,6 +232,9 @@ struct MeshPrimitive {
       std::numeric_limits<float>::lowest()};
 };
 
+void computeWorldBounds(const std::array<float, 3>& localMin, const std::array<float, 3>& localMax, const gp_Trsf& transform, std::array<float, 3>& worldMin, std::array<float, 3>& worldMax);
+void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& renderShape, const std::string& instancePath);
+
 struct CachedGeometry {
   std::vector<float> positions;
   std::vector<float> normals;
