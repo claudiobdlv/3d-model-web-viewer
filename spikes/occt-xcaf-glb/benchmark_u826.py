@@ -179,12 +179,19 @@ def main():
     print("\n--- Running Merged GLB Creation ---")
     merged_glb = os.path.join(BENCH_DIR, "merged.glb")
     
-    # Run merge_runner.js via Node
+    # Run merge_runner.js via Node in Docker
+    container_merged_glb = merged_glb.replace("/home/claudio/projects/3d-model-web-viewer", "/work")
+    container_chunk_glbs = [g.replace("/home/claudio/projects/3d-model-web-viewer", "/work") for g in chunk_glbs]
+    
     node_cmd = [
+        "docker", "run", "--rm",
+        "-v", "/home/claudio/projects/3d-model-web-viewer:/work",
+        "-w", "/work",
+        "node:24",
         "node",
-        "/home/claudio/projects/3d-model-web-viewer/spikes/merge_runner.js",
-        merged_glb
-    ] + chunk_glbs
+        "spikes/merge_runner.js",
+        container_merged_glb
+    ] + container_chunk_glbs
     
     stdout, merge_time = run_cmd(node_cmd)
     print(f"Merge output:\n{stdout}")
