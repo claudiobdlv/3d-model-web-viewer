@@ -2098,6 +2098,7 @@ struct CliOptions {
   bool debugSkipRawStepStyles = false;
   bool debugDisableStyleCache = false;
   bool debugLegacyTransform = false;
+  bool enableMeshReuse = false;
 };
 
 CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
@@ -2135,6 +2136,10 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
       options.debugDisableStyleCache = true;
     } else if (arg == "--debug-legacy-transform") {
       options.debugLegacyTransform = true;
+    } else if (arg == "--enable-mesh-reuse") {
+      options.enableMeshReuse = true;
+    } else if (arg == "--debug-disable-mesh-reuse") {
+      options.enableMeshReuse = false;
     } else {
       throw std::runtime_error("Unknown argument: " + arg);
     }
@@ -4289,6 +4294,594 @@ void writeMaterialStyleProfile(const std::filesystem::path& path,
   out << "}\n";
 }
 
+struct LeafInstance {
+  TDF_Label label;
+  TDF_Label referred;
+  TopoDS_Shape sourceShape;
+  TopLoc_Location parentAccumulatedLocation;
+  TopLoc_Location childAccumulatedLocation;
+  std::string instancePath;
+  std::string displayName;
+  std::string parentChain;
+  std::string parentDisplayName;
+  std::string parentProductName;
+  std::vector<LayerInfo> inheritedLayers;
+  Colour inheritedColour;
+  bool hasInheritedColour = false;
+  std::string transformSource;
+};
+
+void collectLeafInstances(
+    const Handle(XCAFDoc_ShapeTool)& shapeTool,
+    const Handle(XCAFDoc_ColorTool)& colourTool,
+    const Handle(XCAFDoc_LayerTool)& layerTool,
+    const RawStepStyleResolver* rawStepStyles,
+    const CliOptions& cliOptions,
+    const TDF_Label& label,
+    const Quality& quality,
+    const std::string& instancePath,
+    const TopLoc_Location& accumulatedLocation,
+    const std::string& transformSource,
+    const bool hasInheritedColour,
+    const Colour& inheritedColour,
+    const std::vector<LayerInfo>& inheritedLayers,
+    const std::string& parentChain,
+    const std::string& parentDisplayName,
+    const std::string& parentProductName,
+    std::vector<LeafInstance>& leafInstances) {
+
+  TDF_LabelSequence children;
+  const std::string labelPath = labelEntry(label);
+  const std::string currentInstancePath = appendInstancePath(instancePath, labelPath);
+  TDF_Label currentReferred;
+  if (shapeTool->IsReference(label)) {
+    shapeTool->GetReferredShape(label, currentReferred);
+  }
+  const auto currentLayers = collectLabelAndReferredLayers(layerTool, label, currentReferred);
+  const auto childInheritedLayers = mergeLayers(inheritedLayers, currentLayers);
+  const std::string currentParentChain = appendChain(parentChain, labelPath);
+  bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
+  TopLoc_Location childAccumulatedLocation = accumulatedLocation;
+  std::string childTransformSource = transformSource;
+  if (!hasChildren && shapeTool->IsReference(label)) {
+    TDF_Label referred;
+    if (shapeTool->GetReferredShape(label, referred)) {
+      hasChildren = shapeTool->GetComponents(referred, children, Standard_False);
+      const TopLoc_Location referenceLocation = shapeLocation(shapeTool, label);
+      childAccumulatedLocation = accumulatedLocation * referenceLocation;
+      childTransformSource = "referred_assembly_instance";
+    }
+  }
+  const std::string rawProductName = rawStepStyles == nullptr ? "" : rawStepStyles->uniqueProductName();
+  const std::string currentProductName = safeName(parentProductName, hasChildren ? rawProductName : "");
+  const std::string currentDisplayName = safeName(
+      readableLabelName(label),
+      safeName(currentProductName, safeName(readableLabelName(currentReferred), parentDisplayName)));
+
+  if (hasChildren && children.Length() > 0) {
+    Colour childInherited = inheritedColour;
+    bool childHasInherited = hasInheritedColour;
+    if (firstColourForLabel(colourTool, label, "label_", "ancestor", childInherited)) {
+      childHasInherited = true;
+    } else if (shapeTool->IsReference(label)) {
+      TDF_Label referred;
+      if (shapeTool->GetReferredShape(label, referred) &&
+          firstColourForLabel(colourTool, referred, "referred_label_", "ancestor", childInherited)) {
+        childHasInherited = true;
+      }
+    }
+    for (Standard_Integer i = 1; i <= children.Length(); ++i) {
+      collectLeafInstances(
+          shapeTool,
+          colourTool,
+          layerTool,
+          rawStepStyles,
+          cliOptions,
+          children.Value(i),
+          quality,
+          currentInstancePath,
+          childAccumulatedLocation,
+          childTransformSource,
+          childHasInherited,
+          childInherited,
+          childInheritedLayers,
+          currentParentChain,
+          currentDisplayName,
+          currentProductName,
+          leafInstances);
+    }
+    return;
+  }
+
+  TDF_Label referred;
+  TopoDS_Shape sourceShape = shapeForLabel(shapeTool, label, referred);
+  if (sourceShape.IsNull()) {
+    return;
+  }
+
+  LeafInstance inst;
+  inst.label = label;
+  inst.referred = referred;
+  inst.sourceShape = sourceShape;
+  inst.parentAccumulatedLocation = accumulatedLocation;
+  inst.childAccumulatedLocation = accumulatedLocation * sourceShape.Location();
+  inst.instancePath = currentInstancePath;
+  inst.displayName = currentDisplayName;
+  inst.parentChain = parentChain;
+  inst.parentDisplayName = parentDisplayName;
+  inst.parentProductName = parentProductName;
+  inst.inheritedLayers = childInheritedLayers;
+  inst.inheritedColour = inheritedColour;
+  inst.hasInheritedColour = hasInheritedColour;
+  inst.transformSource = transformSource;
+  leafInstances.push_back(inst);
+}
+
+Colour determineInstanceColour(
+    const Handle(XCAFDoc_ColorTool)& colourTool,
+    const Handle(XCAFDoc_LayerTool)& layerTool,
+    const RawStepStyleResolver* rawStepStyles,
+    const CliOptions& cliOptions,
+    const LeafInstance& inst) {
+  Colour labelColour;
+  bool labelHasColour = findLabelColour(colourTool, inst.label, labelColour);
+  Colour owningShapeColour;
+  const bool owningShapeHasColour = firstColourForShape(colourTool, inst.sourceShape, "owning_shape_", "label", labelEntry(inst.label), owningShapeColour);
+
+  Colour referredColour;
+  const bool referredHasColour = inst.referred.IsNull() ? false : referredLabelColour(colourTool, inst.referred, referredColour);
+  
+  Colour ancestorCandidate;
+  const bool ancestorHasCandidateColour = nearestAncestorColour(inst.hasInheritedColour, inst.inheritedColour, ancestorCandidate);
+  
+  const auto instanceLayers = collectLayerInfos(layerTool, inst.label);
+  const auto referredLayers = inst.referred.IsNull() ? std::vector<LayerInfo>() : collectLayerInfos(layerTool, inst.referred);
+  const auto layers = mergeLayers(mergeLayers(instanceLayers, referredLayers), inst.inheritedLayers);
+  Colour layerCandidate;
+  const bool layerHasCandidateColour = layerColour(colourTool, layers, layerCandidate);
+
+  RawStepStyleMatch rawStepMatch;
+  RawStepStyleMatch rawStepRejectedMatch;
+  Colour rawStepColour;
+  const std::string displayName = inst.displayName;
+  const std::string objectName = readableLabelName(inst.label);
+  const std::string referredName = inst.referred.IsNull() ? "" : readableLabelName(inst.referred);
+  const std::string layer = firstLayerName(layers);
+  const std::string referredPath = inst.referred.IsNull() ? "" : labelEntry(inst.referred);
+  const std::string labelPath = labelEntry(inst.label);
+  const std::vector<std::string> rawStyleNames = {
+      displayName, referredName, objectName, labelName(inst.label), referredPath, labelPath};
+
+  const bool rawStepHasColour = !cliOptions.debugSkipRawStepStyles && rawStepStyles != nullptr &&
+      rawStepStyles->findForNames(
+          rawStyleNames,
+          rawStepMatch,
+          rawStepRejectedMatch);
+  if (rawStepHasColour) {
+    rawStepColour = rawStepMatch.colour;
+    if (cliOptions.colourMode.mode == ColourMode::StepPresentation) {
+      rawStepColour = linearizedStepPresentationColour(rawStepColour);
+      rawStepColour.source = "step_presentation_styled_item";
+      rawStepColour.materialSource = "step_presentation_styled_item";
+    }
+  }
+
+  Colour colour;
+  bool hasColour = labelHasColour;
+  if (hasColour) {
+    colour = labelColour;
+  } else if (owningShapeHasColour) {
+    colour = owningShapeColour;
+    hasColour = true;
+  } else if (referredHasColour) {
+    colour = referredColour;
+    hasColour = true;
+  } else if (rawStepHasColour && cliOptions.colourMode.applyRawStepStyles) {
+    colour = rawStepColour;
+    hasColour = true;
+  } else if (ancestorHasCandidateColour) {
+    colour = ancestorCandidate;
+    hasColour = true;
+  } else if (layerHasCandidateColour && cliOptions.colourMode.applyLayerColours) {
+    colour = layerCandidate;
+    hasColour = true;
+  }
+
+  if (!hasColour) {
+    colour = defaultColour(
+        cliOptions.colourMode.mode == ColourMode::XcafBaseline
+            ? "no direct XCAF face/subshape, owning label/body, referred/original label, instance/component label, or explicit inherited ancestor colour found; raw STEP styles and layer colours are diagnostic-only in xcaf-baseline"
+            : "no face/subshape, label, referred-label, ancestor, or layer colour found",
+        labelPath);
+  }
+  return colour;
+}
+
+bool hasFaceStyling(
+    const Handle(XCAFDoc_ShapeTool)& shapeTool,
+    const Handle(XCAFDoc_ColorTool)& colourTool,
+    const Handle(XCAFDoc_LayerTool)& layerTool,
+    const RawStepStyleResolver* rawStepStyles,
+    const CliOptions& cliOptions,
+    const LeafInstance& inst) {
+  const std::string displayName = inst.displayName;
+  const std::string objectName = readableLabelName(inst.label);
+  const std::string referredName = inst.referred.IsNull() ? "" : readableLabelName(inst.referred);
+  const std::string referredPath = inst.referred.IsNull() ? "" : labelEntry(inst.referred);
+  const std::string labelPath = labelEntry(inst.label);
+  const std::vector<std::string> rawStyleNames = {
+      displayName, referredName, objectName, labelName(inst.label), referredPath, labelPath};
+
+  RawStepStyleMatch rawStepRejectedMatch;
+  const auto styledTopologyColours = cliOptions.debugSkipRawStepStyles ? std::vector<StyledTopologyColour>() : mapStepPresentationToSubshapes(
+      rawStepStyles,
+      cliOptions.colourMode,
+      inst.sourceShape,
+      rawStyleNames,
+      rawStepRejectedMatch);
+  if (!styledTopologyColours.empty()) {
+    return true;
+  }
+
+  std::vector<SubshapeColourCandidate> subshapeColours;
+  collectColouredSubshapes(shapeTool, colourTool, layerTool, inst.label, "subshape", subshapeColours);
+  if (!inst.referred.IsNull()) {
+    collectColouredSubshapes(shapeTool, colourTool, layerTool, inst.referred, "referred_subshape", subshapeColours);
+  }
+  if (!subshapeColours.empty()) {
+    return true;
+  }
+
+  return false;
+}
+
+void writePrototypeReuseReport(
+    const std::filesystem::path& outputPath,
+    const std::vector<LeafInstance>& leafInstances,
+    const Handle(XCAFDoc_ShapeTool)& shapeTool,
+    const Handle(XCAFDoc_ColorTool)& colourTool,
+    const Handle(XCAFDoc_LayerTool)& layerTool,
+    const RawStepStyleResolver* rawStepStyles,
+    const CliOptions& cliOptions,
+    const Quality& quality) {
+
+  std::ofstream out(outputPath);
+  if (!out) {
+    throw std::runtime_error("Could not open prototype reuse report path for writing: " + outputPath.string());
+  }
+  out << std::fixed << std::setprecision(6);
+
+  struct ProtoGroup {
+    void* tshapePtr = nullptr;
+    int faceCount = 0;
+    int edgeCount = 0;
+    int uniqueTriangles = 0;
+    std::array<float, 6> localBbox = {0,0,0,0,0,0};
+    std::vector<std::size_t> instanceIndices;
+    std::set<std::string> materialSignatures;
+    bool isSafeForLocalReuse = true;
+    bool hasFaceStyling = false;
+    std::string unsafeReason;
+  };
+
+  std::map<void*, ProtoGroup> protoGroups;
+
+  // Track elapsed time for pre-meshing prototypes
+  const auto premeshStart = std::chrono::steady_clock::now();
+
+  for (std::size_t i = 0; i < leafInstances.size(); ++i) {
+    const auto& inst = leafInstances[i];
+    void* tshapePtr = inst.sourceShape.TShape().get();
+    
+    if (protoGroups.find(tshapePtr) == protoGroups.end()) {
+      ProtoGroup group;
+      group.tshapePtr = tshapePtr;
+      
+      TopoDS_Shape localShape = inst.sourceShape;
+      localShape.Location(TopLoc_Location());
+      
+      // Face and edge count
+      int fCount = 0;
+      for (TopExp_Explorer exp(localShape, TopAbs_FACE); exp.More(); exp.Next()) fCount++;
+      int eCount = 0;
+      for (TopExp_Explorer exp(localShape, TopAbs_EDGE); exp.More(); exp.Next()) eCount++;
+      group.faceCount = fCount;
+      group.edgeCount = eCount;
+
+      // Local bounding box
+      Bnd_Box box;
+      BRepBndLib::Add(localShape, box);
+      Standard_Real xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+      if (!box.IsVoid()) {
+        box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+      }
+      group.localBbox = { (float)xmin, (float)ymin, (float)zmin, (float)xmax, (float)ymax, (float)zmax };
+
+      // Pre-mesh the local shape once to get the exact triangle count
+      try {
+        BRepMesh_IncrementalMesh mesh(localShape, quality.linearDeflection, quality.relative, quality.angularDeflection, cliOptions.parallelMesh ? Standard_True : Standard_False);
+        mesh.Perform();
+        int triCount = 0;
+        for (TopExp_Explorer exp(localShape, TopAbs_FACE); exp.More(); exp.Next()) {
+          const TopoDS_Face face = TopoDS::Face(exp.Current());
+          TopLoc_Location loc;
+          Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+          if (!tri.IsNull()) {
+            triCount += tri->NbTriangles();
+          }
+        }
+        group.uniqueTriangles = triCount;
+      } catch (...) {
+        group.uniqueTriangles = 0;
+      }
+
+      protoGroups[tshapePtr] = group;
+    }
+
+    // Now populate instances
+    auto& group = protoGroups[tshapePtr];
+    group.instanceIndices.push_back(i);
+
+    // Compute color/material signature
+    bool faceStyle = hasFaceStyling(shapeTool, colourTool, layerTool, rawStepStyles, cliOptions, inst);
+    std::string matSig;
+    if (faceStyle) {
+      matSig = "face-styled";
+      group.hasFaceStyling = true;
+    } else {
+      Colour col = determineInstanceColour(colourTool, layerTool, rawStepStyles, cliOptions, inst);
+      matSig = "color:" + colourKey(col);
+    }
+    group.materialSignatures.insert(matSig);
+
+    double det = inst.childAccumulatedLocation.Transformation().Determinant();
+    bool isMirrored = (det < -1e-5);
+    
+    if (isMirrored || faceStyle) {
+      group.isSafeForLocalReuse = false;
+      if (isMirrored && faceStyle) {
+        group.unsafeReason = "mirrored transform and per-face styling present";
+      } else if (isMirrored) {
+        group.unsafeReason = "mirrored/negative determinant transform";
+      } else {
+        group.unsafeReason = "per-face styling present";
+      }
+    }
+  }
+
+  const auto premeshEnd = std::chrono::steady_clock::now();
+  double premeshMs = std::chrono::duration<double, std::milli>(premeshEnd - premeshStart).count();
+
+  // Sort groups by instance count descending
+  std::vector<void*> sortedTShapePtrs;
+  for (const auto& pair : protoGroups) {
+    sortedTShapePtrs.push_back(pair.first);
+  }
+  std::sort(sortedTShapePtrs.begin(), sortedTShapePtrs.end(), [&](void* a, void* b) {
+    return protoGroups[a].instanceIndices.size() > protoGroups[b].instanceIndices.size();
+  });
+
+  // Calculate high level stats
+  int totalInstances = static_cast<int>(leafInstances.size());
+  int uniquePrototypes = static_cast<int>(protoGroups.size());
+  int repeatedPrototypesCount = 0;
+  int maxInstanceCount = 0;
+
+  int instancedTrianglesAll = 0;
+  int uniqueTrianglesAll = 0;
+
+  for (const auto& pair : protoGroups) {
+    const auto& group = pair.second;
+    int instCount = static_cast<int>(group.instanceIndices.size());
+    instancedTrianglesAll += group.uniqueTriangles * instCount;
+    uniqueTrianglesAll += group.uniqueTriangles;
+
+    if (instCount > 1) {
+      repeatedPrototypesCount++;
+    }
+    maxInstanceCount = std::max(maxInstanceCount, instCount);
+  }
+
+  // Estimated duplicate tessellation waste
+  int wasteTriangles = 0;
+  int wasteShapesCount = 0;
+  for (const auto& pair : protoGroups) {
+    const auto& group = pair.second;
+    if (group.isSafeForLocalReuse && group.instanceIndices.size() > 1) {
+      int instances = static_cast<int>(group.instanceIndices.size());
+      wasteShapesCount += (instances - 1);
+      wasteTriangles += (instances - 1) * group.uniqueTriangles;
+    }
+  }
+
+  // Count non-reusable shapes by reason
+  int skippedMirroredCount = 0;
+  int skippedFaceStyledCount = 0;
+  for (const auto& inst : leafInstances) {
+    double det = inst.childAccumulatedLocation.Transformation().Determinant();
+    bool isMirrored = (det < -1e-5);
+    bool faceStyle = hasFaceStyling(shapeTool, colourTool, layerTool, rawStepStyles, cliOptions, inst);
+    if (isMirrored) skippedMirroredCount++;
+    else if (faceStyle) skippedFaceStyledCount++;
+  }
+
+  out << "{\n";
+  out << "  \"totalTraversedLeafInstances\": " << totalInstances << ",\n";
+  out << "  \"totalUniquePrototypeGeometryKeys\": " << uniquePrototypes << ",\n";
+  out << "  \"repeatedPrototypeCount\": " << repeatedPrototypesCount << ",\n";
+  out << "  \"maximumInstanceCount\": " << maxInstanceCount << ",\n";
+  out << "  \"premeshDurationMs\": " << premeshMs << ",\n";
+
+  // Triangle counts
+  out << "  \"renderedTrianglesTotal\": " << instancedTrianglesAll << ",\n";
+  out << "  \"uniqueStoredTrianglesTotal\": " << uniqueTrianglesAll << ",\n";
+
+  // Waste section
+  out << "  \"estimatedDuplicateTessellationWaste\": {\n";
+  out << "    \"shapesThatCouldBeReused\": " << wasteShapesCount << ",\n";
+  out << "    \"trianglesThatCouldBeSaved\": " << wasteTriangles << ",\n";
+  out << "    \"shapesCannotBeReused\": {\n";
+  out << "      \"mirroredOrNegativeTransform\": " << skippedMirroredCount << ",\n";
+  out << "      \"perFaceStyling\": " << skippedFaceStyledCount << "\n";
+  out << "    }\n";
+  out << "  },\n";
+
+  // Groups same material
+  out << "  \"groupsSameGeometrySameMaterial\": [\n";
+  int sameGroupIndex = 0;
+  for (void* ptr : sortedTShapePtrs) {
+    const auto& group = protoGroups[ptr];
+    if (group.instanceIndices.size() > 1 && group.materialSignatures.size() == 1 && group.isSafeForLocalReuse) {
+      if (sameGroupIndex > 0) out << ",\n";
+      out << "    {\n";
+      out << "      \"prototypeKey\": \"TShapePtr:" << ptr << "|Preset:" << quality.name << "|Safe:true\",\n";
+      out << "      \"instanceCount\": " << group.instanceIndices.size() << ",\n";
+      out << "      \"materialSignature\": "; writeString(out, *group.materialSignatures.begin()); out << ",\n";
+      out << "      \"uniqueTriangles\": " << group.uniqueTriangles << ",\n";
+      out << "      \"instancedTriangles\": " << (group.uniqueTriangles * group.instanceIndices.size()) << ",\n";
+      out << "      \"displayNameExample\": "; writeString(out, leafInstances[group.instanceIndices[0]].displayName); out << ",\n";
+      out << "      \"pathsExamples\": [\n";
+      for (size_t k = 0; k < std::min(group.instanceIndices.size(), size_t(5)); ++k) {
+        out << "        "; writeString(out, leafInstances[group.instanceIndices[k]].instancePath);
+        if (k + 1 < std::min(group.instanceIndices.size(), size_t(5))) out << ",";
+        out << "\n";
+      }
+      out << "      ]\n";
+      out << "    }";
+      sameGroupIndex++;
+    }
+  }
+  out << "\n  ],\n";
+
+  // Groups diff material
+  out << "  \"groupsSameGeometryDifferentMaterial\": [\n";
+  int diffGroupIndex = 0;
+  for (void* ptr : sortedTShapePtrs) {
+    const auto& group = protoGroups[ptr];
+    if (group.instanceIndices.size() > 1 && group.materialSignatures.size() > 1 && group.isSafeForLocalReuse) {
+      if (diffGroupIndex > 0) out << ",\n";
+      out << "    {\n";
+      out << "      \"prototypeKey\": \"TShapePtr:" << ptr << "|Preset:" << quality.name << "|Safe:true\",\n";
+      out << "      \"instanceCount\": " << group.instanceIndices.size() << ",\n";
+      out << "      \"materialSignaturesCount\": " << group.materialSignatures.size() << ",\n";
+      out << "      \"materialSignatures\": [\n";
+      size_t matIdx = 0;
+      for (const auto& sig : group.materialSignatures) {
+        out << "        "; writeString(out, sig);
+        if (++matIdx < group.materialSignatures.size()) out << ",";
+        out << "\n";
+      }
+      out << "      ],\n";
+      out << "      \"uniqueTriangles\": " << group.uniqueTriangles << ",\n";
+      out << "      \"instancedTriangles\": " << (group.uniqueTriangles * group.instanceIndices.size()) << ",\n";
+      out << "      \"displayNameExample\": "; writeString(out, leafInstances[group.instanceIndices[0]].displayName); out << ",\n";
+      out << "      \"pathsExamples\": [\n";
+      for (size_t k = 0; k < std::min(group.instanceIndices.size(), size_t(5)); ++k) {
+        out << "        "; writeString(out, leafInstances[group.instanceIndices[k]].instancePath);
+        if (k + 1 < std::min(group.instanceIndices.size(), size_t(5))) out << ",";
+        out << "\n";
+      }
+      out << "      ]\n";
+      out << "    }";
+      diffGroupIndex++;
+    }
+  }
+  out << "\n  ],\n";
+
+  // Groups mirrored
+  out << "  \"groupsSameGeometryMirrored\": [\n";
+  int mirroredGroupIndex = 0;
+  for (void* ptr : sortedTShapePtrs) {
+    const auto& group = protoGroups[ptr];
+    bool hasMirroredInstance = false;
+    for (size_t idx : group.instanceIndices) {
+      double det = leafInstances[idx].childAccumulatedLocation.Transformation().Determinant();
+      if (det < -1e-5) {
+        hasMirroredInstance = true;
+        break;
+      }
+    }
+    if (group.instanceIndices.size() > 1 && hasMirroredInstance) {
+      if (mirroredGroupIndex > 0) out << ",\n";
+      out << "    {\n";
+      out << "      \"prototypeKey\": \"TShapePtr:" << ptr << "|Preset:" << quality.name << "|Safe:false\",\n";
+      out << "      \"instanceCount\": " << group.instanceIndices.size() << ",\n";
+      out << "      \"uniqueTriangles\": " << group.uniqueTriangles << ",\n";
+      out << "      \"instancedTriangles\": " << (group.uniqueTriangles * group.instanceIndices.size()) << ",\n";
+      out << "      \"displayNameExample\": "; writeString(out, leafInstances[group.instanceIndices[0]].displayName); out << ",\n";
+      out << "      \"pathsExamples\": [\n";
+      for (size_t k = 0; k < std::min(group.instanceIndices.size(), size_t(5)); ++k) {
+        out << "        "; writeString(out, leafInstances[group.instanceIndices[k]].instancePath);
+        if (k + 1 < std::min(group.instanceIndices.size(), size_t(5))) out << ",";
+        out << "\n";
+      }
+      out << "      ]\n";
+      out << "    }";
+      mirroredGroupIndex++;
+    }
+  }
+  out << "\n  ],\n";
+
+  // Groups unsafe
+  out << "  \"groupsSameGeometryUnsafeToReuse\": [\n";
+  int unsafeGroupIndex = 0;
+  for (void* ptr : sortedTShapePtrs) {
+    const auto& group = protoGroups[ptr];
+    if (group.instanceIndices.size() > 1 && !group.isSafeForLocalReuse) {
+      if (unsafeGroupIndex > 0) out << ",\n";
+      out << "    {\n";
+      out << "      \"prototypeKey\": \"TShapePtr:" << ptr << "|Preset:" << quality.name << "|Safe:false\",\n";
+      out << "      \"instanceCount\": " << group.instanceIndices.size() << ",\n";
+      out << "      \"unsafeReason\": "; writeString(out, group.unsafeReason); out << ",\n";
+      out << "      \"uniqueTriangles\": " << group.uniqueTriangles << ",\n";
+      out << "      \"instancedTriangles\": " << (group.uniqueTriangles * group.instanceIndices.size()) << ",\n";
+      out << "      \"displayNameExample\": "; writeString(out, leafInstances[group.instanceIndices[0]].displayName); out << ",\n";
+      out << "      \"pathsExamples\": [\n";
+      for (size_t k = 0; k < std::min(group.instanceIndices.size(), size_t(5)); ++k) {
+        out << "        "; writeString(out, leafInstances[group.instanceIndices[k]].instancePath);
+        if (k + 1 < std::min(group.instanceIndices.size(), size_t(5))) out << ",";
+        out << "\n";
+      }
+      out << "      ]\n";
+      out << "    }";
+      unsafeGroupIndex++;
+    }
+  }
+  out << "\n  ],\n";
+
+  // Top 50 repeated
+  out << "  \"topRepeatedPrototypes\": [\n";
+  int printedCount = 0;
+  for (void* ptr : sortedTShapePtrs) {
+    const auto& group = protoGroups[ptr];
+    if (group.instanceIndices.size() > 1) {
+      if (printedCount > 0) out << ",\n";
+      out << "    {\n";
+      out << "      \"prototypeKey\": \"TShapePtr:" << ptr << "|Preset:" << quality.name << "|Safe:" << (group.isSafeForLocalReuse ? "true" : "false") << "\",\n";
+      out << "      \"instanceCount\": " << group.instanceIndices.size() << ",\n";
+      out << "      \"faceCount\": " << group.faceCount << ",\n";
+      out << "      \"edgeCount\": " << group.edgeCount << ",\n";
+      out << "      \"uniqueTriangles\": " << group.uniqueTriangles << ",\n";
+      out << "      \"instancedTriangles\": " << (group.uniqueTriangles * group.instanceIndices.size()) << ",\n";
+      out << "      \"materialSignaturesCount\": " << group.materialSignatures.size() << ",\n";
+      out << "      \"displayNameExample\": "; writeString(out, leafInstances[group.instanceIndices[0]].displayName); out << ",\n";
+      out << "      \"localBbox\": [" << group.localBbox[0] << "," << group.localBbox[1] << "," << group.localBbox[2] << ","
+          << group.localBbox[3] << "," << group.localBbox[4] << "," << group.localBbox[5] << "],\n";
+      out << "      \"pathsExamples\": [\n";
+      for (size_t k = 0; k < std::min(group.instanceIndices.size(), size_t(3)); ++k) {
+        out << "        "; writeString(out, leafInstances[group.instanceIndices[k]].instancePath);
+        if (k + 1 < std::min(group.instanceIndices.size(), size_t(3))) out << ",";
+        out << "\n";
+      }
+      out << "      ]\n";
+      out << "    }";
+      if (++printedCount >= 50) break;
+    }
+  }
+  out << "\n  ]\n";
+  out << "}\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -4446,6 +5039,37 @@ int main(int argc, char** argv) {
     logLine("Recursive XCAF label traversal start");
     watchdog.setStage("Applying styles");
     profiler.startStage("XCAF label traversal");
+
+    // PHASE 1: Collect leaf instances and generate prototype-reuse-report.json
+    logLine("Collecting leaf instances for repeated geometry audit...");
+    std::vector<LeafInstance> leafInstances;
+    Colour noInheritedColour;
+    std::vector<LayerInfo> noInheritedLayers;
+    for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
+      collectLeafInstances(
+          shapeTool,
+          colourTool,
+          layerTool,
+          &rawStepStyles,
+          cliOptions,
+          freeShapes.Value(i),
+          quality,
+          "",
+          TopLoc_Location(),
+          "label_shape_location",
+          false,
+          noInheritedColour,
+          noInheritedLayers,
+          "",
+          "",
+          "",
+          leafInstances);
+    }
+    logLine("Leaf instances collected: " + std::to_string(leafInstances.size()));
+
+    logLine("Writing prototype-reuse-report.json...");
+    writePrototypeReuseReport(outputDir / "prototype-reuse-report.json", leafInstances, shapeTool, colourTool, layerTool, &rawStepStyles, cliOptions, quality);
+    logLine("prototype-reuse-report.json written successfully.");
     
     countLeafLabels(shapeTool, freeShapes, totalShapesToMesh);
     logLine("Total leaf shapes to mesh: " + std::to_string(totalShapesToMesh));
