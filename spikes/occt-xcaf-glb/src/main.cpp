@@ -4634,8 +4634,7 @@ void writePrototypeReuseReport(
     }
     group.materialSignatures.insert(matSig);
 
-    double det = inst.childAccumulatedLocation.Transformation().Determinant();
-    bool isMirrored = (det < -1e-5);
+    bool isMirrored = inst.childAccumulatedLocation.Transformation().IsNegative();
     
     if (isMirrored || faceStyle) {
       group.isSafeForLocalReuse = false;
@@ -4698,8 +4697,7 @@ void writePrototypeReuseReport(
   int skippedMirroredCount = 0;
   int skippedFaceStyledCount = 0;
   for (const auto& inst : leafInstances) {
-    double det = inst.childAccumulatedLocation.Transformation().Determinant();
-    bool isMirrored = (det < -1e-5);
+    bool isMirrored = inst.childAccumulatedLocation.Transformation().IsNegative();
     bool faceStyle = hasFaceStyling(shapeTool, colourTool, layerTool, rawStepStyles, cliOptions, inst);
     if (isMirrored) skippedMirroredCount++;
     else if (faceStyle) skippedFaceStyledCount++;
@@ -4795,8 +4793,7 @@ void writePrototypeReuseReport(
     const auto& group = protoGroups[ptr];
     bool hasMirroredInstance = false;
     for (size_t idx : group.instanceIndices) {
-      double det = leafInstances[idx].childAccumulatedLocation.Transformation().Determinant();
-      if (det < -1e-5) {
+      if (leafInstances[idx].childAccumulatedLocation.Transformation().IsNegative()) {
         hasMirroredInstance = true;
         break;
       }
@@ -5074,8 +5071,6 @@ int main(int argc, char** argv) {
     countLeafLabels(shapeTool, freeShapes, totalShapesToMesh);
     logLine("Total leaf shapes to mesh: " + std::to_string(totalShapesToMesh));
 
-    Colour noInheritedColour;
-    std::vector<LayerInfo> noInheritedLayers;
     for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
       traverse(
           shapeTool,
