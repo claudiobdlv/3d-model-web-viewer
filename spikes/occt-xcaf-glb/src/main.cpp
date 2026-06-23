@@ -1605,6 +1605,8 @@ class RawStepStyleResolver {
       strongGroupCount += 1;
       if (strongGroupCount == 1) {
         uniqueGroup = strongCandidates;
+      } else {
+        break;
       }
     }
     if (strongGroupCount != 1) {
@@ -3246,14 +3248,15 @@ void tessellateLabel(
       primitive.max = cached.max;
       primitive.faceCount = cached.faceCount;
       computeWorldBounds(primitive.min, primitive.max, primitive.transform, primitive.worldMin, primitive.worldMax);
-      validateWorldBounds(primitive, renderShape, effectiveInstancePath);
 
       // Perform transform audit for the first 50 instances
       static int auditInstancesCount = 0;
       if (auditInstancesCount < 50) {
         auditInstancesCount++;
+        validateWorldBounds(primitive, renderShape, effectiveInstancePath);
         
         std::array<float, 3> reusedWorldMin = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+
         std::array<float, 3> reusedWorldMax = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
         for (std::size_t vi = 0; vi < cached.positions.size(); vi += 3) {
           gp_Pnt p(cached.positions[vi], cached.positions[vi+1], cached.positions[vi+2]);
