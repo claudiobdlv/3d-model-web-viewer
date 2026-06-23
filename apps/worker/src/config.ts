@@ -15,6 +15,13 @@ export type WorkerConfig = {
   runOnce: boolean;
   keepWorkerOutput: boolean;
   maxModelArtifactBytes: number;
+  largeStepChunkingMode: "disabled" | "direct-filter";
+  largeStepFileSizeThresholdMb: number;
+  largeStepLeafCountThreshold: number;
+  largeStepFaceCountThreshold: number;
+  largeStepTargetChunks: number;
+  largeStepMaxConcurrentChunks: number;
+  largeStepChunkFallbackMode: "fail" | "full-conversion";
 };
 
 export function loadConfig(argv = process.argv): WorkerConfig {
@@ -43,6 +50,16 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     throw new Error("GLB_OPTIMIZATION_MODE must be disabled or meshopt.");
   }
 
+  const largeStepChunkingMode = process.env.LARGE_STEP_CHUNKING_MODE || "disabled";
+  if (!["disabled", "direct-filter"].includes(largeStepChunkingMode)) {
+    throw new Error("LARGE_STEP_CHUNKING_MODE must be disabled or direct-filter.");
+  }
+
+  const largeStepChunkFallbackMode = process.env.LARGE_STEP_CHUNK_FALLBACK_MODE || "fail";
+  if (!["fail", "full-conversion"].includes(largeStepChunkFallbackMode)) {
+    throw new Error("LARGE_STEP_CHUNK_FALLBACK_MODE must be fail or full-conversion.");
+  }
+
   return {
     serverUrl: trimTrailingSlash(process.env.SERVER_URL || "http://localhost:3009"),
     token,
@@ -65,7 +82,34 @@ export function loadConfig(argv = process.argv): WorkerConfig {
       process.env.MAX_MODEL_ARTIFACT_BYTES,
       262144000,
       "MAX_MODEL_ARTIFACT_BYTES"
-    )
+    ),
+    largeStepChunkingMode: largeStepChunkingMode as "disabled" | "direct-filter",
+    largeStepFileSizeThresholdMb: positiveInteger(
+      process.env.LARGE_STEP_FILE_SIZE_THRESHOLD_MB,
+      80,
+      "LARGE_STEP_FILE_SIZE_THRESHOLD_MB"
+    ),
+    largeStepLeafCountThreshold: positiveInteger(
+      process.env.LARGE_STEP_LEAF_COUNT_THRESHOLD,
+      2000,
+      "LARGE_STEP_LEAF_COUNT_THRESHOLD"
+    ),
+    largeStepFaceCountThreshold: positiveInteger(
+      process.env.LARGE_STEP_FACE_COUNT_THRESHOLD,
+      50000,
+      "LARGE_STEP_FACE_COUNT_THRESHOLD"
+    ),
+    largeStepTargetChunks: positiveInteger(
+      process.env.LARGE_STEP_TARGET_CHUNKS,
+      3,
+      "LARGE_STEP_TARGET_CHUNKS"
+    ),
+    largeStepMaxConcurrentChunks: positiveInteger(
+      process.env.LARGE_STEP_MAX_CONCURRENT_CHUNKS,
+      3,
+      "LARGE_STEP_MAX_CONCURRENT_CHUNKS"
+    ),
+    largeStepChunkFallbackMode: largeStepChunkFallbackMode as "fail" | "full-conversion"
   };
 }
 
