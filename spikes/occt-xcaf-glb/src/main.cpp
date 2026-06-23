@@ -2151,6 +2151,7 @@ struct CliOptions {
   bool debugDisableStyleCache = false;
   bool debugLegacyTransform = false;
   bool enableMeshReuse = false;
+  bool generatePrototypeReport = false;
 };
 
 CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
@@ -2192,6 +2193,8 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
       options.enableMeshReuse = true;
     } else if (arg == "--debug-disable-mesh-reuse") {
       options.enableMeshReuse = false;
+    } else if (arg == "--generate-prototype-report") {
+      options.generatePrototypeReport = true;
     } else {
       throw std::runtime_error("Unknown argument: " + arg);
     }
@@ -5509,9 +5512,11 @@ int main(int argc, char** argv) {
     }
     logLine("Leaf instances collected: " + std::to_string(leafInstances.size()));
 
-    logLine("Writing prototype-reuse-report.json...");
-    writePrototypeReuseReport(outputDir / "prototype-reuse-report.json", leafInstances, shapeTool, colourTool, layerTool, &rawStepStyles, cliOptions, quality);
-    logLine("prototype-reuse-report.json written successfully.");
+    if (cliOptions.generatePrototypeReport) {
+      logLine("Writing prototype-reuse-report.json...");
+      writePrototypeReuseReport(outputDir / "prototype-reuse-report.json", leafInstances, shapeTool, colourTool, layerTool, &rawStepStyles, cliOptions, quality);
+      logLine("prototype-reuse-report.json written successfully.");
+    }
     
     countLeafLabels(shapeTool, freeShapes, totalShapesToMesh);
     logLine("Total leaf shapes to mesh: " + std::to_string(totalShapesToMesh));
