@@ -1832,6 +1832,13 @@ double bboxDiagonal(const MeshPrimitive& primitive) {
   return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+double worldBboxDiagonal(const MeshPrimitive& primitive) {
+  const double dx = static_cast<double>(primitive.worldMax[0]) - primitive.worldMin[0];
+  const double dy = static_cast<double>(primitive.worldMax[1]) - primitive.worldMin[1];
+  const double dz = static_cast<double>(primitive.worldMax[2]) - primitive.worldMin[2];
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 std::array<float, 3> emptyMinBounds() {
   return {
       std::numeric_limits<float>::max(),
@@ -4239,8 +4246,8 @@ void writeReport(
   std::array<float, 3> globalMax = emptyMaxBounds();
   for (const auto& primitive : primitives) {
     for (int axis = 0; axis < 3; ++axis) {
-      globalMin[axis] = std::min(globalMin[axis], primitive.min[axis]);
-      globalMax[axis] = std::max(globalMax[axis], primitive.max[axis]);
+      globalMin[axis] = std::min(globalMin[axis], primitive.worldMin[axis]);
+      globalMax[axis] = std::max(globalMax[axis], primitive.worldMax[axis]);
     }
   }
   std::vector<std::size_t> byTriangles(primitives.size());
@@ -4253,7 +4260,7 @@ void writeReport(
     return primitives[a].indices.size() > primitives[b].indices.size();
   });
   std::sort(byBounds.begin(), byBounds.end(), [&](const std::size_t a, const std::size_t b) {
-    return bboxDiagonal(primitives[a]) > bboxDiagonal(primitives[b]);
+    return worldBboxDiagonal(primitives[a]) > worldBboxDiagonal(primitives[b]);
   });
   out << "{\n";
   out << "  \"inputFile\": "; writeString(out, inputPath); out << ",\n";
@@ -4675,9 +4682,9 @@ void writeReport(
     out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
     out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
     out << "\"layer\": "; writeString(out, primitive.layer); out << ", ";
-    out << "\"diagonal\": " << bboxDiagonal(primitive) << ", ";
-    out << "\"min\": "; writeVec3(out, primitive.min); out << ", ";
-    out << "\"max\": "; writeVec3(out, primitive.max);
+    out << "\"diagonal\": " << worldBboxDiagonal(primitive) << ", ";
+    out << "\"min\": "; writeVec3(out, primitive.worldMin); out << ", ";
+    out << "\"max\": "; writeVec3(out, primitive.worldMax);
     out << "}" << (i + 1 < topBoundsCount ? "," : "") << "\n";
   }
   out << "  ],\n";
@@ -4756,7 +4763,8 @@ void writeReport(
     out << "\"ancestorHasColour\": " << (primitive.ancestorHasColour ? "true" : "false") << ", ";
     out << "\"faceOrSubshapeHasColour\": " << (primitive.faceOrSubshapeHasColour ? "true" : "false") << ", ";
     out << "\"faces\": " << primitive.faceCount << ", ";
-    out << "\"boundingBox\": {\"min\": "; writeVec3(out, primitive.min); out << ", \"max\": "; writeVec3(out, primitive.max); out << ", \"diagonal\": " << bboxDiagonal(primitive) << "}, ";
+    out << "\"boundingBox\": {\"min\": "; writeVec3(out, primitive.worldMin); out << ", \"max\": "; writeVec3(out, primitive.worldMax); out << ", \"diagonal\": " << worldBboxDiagonal(primitive) << "}, ";
+    out << "\"localBoundingBox\": {\"min\": "; writeVec3(out, primitive.min); out << ", \"max\": "; writeVec3(out, primitive.max); out << ", \"diagonal\": " << bboxDiagonal(primitive) << "}, ";
     out << "\"triangles\": " << (primitive.indices.size() / 3);
     out << "}" << (i + 1 < primitives.size() ? "," : "") << "\n";
   }
