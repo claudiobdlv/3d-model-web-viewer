@@ -116,7 +116,14 @@ async function processJob(job: WorkerJob): Promise<void> {
       quality,
       glbOptimizationMode: config.glbOptimizationMode,
       signal: controller.signal,
-      onProgress: (percent, label) => client.updateProgress(job.id, percent, label)
+      onProgress: (percent, label) => client.updateProgress(job.id, percent, label),
+      largeStepChunkingMode: config.largeStepChunkingMode,
+      largeStepFileSizeThresholdMb: config.largeStepFileSizeThresholdMb,
+      largeStepLeafCountThreshold: config.largeStepLeafCountThreshold,
+      largeStepFaceCountThreshold: config.largeStepFaceCountThreshold,
+      largeStepTargetChunks: config.largeStepTargetChunks,
+      largeStepMaxConcurrentChunks: config.largeStepMaxConcurrentChunks,
+      largeStepChunkFallbackMode: config.largeStepChunkFallbackMode
     });
 
     if (controller.signal.aborted) throw new DOMException("Conversion cancelled.", "AbortError");
