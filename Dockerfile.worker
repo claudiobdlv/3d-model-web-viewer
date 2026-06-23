@@ -32,7 +32,8 @@ COPY spikes/occt-xcaf-glb ./spikes/occt-xcaf-glb
 RUN cmake -S /app/spikes/occt-xcaf-glb -B /app/spikes/occt-xcaf-glb/build -DCMAKE_BUILD_TYPE=Release \
   && cmake --build /app/spikes/occt-xcaf-glb/build --parallel \
   && mkdir -p /app/bin \
-  && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-to-glb /app/bin/xcaf-step-to-glb
+  && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-to-glb /app/bin/xcaf-step-to-glb \
+  && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-extractor /app/bin/xcaf-step-extractor
 
 WORKDIR /app/apps/worker
 
