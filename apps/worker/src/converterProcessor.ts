@@ -319,17 +319,22 @@ async function runXcafBaselineConverter(input: {
   if (process.env.DEBUG_LEGACY_TRANSFORM === "true") {
     args.push("--debug-legacy-transform");
   }
-  if (process.env.XCAF_ENABLE_MESH_REUSE === "true") {
-    args.push("--enable-mesh-reuse");
-  }
-  if (process.env.DEBUG_DISABLE_MESH_REUSE === "true") {
+
+  // Mesh reuse is ON by default. Set DEBUG_DISABLE_MESH_REUSE=true to kill-switch it.
+  const meshReuseKillSwitch = process.env.DEBUG_DISABLE_MESH_REUSE === "true";
+  if (meshReuseKillSwitch) {
+    console.log("Mesh reuse: disabled (kill switch DEBUG_DISABLE_MESH_REUSE=true)");
     args.push("--debug-disable-mesh-reuse");
+  } else {
+    console.log("Mesh reuse: enabled (default)");
+    args.push("--enable-mesh-reuse");
   }
 
   await spawnProcess(input.xcafConverterBin, args, input.signal, input.onProgress);
 
   const conversionLogPath = path.join(input.outputDir, "conversion.log");
   const existingLog = await fs.promises.readFile(conversionLogPath, "utf8").catch(() => "");
+  const meshReuseMode = meshReuseKillSwitch ? "disabled (kill switch)" : "enabled (default)";
   const header = [
     `Converter backend: xcaf-baseline`,
     `Input path: ${input.sourcePath}`,
@@ -339,6 +344,7 @@ async function runXcafBaselineConverter(input: {
     `Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`,
     `XCAF colour mode: ${input.xcafColourMode}`,
     `Colour space: raw`,
+    `Mesh reuse: ${meshReuseMode}`,
     `Material rules: disabled for xcaf-baseline`,
     ""
   ].join("\n");
@@ -484,6 +490,14 @@ async function writeXcafCompatibilityFiles(input: {
     materialCount: report.summary?.materialCount ?? 0,
     processingSeconds: report.summary?.conversionSeconds ?? 0,
     xcafSummary: report.summary ?? {},
+    meshReuse: {
+      enabled: report.summary?.reusedInstances !== undefined,
+      reusedInstances: report.summary?.reusedInstances ?? null,
+      freshInstances: report.summary?.freshInstances ?? null,
+      tessellationCacheHits: report.summary?.tessellationCacheHits ?? null,
+      tessellationCacheMisses: report.summary?.tessellationCacheMisses ?? null,
+      uniqueStoredTriangles: report.summary?.uniqueStoredTriangles ?? null
+    },
     warningMessages: [],
     errorMessages: []
   };
