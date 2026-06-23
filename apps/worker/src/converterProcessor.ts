@@ -275,7 +275,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
 
       await new Promise<void>((resolve, reject) => {
         const child = child_process.spawn(input.xcafConverterBin, args, {
-          stdio: ["ignore", "pipe", "inherit"]
+          stdio: ["ignore", "inherit", "inherit"]
         });
         activeSubprocesses.add(child);
 
