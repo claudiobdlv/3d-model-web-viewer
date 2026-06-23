@@ -131,6 +131,24 @@ struct Quality {
   bool relative = true;
 };
 
+struct ReuseKey {
+  void* tshapePtr = nullptr;
+  double linearDeflection = 0.0;
+  double angularDeflection = 0.0;
+  bool relative = false;
+  std::string materialSignature;
+  bool isSafe = false;
+
+  bool operator<(const ReuseKey& o) const {
+    if (tshapePtr != o.tshapePtr) return tshapePtr < o.tshapePtr;
+    if (linearDeflection != o.linearDeflection) return linearDeflection < o.linearDeflection;
+    if (angularDeflection != o.angularDeflection) return angularDeflection < o.angularDeflection;
+    if (relative != o.relative) return relative < o.relative;
+    if (materialSignature != o.materialSignature) return materialSignature < o.materialSignature;
+    return isSafe < o.isSafe;
+  }
+};
+
 struct MeshPrimitive {
   std::string name;
   std::string labelPath;
@@ -192,6 +210,10 @@ struct MeshPrimitive {
   std::vector<float> positions;
   std::vector<float> normals;
   std::vector<std::uint32_t> indices;
+  bool isReused = false;
+  void* tshapePtr = nullptr;
+  gp_Trsf transform;
+  ReuseKey reuseKey;
   std::array<float, 3> min = {
       std::numeric_limits<float>::max(),
       std::numeric_limits<float>::max(),
@@ -200,7 +222,26 @@ struct MeshPrimitive {
       std::numeric_limits<float>::lowest(),
       std::numeric_limits<float>::lowest(),
       std::numeric_limits<float>::lowest()};
+  std::array<float, 3> worldMin = {
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::max()};
+  std::array<float, 3> worldMax = {
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::lowest()};
 };
+
+struct CachedGeometry {
+  std::vector<float> positions;
+  std::vector<float> normals;
+  std::vector<std::uint32_t> indices;
+  std::array<float, 3> min;
+  std::array<float, 3> max;
+  int faceCount = 0;
+};
+
+static std::map<ReuseKey, CachedGeometry> reuseCache;
 
 struct Stats {
   int freeShapes = 0;
@@ -229,6 +270,14 @@ struct Stats {
   std::map<std::string, int> rawStepMappingConfidenceCounts;
   std::set<std::string> uniqueColours;
   std::set<std::string> layers;
+  int tessellationCacheHits = 0;
+  int tessellationCacheMisses = 0;
+  int reusedInstances = 0;
+  int freshInstances = 0;
+  double prototypeScanSeconds = 0.0;
+  double prototypeCacheBuildSeconds = 0.0;
+  int uniqueStoredTriangles = 0;
+  int instancedTriangles = 0;
 };
 
 struct RawStepEntity {
@@ -2796,7 +2845,11 @@ void tessellateLabel(
     }
   }
 
-  meshedCount++;
+  bool isMirrored = childAccumulatedLocation.Transformation().IsNegative();
+  bool faceStyle = (!styledTopologyColours.empty() || !subshapeColours.empty());
+  bool reuseSafe = cliOptions.enableMeshReuse && !isMirrored && !faceStyle;
+  void* tshapePtr = sourceShape.TShape().get();
+
   double linDeflect = quality.linearDeflection;
   double angDeflect = quality.angularDeflection;
   bool relDeflect = quality.relative;
@@ -2806,27 +2859,112 @@ void tessellateLabel(
     relDeflect = true;
   }
 
-  logLine("Meshing shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
-          ": name=" + displayName + " path=" + labelPath +
-          " linearDeflection=" + std::to_string(linDeflect) +
-          " angularDeflection=" + std::to_string(angDeflect) +
-          " relative=" + (relDeflect ? "true" : "false") +
-          " parallel=" + (cliOptions.parallelMesh ? "true" : "false"));
+  Colour shapeColour;
+  if (labelHasColour) {
+    shapeColour = labelColour;
+  } else if (owningShapeHasColour) {
+    shapeColour = owningShapeColour;
+  } else if (referredHasColour) {
+    shapeColour = referredColour;
+  } else if (rawStepHasColour && cliOptions.colourMode.applyRawStepStyles) {
+    shapeColour = rawStepColour;
+  } else if (ancestorHasCandidateColour) {
+    shapeColour = ancestorCandidate;
+  } else if (layerHasCandidateColour && cliOptions.colourMode.applyLayerColours) {
+    shapeColour = layerCandidate;
+  } else {
+    shapeColour = defaultColour(
+        cliOptions.colourMode.mode == ColourMode::XcafBaseline
+            ? "no direct XCAF face/subshape, owning label/body, referred/original label, instance/component label, or explicit inherited ancestor colour found; raw STEP styles and layer colours are diagnostic-only in xcaf-baseline"
+            : "no face/subshape, label, referred-label, ancestor, or layer colour found",
+        labelPath);
+  }
 
-  try {
-    const auto meshStarted = std::chrono::steady_clock::now();
-    BRepMesh_IncrementalMesh mesh(renderShape, linDeflect, relDeflect, angDeflect, cliOptions.parallelMesh ? Standard_True : Standard_False);
-    mesh.Perform();
-    const auto meshFinished = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(meshFinished - meshStarted).count();
-    
-    logLine("Meshed shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
-            ": elapsedMs=" + std::to_string(ms));
-    stats.shapesTessellated += 1;
-  } catch (const Standard_Failure& failure) {
-    logLine("Tessellation failed for " + labelPath + ": " + failure.GetMessageString());
-    stats.failedShapes += 1;
-    return;
+  std::string materialSignature = "face-styled";
+  if (!faceStyle) {
+    materialSignature = "color:" + colourKey(shapeColour);
+  }
+
+  ReuseKey key;
+  key.tshapePtr = tshapePtr;
+  key.linearDeflection = linDeflect;
+  key.angularDeflection = angDeflect;
+  key.relative = relDeflect;
+  key.materialSignature = materialSignature;
+  key.isSafe = reuseSafe;
+
+  bool hasCached = false;
+  if (reuseSafe) {
+    if (reuseCache.find(key) != reuseCache.end()) {
+      hasCached = true;
+      stats.tessellationCacheHits++;
+    } else {
+      stats.tessellationCacheMisses++;
+      
+      const auto meshStarted = std::chrono::steady_clock::now();
+      TopoDS_Shape localShape = sourceShape;
+      localShape.Location(TopLoc_Location());
+
+      try {
+        BRepMesh_IncrementalMesh mesh(localShape, linDeflect, relDeflect, angDeflect, cliOptions.parallelMesh ? Standard_True : Standard_False);
+        mesh.Perform();
+        
+        CachedGeometry cached;
+        MeshPrimitive localPrim;
+        
+        TopExp_Explorer localExplorer(localShape, TopAbs_FACE);
+        for (; localExplorer.More(); localExplorer.Next()) {
+          const TopoDS_Face localFace = TopoDS::Face(localExplorer.Current());
+          appendFaceTriangles(localPrim, localFace);
+          cached.faceCount++;
+        }
+        
+        cached.positions = localPrim.positions;
+        cached.normals = localPrim.normals;
+        cached.indices = localPrim.indices;
+        cached.min = localPrim.min;
+        cached.max = localPrim.max;
+        
+        reuseCache[key] = cached;
+        hasCached = true;
+        stats.shapesTessellated++;
+        stats.uniqueStoredTriangles += cached.indices.size() / 3;
+        
+        const auto meshFinished = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(meshFinished - meshStarted).count();
+        logLine("[Mesh Cache Build] Meshed shape in local coordinates: elapsedMs=" + std::to_string(ms));
+      } catch (const Standard_Failure& failure) {
+        logLine("[Mesh Cache Build] Local tessellation failed for " + labelPath + ": " + failure.GetMessageString());
+        stats.failedShapes++;
+        reuseSafe = false;
+      }
+    }
+  }
+
+  if (!reuseSafe) {
+    meshedCount++;
+    logLine("Meshing shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
+            ": name=" + displayName + " path=" + labelPath +
+            " linearDeflection=" + std::to_string(linDeflect) +
+            " angularDeflection=" + std::to_string(angDeflect) +
+            " relative=" + (relDeflect ? "true" : "false") +
+            " parallel=" + (cliOptions.parallelMesh ? "true" : "false"));
+
+    try {
+      const auto meshStarted = std::chrono::steady_clock::now();
+      BRepMesh_IncrementalMesh mesh(renderShape, linDeflect, relDeflect, angDeflect, cliOptions.parallelMesh ? Standard_True : Standard_False);
+      mesh.Perform();
+      const auto meshFinished = std::chrono::steady_clock::now();
+      double ms = std::chrono::duration<double, std::milli>(meshFinished - meshStarted).count();
+      
+      logLine("Meshed shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
+              ": elapsedMs=" + std::to_string(ms));
+      stats.shapesTessellated += 1;
+    } catch (const Standard_Failure& failure) {
+      logLine("Tessellation failed for " + labelPath + ": " + failure.GetMessageString());
+      stats.failedShapes += 1;
+      return;
+    }
   }
 
   int faceIndex = 0;
@@ -3073,22 +3211,112 @@ void tessellateLabel(
     }
 
     MeshPrimitive& primitive = primitives[found->second];
-    const std::size_t verticesBefore = primitive.positions.size() / 3;
-    appendFaceTriangles(primitive, renderFace);
-    if (primitive.positions.size() / 3 > verticesBefore) {
+    if (reuseSafe) {
       primitive.faceCount += 1;
       primitive.faceOrSubshapeHasColour = primitive.faceOrSubshapeHasColour || faceOrSubshapeHasColour;
+    } else {
+      const std::size_t verticesBefore = primitive.positions.size() / 3;
+      appendFaceTriangles(primitive, renderFace);
+      if (primitive.positions.size() / 3 > verticesBefore) {
+        primitive.faceCount += 1;
+        primitive.faceOrSubshapeHasColour = primitive.faceOrSubshapeHasColour || faceOrSubshapeHasColour;
+      }
     }
     faceIndex += 1;
   }
 
   for (const std::size_t index : createdPrimitiveIndices) {
-    const auto& primitive = primitives[index];
-    if (primitive.indices.empty()) {
-      continue;
+    auto& primitive = primitives[index];
+    if (reuseSafe) {
+      primitive.isReused = true;
+      primitive.tshapePtr = tshapePtr;
+      primitive.reuseKey = key;
+      primitive.transform = childAccumulatedLocation.Transformation();
+      const auto& cached = reuseCache[key];
+      primitive.positions = cached.positions;
+      primitive.normals = cached.normals;
+      primitive.indices = cached.indices;
+      primitive.min = cached.min;
+      primitive.max = cached.max;
+      primitive.faceCount = cached.faceCount;
+      computeWorldBounds(primitive.min, primitive.max, primitive.transform, primitive.worldMin, primitive.worldMax);
+      validateWorldBounds(primitive, renderShape, effectiveInstancePath);
+
+      // Perform transform audit for the first 50 instances
+      static int auditInstancesCount = 0;
+      if (auditInstancesCount < 50) {
+        auditInstancesCount++;
+        
+        std::array<float, 3> reusedWorldMin = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+        std::array<float, 3> reusedWorldMax = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+        for (std::size_t vi = 0; vi < cached.positions.size(); vi += 3) {
+          gp_Pnt p(cached.positions[vi], cached.positions[vi+1], cached.positions[vi+2]);
+          p.Transform(primitive.transform);
+          reusedWorldMin[0] = std::min(reusedWorldMin[0], (float)p.X());
+          reusedWorldMin[1] = std::min(reusedWorldMin[1], (float)p.Y());
+          reusedWorldMin[2] = std::min(reusedWorldMin[2], (float)p.Z());
+          reusedWorldMax[0] = std::max(reusedWorldMax[0], (float)p.X());
+          reusedWorldMax[1] = std::max(reusedWorldMax[1], (float)p.Y());
+          reusedWorldMax[2] = std::max(reusedWorldMax[2], (float)p.Z());
+        }
+
+        BRepMesh_IncrementalMesh worldMesh(renderShape, linDeflect, relDeflect, angDeflect, cliOptions.parallelMesh ? Standard_True : Standard_False);
+        worldMesh.Perform();
+        std::array<float, 3> bakedWorldMin = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+        std::array<float, 3> bakedWorldMax = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+        TopExp_Explorer renderExplorer(renderShape, TopAbs_FACE);
+        for (; renderExplorer.More(); renderExplorer.Next()) {
+          const TopoDS_Face renderFace = TopoDS::Face(renderExplorer.Current());
+          TopLoc_Location loc;
+          Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(renderFace, loc);
+          if (!tri.IsNull()) {
+            const gp_Trsf t = loc.Transformation();
+            for (Standard_Integer nodeIdx = 1; nodeIdx <= tri->NbNodes(); ++nodeIdx) {
+              gp_Pnt p = tri->Node(nodeIdx);
+              p.Transform(t);
+              bakedWorldMin[0] = std::min(bakedWorldMin[0], (float)p.X());
+              bakedWorldMin[1] = std::min(bakedWorldMin[1], (float)p.Y());
+              bakedWorldMin[2] = std::min(bakedWorldMin[2], (float)p.Z());
+              bakedWorldMax[0] = std::max(bakedWorldMax[0], (float)p.X());
+              bakedWorldMax[1] = std::max(bakedWorldMax[1], (float)p.Y());
+              bakedWorldMax[2] = std::max(bakedWorldMax[2], (float)p.Z());
+            }
+          }
+        }
+
+        double diffMin = std::sqrt(std::pow(reusedWorldMin[0] - bakedWorldMin[0], 2) +
+                                   std::pow(reusedWorldMin[1] - bakedWorldMin[1], 2) +
+                                   std::pow(reusedWorldMin[2] - bakedWorldMin[2], 2));
+        double diffMax = std::sqrt(std::pow(reusedWorldMax[0] - bakedWorldMax[0], 2) +
+                                   std::pow(reusedWorldMax[1] - bakedWorldMax[1], 2) +
+                                   std::pow(reusedWorldMax[2] - bakedWorldMax[2], 2));
+
+        logLine("[TRANSFORM_AUDIT #" + std::to_string(auditInstancesCount) + "] Reused vs Baked Bbox comparison for " + effectiveInstancePath + ":");
+        logLine("  - Reused Bbox: [" + std::to_string(reusedWorldMin[0]) + "," + std::to_string(reusedWorldMin[1]) + "," + std::to_string(reusedWorldMin[2]) + "] to [" + std::to_string(reusedWorldMax[0]) + "," + std::to_string(reusedWorldMax[1]) + "," + std::to_string(reusedWorldMax[2]) + "]");
+        logLine("  - Baked Bbox:  [" + std::to_string(bakedWorldMin[0]) + "," + std::to_string(bakedWorldMin[1]) + "," + std::to_string(bakedWorldMin[2]) + "] to [" + std::to_string(bakedWorldMax[0]) + "," + std::to_string(bakedWorldMax[1]) + "," + std::to_string(bakedWorldMax[2]) + "]");
+        logLine("  - DiffMin: " + std::to_string(diffMin) + ", DiffMax: " + std::to_string(diffMax));
+
+        if (diffMin > 1e-2 || diffMax > 1e-2) {
+          logLine("[WARNING] Bbox discrepancy between reused instance and baked instance is large!");
+        }
+      }
+
+      stats.vertices += cached.positions.size() / 3;
+      stats.triangles += cached.indices.size() / 3;
+      stats.reusedInstances++;
+    } else {
+      primitive.isReused = false;
+      primitive.worldMin = primitive.min;
+      primitive.worldMax = primitive.max;
+
+      if (primitive.indices.empty()) {
+        continue;
+      }
+      stats.vertices += primitive.positions.size() / 3;
+      stats.triangles += primitive.indices.size() / 3;
+      stats.uniqueStoredTriangles += primitive.indices.size() / 3;
+      stats.freshInstances++;
     }
-    stats.vertices += primitive.positions.size() / 3;
-    stats.triangles += primitive.indices.size() / 3;
     stats.primitivesExported += 1;
     stats.coloursBySource[primitive.colourSource] += 1;
     stats.materialSourceCounts[primitive.materialSource] += 1;
@@ -3279,64 +3507,208 @@ void writeGlb(
   std::vector<AccessorInfo> accessors;
 
   struct MeshRefs {
-    int positionAccessor = 0;
-    int normalAccessor = 0;
-    int indexAccessor = 0;
-    int material = 0;
+    int positionAccessor = -1;
+    int normalAccessor = -1;
+    int indexAccessor = -1;
+    int material = -1;
   };
-  std::vector<MeshRefs> refs;
-  refs.reserve(primitives.size());
 
   std::map<std::string, int> materialByColour;
   std::vector<Colour> materials;
 
+  // Resolve materials first
   for (const auto& primitive : primitives) {
     const Colour glbColour = convertColourForGlb(primitive.colour, colourSpace);
     const std::string key = colourKey(glbColour);
-    int materialIndex = 0;
-    const auto found = materialByColour.find(key);
-    if (found == materialByColour.end()) {
-      materialIndex = static_cast<int>(materials.size());
+    if (materialByColour.find(key) == materialByColour.end()) {
+      int materialIndex = static_cast<int>(materials.size());
       materialByColour[key] = materialIndex;
       materials.push_back(glbColour);
-    } else {
-      materialIndex = found->second;
     }
-
-    MeshRefs meshRefs;
-    const int positionView = addFloatBuffer(bin, views, primitive.positions, 34962);
-    AccessorInfo positionAccessor;
-    positionAccessor.bufferView = positionView;
-    positionAccessor.componentType = 5126;
-    positionAccessor.count = primitive.positions.size() / 3;
-    positionAccessor.type = "VEC3";
-    positionAccessor.min = primitive.min;
-    positionAccessor.max = primitive.max;
-    positionAccessor.hasMinMax = true;
-    accessors.push_back(positionAccessor);
-    meshRefs.positionAccessor = static_cast<int>(accessors.size() - 1);
-
-    const int normalView = addFloatBuffer(bin, views, primitive.normals, 34962);
-    AccessorInfo normalAccessor;
-    normalAccessor.bufferView = normalView;
-    normalAccessor.componentType = 5126;
-    normalAccessor.count = primitive.normals.size() / 3;
-    normalAccessor.type = "VEC3";
-    accessors.push_back(normalAccessor);
-    meshRefs.normalAccessor = static_cast<int>(accessors.size() - 1);
-
-    const int indexView = addIndexBuffer(bin, views, primitive.indices);
-    AccessorInfo indexAccessor;
-    indexAccessor.bufferView = indexView;
-    indexAccessor.componentType = 5125;
-    indexAccessor.count = primitive.indices.size();
-    indexAccessor.type = "SCALAR";
-    accessors.push_back(indexAccessor);
-    meshRefs.indexAccessor = static_cast<int>(accessors.size() - 1);
-
-    meshRefs.material = materialIndex;
-    refs.push_back(meshRefs);
   }
+
+  // Group reused primitives by their ReuseKey (or rather, the mesh signature ReuseKey + glbColour)
+  // to share accessors and mesh indices.
+  struct SharedMeshKey {
+    ReuseKey reuseKey;
+    std::string materialKey;
+
+    bool operator<(const SharedMeshKey& o) const {
+      if (reuseKey < o.reuseKey) return true;
+      if (o.reuseKey < reuseKey) return false;
+      return materialKey < o.materialKey;
+    }
+  };
+
+  std::map<SharedMeshKey, int> sharedMeshIndexByKey;
+  std::map<SharedMeshKey, MeshRefs> sharedMeshRefsByKey;
+
+  // We will have a list of meshes in the glTF "meshes" array
+  struct GlbMesh {
+    std::string name;
+    MeshRefs refs;
+    std::string selectableId;
+    std::string displayName;
+    std::string resolvedObjectName;
+    std::string objectName;
+    std::string partName;
+    std::string blockName;
+    std::string componentName;
+    std::string productName;
+    std::string representationName;
+    std::string nameSource;
+    std::vector<std::string> nameCandidates;
+    std::string layer;
+    std::string originalStepLabel;
+    std::string rawStepTargetId;
+    std::string rawStepStyledItemId;
+    std::string colourSource;
+    std::string geometrySource;
+  };
+  std::vector<GlbMesh> glbMeshes;
+
+  std::vector<int> primitiveMeshIndex;
+  primitiveMeshIndex.reserve(primitives.size());
+
+  for (const auto& primitive : primitives) {
+    const Colour glbColour = convertColourForGlb(primitive.colour, colourSpace);
+    const std::string matKey = colourKey(glbColour);
+    const int materialIndex = materialByColour[matKey];
+
+    if (primitive.isReused) {
+      SharedMeshKey skey = { primitive.reuseKey, matKey };
+      auto found = sharedMeshIndexByKey.find(skey);
+      if (found == sharedMeshIndexByKey.end()) {
+        // First occurrence of this prototype/material combination!
+        // We write its accessor and mesh views to the buffer.
+        MeshRefs meshRefs;
+        
+        const int positionView = addFloatBuffer(bin, views, primitive.positions, 34962);
+        AccessorInfo positionAccessor;
+        positionAccessor.bufferView = positionView;
+        positionAccessor.componentType = 5126;
+        positionAccessor.count = primitive.positions.size() / 3;
+        positionAccessor.type = "VEC3";
+        positionAccessor.min = primitive.min;
+        positionAccessor.max = primitive.max;
+        positionAccessor.hasMinMax = true;
+        accessors.push_back(positionAccessor);
+        meshRefs.positionAccessor = static_cast<int>(accessors.size() - 1);
+
+        const int normalView = addFloatBuffer(bin, views, primitive.normals, 34962);
+        AccessorInfo normalAccessor;
+        normalAccessor.bufferView = normalView;
+        normalAccessor.componentType = 5126;
+        normalAccessor.count = primitive.normals.size() / 3;
+        normalAccessor.type = "VEC3";
+        accessors.push_back(normalAccessor);
+        meshRefs.normalAccessor = static_cast<int>(accessors.size() - 1);
+
+        const int indexView = addIndexBuffer(bin, views, primitive.indices);
+        AccessorInfo indexAccessor;
+        indexAccessor.bufferView = indexView;
+        indexAccessor.componentType = 5125;
+        indexAccessor.count = primitive.indices.size();
+        indexAccessor.type = "SCALAR";
+        accessors.push_back(indexAccessor);
+        meshRefs.indexAccessor = static_cast<int>(accessors.size() - 1);
+
+        meshRefs.material = materialIndex;
+
+        int newMeshIndex = static_cast<int>(glbMeshes.size());
+        sharedMeshIndexByKey[skey] = newMeshIndex;
+        sharedMeshRefsByKey[skey] = meshRefs;
+
+        GlbMesh m;
+        m.name = primitive.name;
+        m.refs = meshRefs;
+        m.selectableId = primitive.instancePath;
+        m.displayName = primitive.displayName;
+        m.resolvedObjectName = primitive.resolvedObjectName;
+        m.objectName = primitive.objectName;
+        m.partName = primitive.partName;
+        m.blockName = primitive.blockName;
+        m.componentName = primitive.componentName;
+        m.productName = primitive.productName;
+        m.representationName = primitive.representationName;
+        m.nameSource = primitive.nameSource;
+        m.nameCandidates = primitive.nameCandidates;
+        m.layer = primitive.layer;
+        m.originalStepLabel = primitive.originalStepLabel;
+        m.rawStepTargetId = primitive.rawStepTargetId;
+        m.rawStepStyledItemId = primitive.rawStepStyledItemId;
+        m.colourSource = primitive.colourSource;
+        m.geometrySource = primitive.geometrySource;
+        glbMeshes.push_back(m);
+
+        primitiveMeshIndex.push_back(newMeshIndex);
+      } else {
+        // Share existing mesh index
+        primitiveMeshIndex.push_back(found->second);
+      }
+    } else {
+      // Non-reused primitive: write unique buffer views/accessors and mesh entry
+      MeshRefs meshRefs;
+
+      const int positionView = addFloatBuffer(bin, views, primitive.positions, 34962);
+      AccessorInfo positionAccessor;
+      positionAccessor.bufferView = positionView;
+      positionAccessor.componentType = 5126;
+      positionAccessor.count = primitive.positions.size() / 3;
+      positionAccessor.type = "VEC3";
+      positionAccessor.min = primitive.min;
+      positionAccessor.max = primitive.max;
+      positionAccessor.hasMinMax = true;
+      accessors.push_back(positionAccessor);
+      meshRefs.positionAccessor = static_cast<int>(accessors.size() - 1);
+
+      const int normalView = addFloatBuffer(bin, views, primitive.normals, 34962);
+      AccessorInfo normalAccessor;
+      normalAccessor.bufferView = normalView;
+      normalAccessor.componentType = 5126;
+      normalAccessor.count = primitive.normals.size() / 3;
+      normalAccessor.type = "VEC3";
+      accessors.push_back(normalAccessor);
+      meshRefs.normalAccessor = static_cast<int>(accessors.size() - 1);
+
+      const int indexView = addIndexBuffer(bin, views, primitive.indices);
+      AccessorInfo indexAccessor;
+      indexAccessor.bufferView = indexView;
+      indexAccessor.componentType = 5125;
+      indexAccessor.count = primitive.indices.size();
+      indexAccessor.type = "SCALAR";
+      accessors.push_back(indexAccessor);
+      meshRefs.indexAccessor = static_cast<int>(accessors.size() - 1);
+
+      meshRefs.material = materialIndex;
+
+      int newMeshIndex = static_cast<int>(glbMeshes.size());
+      GlbMesh m;
+      m.name = primitive.name;
+      m.refs = meshRefs;
+      m.selectableId = primitive.instancePath;
+      m.displayName = primitive.displayName;
+      m.resolvedObjectName = primitive.resolvedObjectName;
+      m.objectName = primitive.objectName;
+      m.partName = primitive.partName;
+      m.blockName = primitive.blockName;
+      m.componentName = primitive.componentName;
+      m.productName = primitive.productName;
+      m.representationName = primitive.representationName;
+      m.nameSource = primitive.nameSource;
+      m.nameCandidates = primitive.nameCandidates;
+      m.layer = primitive.layer;
+      m.originalStepLabel = primitive.originalStepLabel;
+      m.rawStepTargetId = primitive.rawStepTargetId;
+      m.rawStepStyledItemId = primitive.rawStepStyledItemId;
+      m.colourSource = primitive.colourSource;
+      m.geometrySource = primitive.geometrySource;
+      glbMeshes.push_back(m);
+
+      primitiveMeshIndex.push_back(newMeshIndex);
+    }
+  }
+
   alignBuffer(bin);
 
   std::ostringstream json;
@@ -3357,7 +3729,19 @@ void writeGlb(
     const auto& primitive = primitives[i];
     json << "{\"name\":";
     writeString(json, primitive.displayName);
-    json << ",\"mesh\":" << i << ",\"extras\":{";
+    json << ",\"mesh\":" << primitiveMeshIndex[i];
+
+    if (primitive.isReused) {
+      json << ",\"matrix\":[";
+      const gp_Trsf& t = primitive.transform;
+      json << t.Value(1,1) << "," << t.Value(2,1) << "," << t.Value(3,1) << ",0.0,"
+           << t.Value(1,2) << "," << t.Value(2,2) << "," << t.Value(3,2) << ",0.0,"
+           << t.Value(1,3) << "," << t.Value(2,3) << "," << t.Value(3,3) << ",0.0,"
+           << t.Value(1,4) << "," << t.Value(2,4) << "," << t.Value(3,4) << ",1.0";
+      json << "]";
+    }
+
+    json << ",\"extras\":{";
     json << "\"stableObjectId\":"; writeString(json, primitive.stableObjectId); json << ",";
     json << "\"selectableId\":"; writeString(json, primitive.instancePath); json << ",";
     json << "\"parentObjectId\":"; writeString(json, primitive.instancePath); json << ",";
@@ -3421,34 +3805,35 @@ void writeGlb(
   json << "],";
 
   json << "\"meshes\":[";
-  for (std::size_t i = 0; i < primitives.size(); ++i) {
+  for (std::size_t i = 0; i < glbMeshes.size(); ++i) {
     if (i > 0) json << ",";
+    const auto& gm = glbMeshes[i];
     json << "{\"name\":";
-    writeString(json, primitives[i].name);
-    json << ",\"primitives\":[{\"attributes\":{\"POSITION\":" << refs[i].positionAccessor
-         << ",\"NORMAL\":" << refs[i].normalAccessor
-         << "},\"indices\":" << refs[i].indexAccessor
-         << ",\"material\":" << refs[i].material
+    writeString(json, gm.name);
+    json << ",\"primitives\":[{\"attributes\":{\"POSITION\":" << gm.refs.positionAccessor
+         << ",\"NORMAL\":" << gm.refs.normalAccessor
+         << "},\"indices\":" << gm.refs.indexAccessor
+         << ",\"material\":" << gm.refs.material
          << ",\"mode\":4,\"extras\":{";
-    json << "\"selectableId\":"; writeString(json, primitives[i].instancePath); json << ",";
-    json << "\"parentObjectId\":"; writeString(json, primitives[i].instancePath); json << ",";
-    json << "\"displayName\":"; writeString(json, primitives[i].displayName); json << ",";
-    json << "\"resolvedObjectName\":"; writeString(json, primitives[i].resolvedObjectName); json << ",";
-    json << "\"objectName\":"; writeString(json, primitives[i].objectName); json << ",";
-    json << "\"partName\":"; writeString(json, primitives[i].partName); json << ",";
-    json << "\"blockName\":"; writeString(json, primitives[i].blockName); json << ",";
-    json << "\"componentName\":"; writeString(json, primitives[i].componentName); json << ",";
-    json << "\"productName\":"; writeString(json, primitives[i].productName); json << ",";
-    json << "\"representationName\":"; writeString(json, primitives[i].representationName); json << ",";
-    json << "\"nameSource\":"; writeString(json, primitives[i].nameSource); json << ",";
-    json << "\"nameCandidates\":"; writeStringVector(json, primitives[i].nameCandidates, 20); json << ",";
-    json << "\"layerNames\":"; writeString(json, primitives[i].layer); json << ",";
-    json << "\"xcafLabelPath\":"; writeString(json, primitives[i].labelPath); json << ",";
-    json << "\"referredLabelPath\":"; writeString(json, primitives[i].originalStepLabel); json << ",";
-    json << "\"stepEntityIds\":["; writeString(json, primitives[i].rawStepTargetId); json << "],";
-    json << "\"stepStyledItemId\":"; writeString(json, primitives[i].rawStepStyledItemId); json << ",";
-    json << "\"colourSource\":"; writeString(json, primitives[i].colourSource); json << ",";
-    json << "\"geometrySource\":"; writeString(json, primitives[i].geometrySource);
+    json << "\"selectableId\":"; writeString(json, gm.selectableId); json << ",";
+    json << "\"parentObjectId\":"; writeString(json, gm.selectableId); json << ",";
+    json << "\"displayName\":"; writeString(json, gm.displayName); json << ",";
+    json << "\"resolvedObjectName\":"; writeString(json, gm.resolvedObjectName); json << ",";
+    json << "\"objectName\":"; writeString(json, gm.objectName); json << ",";
+    json << "\"partName\":"; writeString(json, gm.partName); json << ",";
+    json << "\"blockName\":"; writeString(json, gm.blockName); json << ",";
+    json << "\"componentName\":"; writeString(json, gm.componentName); json << ",";
+    json << "\"productName\":"; writeString(json, gm.productName); json << ",";
+    json << "\"representationName\":"; writeString(json, gm.representationName); json << ",";
+    json << "\"nameSource\":"; writeString(json, gm.nameSource); json << ",";
+    json << "\"nameCandidates\":"; writeStringVector(json, gm.nameCandidates, 20); json << ",";
+    json << "\"layerNames\":"; writeString(json, gm.layer); json << ",";
+    json << "\"xcafLabelPath\":"; writeString(json, gm.originalStepLabel); json << ",";
+    json << "\"referredLabelPath\":"; writeString(json, gm.originalStepLabel); json << ",";
+    json << "\"stepEntityIds\":["; writeString(json, gm.rawStepTargetId); json << "],";
+    json << "\"stepStyledItemId\":"; writeString(json, gm.rawStepStyledItemId); json << ",";
+    json << "\"colourSource\":"; writeString(json, gm.colourSource); json << ",";
+    json << "\"geometrySource\":"; writeString(json, gm.geometrySource);
     json << "}}]}";
   }
   json << "],";
@@ -3790,6 +4175,11 @@ void writeReport(
   out << "    \"rawStepStyledItemFaceUses\": " << stats.rawStepColourUses << ",\n";
   out << "    \"rawStepAmbiguousRepresentationRejects\": " << stats.rawStepAmbiguousRepresentationRejects << ",\n";
   out << "    \"rawStepBroadRepresentationRejects\": " << stats.rawStepBroadRepresentationRejects << ",\n";
+  out << "    \"reusedInstances\": " << stats.reusedInstances << ",\n";
+  out << "    \"freshInstances\": " << stats.freshInstances << ",\n";
+  out << "    \"tessellationCacheHits\": " << stats.tessellationCacheHits << ",\n";
+  out << "    \"tessellationCacheMisses\": " << stats.tessellationCacheMisses << ",\n";
+  out << "    \"uniqueStoredTriangles\": " << stats.uniqueStoredTriangles << ",\n";
   out << "    \"repeatedComponentGroups\": " << repeatedGroups.size() << ",\n";
   out << "    \"repeatedComponentColourMismatches\": " << repeatedMismatchGroups << ",\n";
   out << "    \"glbBytes\": " << glbSize << ",\n";
@@ -4879,6 +5269,58 @@ void writePrototypeReuseReport(
   out << "}\n";
 }
 
+void computeWorldBounds(const std::array<float, 3>& localMin, const std::array<float, 3>& localMax, const gp_Trsf& transform, std::array<float, 3>& worldMin, std::array<float, 3>& worldMax) {
+  worldMin = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+  worldMax = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+
+  const std::array<double, 2> xs = {localMin[0], (double)localMax[0]};
+  const std::array<double, 2> ys = {localMin[1], (double)localMax[1]};
+  const std::array<double, 2> zs = {localMin[2], (double)localMax[2]};
+
+  for (double cx : xs) {
+    for (double cy : ys) {
+      for (double cz : zs) {
+        gp_Pnt p(cx, cy, cz);
+        p.Transform(transform);
+        worldMin[0] = std::min(worldMin[0], (float)p.X());
+        worldMin[1] = std::min(worldMin[1], (float)p.Y());
+        worldMin[2] = std::min(worldMin[2], (float)p.Z());
+        worldMax[0] = std::max(worldMax[0], (float)p.X());
+        worldMax[1] = std::max(worldMax[1], (float)p.Y());
+        worldMax[2] = std::max(worldMax[2], (float)p.Z());
+      }
+    }
+  }
+}
+
+void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& renderShape, const std::string& instancePath) {
+  Bnd_Box xcafBox;
+  BRepBndLib::Add(renderShape, xcafBox);
+  Standard_Real xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+  if (!xcafBox.IsVoid()) {
+    xcafBox.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+  }
+  double xcafDiag = 0.0;
+  if (!xcafBox.IsVoid()) {
+    double dx = xmax - xmin;
+    double dy = ymax - ymin;
+    double dz = zmax - zmin;
+    xcafDiag = std::sqrt(dx * dx + dy * dy + dz * dz);
+  }
+
+  double glbDiag = 0.0;
+  double dx = primitive.worldMax[0] - primitive.worldMin[0];
+  double dy = primitive.worldMax[1] - primitive.worldMin[1];
+  double dz = primitive.worldMax[2] - primitive.worldMin[2];
+  glbDiag = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+  if (xcafDiag > 0.0 && glbDiag > 1.5 * xcafDiag) {
+    logLine("[WARNING] GLB world bounding box is wildly larger than XCAF world bounding box for " + instancePath);
+    logLine("  - XCAF Bbox: [" + std::to_string(xmin) + "," + std::to_string(ymin) + "," + std::to_string(zmin) + "] to [" + std::to_string(xmax) + "," + std::to_string(ymax) + "," + std::to_string(zmax) + "] (diag: " + std::to_string(xcafDiag) + ")");
+    logLine("  - GLB Bbox:  [" + std::to_string(primitive.worldMin[0]) + "," + std::to_string(primitive.worldMin[1]) + "," + std::to_string(primitive.worldMin[2]) + "] to [" + std::to_string(primitive.worldMax[0]) + "," + std::to_string(primitive.worldMax[1]) + "," + std::to_string(primitive.worldMax[2]) + "] (diag: " + std::to_string(glbDiag) + ")");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -5135,6 +5577,13 @@ int main(int argc, char** argv) {
 
     logLine("Writing material-style-profile.json");
     writeMaterialStyleProfile(outputDir / "material-style-profile.json", rawStepStyles, stats);
+
+    logLine("Mesh reuse statistics: reusedInstances=" + std::to_string(stats.reusedInstances) +
+            " freshInstances=" + std::to_string(stats.freshInstances) +
+            " cacheHits=" + std::to_string(stats.tessellationCacheHits) +
+            " cacheMisses=" + std::to_string(stats.tessellationCacheMisses) +
+            " uniqueStoredTriangles=" + std::to_string(stats.uniqueStoredTriangles) +
+            " totalRenderedTriangles=" + std::to_string(stats.triangles));
 
     logLine("Done: primitives=" + std::to_string(stats.primitivesExported) +
             " triangles=" + std::to_string(stats.triangles) +

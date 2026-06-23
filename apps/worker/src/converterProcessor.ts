@@ -319,6 +319,12 @@ async function runXcafBaselineConverter(input: {
   if (process.env.DEBUG_LEGACY_TRANSFORM === "true") {
     args.push("--debug-legacy-transform");
   }
+  if (process.env.XCAF_ENABLE_MESH_REUSE === "true") {
+    args.push("--enable-mesh-reuse");
+  }
+  if (process.env.DEBUG_DISABLE_MESH_REUSE === "true") {
+    args.push("--debug-disable-mesh-reuse");
+  }
 
   await spawnProcess(input.xcafConverterBin, args, input.signal, input.onProgress);
 
