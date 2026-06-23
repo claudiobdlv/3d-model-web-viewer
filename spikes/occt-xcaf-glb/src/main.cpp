@@ -614,6 +614,10 @@ bool globalDisableStyleCache = false;
 std::atomic<uint64_t> shapeColorCacheHits{0};
 std::atomic<uint64_t> shapeColorCacheMisses{0};
 
+std::unordered_map<std::string, Colour> labelColorCache;
+std::atomic<uint64_t> labelColorCacheHits{0};
+std::atomic<uint64_t> labelColorCacheMisses{0};
+
 int meshedCount = 0;
 int totalShapesToMesh = 0;
 
@@ -1953,14 +1957,40 @@ bool firstColourForLabel(
     const std::string& prefix,
     const std::string& materialSource,
     Colour& colour) {
+  if (label.IsNull()) {
+    return false;
+  }
+
+  std::string entry = labelEntry(label);
+
+  auto found = labelColorCache.find(entry);
+  if (found != labelColorCache.end()) {
+    labelColorCacheHits++;
+    if (found->second.source == "NO_COLOUR") {
+      return false;
+    }
+    colour = found->second;
+    colour.source = prefix + colour.colourType;
+    colour.materialSource = materialSource;
+    return true;
+  }
+
+  labelColorCacheMisses++;
   for (const auto& item : std::vector<std::pair<XCAFDoc_ColorType, std::string>>{
            {XCAFDoc_ColorSurf, "surface"},
            {XCAFDoc_ColorGen, "generic"},
            {XCAFDoc_ColorCurv, "curve"}}) {
-    if (readLabelColour(colourTool, label, item.first, prefix + item.second, materialSource, item.second, colour)) {
+    Colour queriedColour;
+    if (readLabelColour(colourTool, label, item.first, prefix + item.second, materialSource, item.second, queriedColour)) {
+      labelColorCache[entry] = queriedColour;
+      colour = queriedColour;
       return true;
     }
   }
+
+  Colour sentinel;
+  sentinel.source = "NO_COLOUR";
+  labelColorCache[entry] = sentinel;
   return false;
 }
 
@@ -5584,6 +5614,8 @@ int main(int argc, char** argv) {
       {"subshapeCacheMisses", std::to_string(subshapeCacheMisses)},
       {"shapeColorCacheHits", std::to_string(shapeColorCacheHits)},
       {"shapeColorCacheMisses", std::to_string(shapeColorCacheMisses)},
+      {"labelColorCacheHits", std::to_string(labelColorCacheHits)},
+      {"labelColorCacheMisses", std::to_string(labelColorCacheMisses)},
       {"styledFaces", std::to_string(styledFacesCount)},
       {"fallbackColors", std::to_string(fallbackColorsCount)}
     });
@@ -5597,7 +5629,9 @@ int main(int argc, char** argv) {
             " subshapeCacheHits=" + std::to_string(subshapeCacheHits) +
             " subshapeCacheMisses=" + std::to_string(subshapeCacheMisses) +
             " shapeColorCacheHits=" + std::to_string(shapeColorCacheHits) +
-            " shapeColorCacheMisses=" + std::to_string(shapeColorCacheMisses));
+            " shapeColorCacheMisses=" + std::to_string(shapeColorCacheMisses) +
+            " labelColorCacheHits=" + std::to_string(labelColorCacheHits) +
+            " labelColorCacheMisses=" + std::to_string(labelColorCacheMisses));
     logLine("Color mapping statistics: styledFaces=" + std::to_string(styledFacesCount) +
             " fallbackColors=" + std::to_string(fallbackColorsCount));
 
