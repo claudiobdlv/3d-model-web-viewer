@@ -234,6 +234,7 @@ struct MeshPrimitive {
 
 void computeWorldBounds(const std::array<float, 3>& localMin, const std::array<float, 3>& localMax, const gp_Trsf& transform, std::array<float, 3>& worldMin, std::array<float, 3>& worldMax);
 void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& renderShape, const std::string& instancePath);
+std::string labelEntry(const TDF_Label& label);
 
 struct CachedGeometry {
   std::vector<float> positions;
@@ -621,31 +622,8 @@ std::atomic<uint64_t> labelColorCacheMisses{0};
 int meshedCount = 0;
 int totalShapesToMesh = 0;
 
-void countLeafLabels(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_LabelSequence& freeShapes, int& count) {
-  count = 0;
-  struct Helper {
-    static void count(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_Label& label, int& c) {
-      TDF_LabelSequence children;
-      bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
-      if (!hasChildren && shapeTool->IsReference(label)) {
-        TDF_Label referred;
-        if (shapeTool->GetReferredShape(label, referred)) {
-          hasChildren = shapeTool->GetComponents(referred, children, Standard_False);
-        }
-      }
-      if (hasChildren && children.Length() > 0) {
-        for (Standard_Integer i = 1; i <= children.Length(); ++i) {
-          count(shapeTool, children.Value(i), c);
-        }
-      } else {
-        c++;
-      }
-    }
-  };
-  for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
-    Helper::count(shapeTool, freeShapes.Value(i), count);
-  }
-}
+struct CliOptions;
+void countLeafLabels(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_LabelSequence& freeShapes, const CliOptions& cliOptions, int& count);
 
 void scanTopology(const TopoDS_Shape& shape,
                   int& compounds, int& compsolids, int& solids, int& shells, int& faces, int& edges, int& vertices,
@@ -2172,7 +2150,7 @@ Quality parseQuality(const std::string& value) {
   if (value == "balanced") {
     return {"balanced", 0.45, 0.50, true};
   }
-  if (value == "preview") {
+  if (value == "preview" || value == "low") {
     return {"preview", 0.85, 0.65, true};
   }
   throw std::runtime_error("Unsupported quality preset: " + value);
@@ -2211,6 +2189,11 @@ struct CliOptions {
   bool debugLegacyTransform = false;
   bool enableMeshReuse = false;
   bool generatePrototypeReport = false;
+
+  // Filtering options
+  bool hasLabelList = false;
+  std::string labelListPath = "";
+  std::set<std::string> selectedLabels;
 };
 
 CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
@@ -2254,11 +2237,71 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
       options.enableMeshReuse = false;
     } else if (arg == "--generate-prototype-report") {
       options.generatePrototypeReport = true;
+    } else if (arg == "--label-list") {
+      if (i + 1 >= argc) {
+        throw std::runtime_error("--label-list requires a path");
+      }
+      options.labelListPath = argv[++i];
+      options.hasLabelList = true;
+
+      std::ifstream infile(options.labelListPath);
+      if (!infile.is_open()) {
+        throw std::runtime_error("Could not open label list file: " + options.labelListPath);
+      }
+      std::string line;
+      while (std::getline(infile, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+          line.pop_back();
+        }
+        if (line.empty()) continue;
+        options.selectedLabels.insert(line);
+      }
     } else {
       throw std::runtime_error("Unknown argument: " + arg);
     }
   }
   return options;
+}
+
+void countLeafLabels(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_LabelSequence& freeShapes, const CliOptions& cliOptions, int& count) {
+  count = 0;
+  struct Helper {
+    static void count(const Handle(XCAFDoc_ShapeTool)& shapeTool, const TDF_Label& label, const CliOptions& cliOptions, bool isInsideSelectedSubtree, int& c) {
+      TDF_LabelSequence children;
+      const std::string labelPath = labelEntry(label);
+      TDF_Label currentReferred;
+      if (shapeTool->IsReference(label)) {
+        shapeTool->GetReferredShape(label, currentReferred);
+      }
+      bool childInsideSelected = isInsideSelectedSubtree;
+      if (cliOptions.hasLabelList && !childInsideSelected) {
+        if (cliOptions.selectedLabels.count(labelPath) > 0) {
+          childInsideSelected = true;
+        } else if (!currentReferred.IsNull() && cliOptions.selectedLabels.count(labelEntry(currentReferred)) > 0) {
+          childInsideSelected = true;
+        }
+      }
+      bool hasChildren = shapeTool->GetComponents(label, children, Standard_False);
+      if (!hasChildren && shapeTool->IsReference(label)) {
+        TDF_Label referred;
+        if (shapeTool->GetReferredShape(label, referred)) {
+          hasChildren = shapeTool->GetComponents(referred, children, Standard_False);
+        }
+      }
+      if (hasChildren && children.Length() > 0) {
+        for (Standard_Integer i = 1; i <= children.Length(); ++i) {
+          count(shapeTool, children.Value(i), cliOptions, childInsideSelected, c);
+        }
+      } else {
+        if (!cliOptions.hasLabelList || childInsideSelected) {
+          c++;
+        }
+      }
+    }
+  };
+  for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
+    Helper::count(shapeTool, freeShapes.Value(i), cliOptions, false, count);
+  }
 }
 
 std::array<float, 3> normalFromTriangle(
@@ -3408,7 +3451,8 @@ void traverse(
     const std::string& parentDisplayName,
     const std::string& parentProductName,
     std::vector<MeshPrimitive>& primitives,
-    Stats& stats) {
+    Stats& stats,
+    const bool isInsideSelectedSubtree = false) {
   TDF_LabelSequence children;
   const std::string labelPath = labelEntry(label);
   const std::string currentInstancePath = appendInstancePath(instancePath, labelPath);
@@ -3416,6 +3460,16 @@ void traverse(
   if (shapeTool->IsReference(label)) {
     shapeTool->GetReferredShape(label, currentReferred);
   }
+
+  bool childInsideSelected = isInsideSelectedSubtree;
+  if (cliOptions.hasLabelList && !childInsideSelected) {
+    if (cliOptions.selectedLabels.count(labelPath) > 0) {
+      childInsideSelected = true;
+    } else if (!currentReferred.IsNull() && cliOptions.selectedLabels.count(labelEntry(currentReferred)) > 0) {
+      childInsideSelected = true;
+    }
+  }
+
   const auto currentLayers = collectLabelAndReferredLayers(layerTool, label, currentReferred);
   const auto childInheritedLayers = mergeLayers(inheritedLayers, currentLayers);
   const std::string currentParentChain = appendChain(parentChain, labelPath);
@@ -3475,8 +3529,13 @@ void traverse(
           currentDisplayName,
           currentProductName,
           primitives,
-          stats);
+          stats,
+          childInsideSelected);
     }
+    return;
+  }
+
+  if (cliOptions.hasLabelList && !childInsideSelected) {
     return;
   }
 
@@ -4149,6 +4208,7 @@ void writeReport(
     const Quality& quality,
     const ColourSpaceConfig& colourSpace,
     const ColourModeConfig& colourMode,
+    const CliOptions& cliOptions,
     const Stats& stats,
     const std::map<std::string, RawStepColourAudit>& rawStepColourAudit,
     const std::vector<MeshPrimitive>& primitives,
@@ -4250,6 +4310,18 @@ void writeReport(
   out << "    \"repeatedComponentColourMismatches\": " << repeatedMismatchGroups << ",\n";
   out << "    \"glbBytes\": " << glbSize << ",\n";
   out << "    \"conversionSeconds\": " << stats.conversionSeconds << "\n";
+  out << "  },\n";
+  out << "  \"filtering\": {\n";
+  if (cliOptions.hasLabelList) {
+    out << "    \"enabled\": true,\n";
+    out << "    \"labelListPath\": "; writeString(out, cliOptions.labelListPath); out << ",\n";
+    out << "    \"selectedRootCount\": " << cliOptions.selectedLabels.size() << ",\n";
+    out << "    \"matchedRootCount\": " << cliOptions.selectedLabels.size() << ",\n";
+    out << "    \"exportedObjectCount\": " << primitives.size() << ",\n";
+    out << "    \"missingLabels\": []\n";
+  } else {
+    out << "    \"enabled\": false\n";
+  }
   out << "  },\n";
   out << "  \"globalBoundingBox\": {\"min\": ";
   writeVec3(out, globalMin);
@@ -4784,7 +4856,8 @@ void collectLeafInstances(
     const std::string& parentChain,
     const std::string& parentDisplayName,
     const std::string& parentProductName,
-    std::vector<LeafInstance>& leafInstances) {
+    std::vector<LeafInstance>& leafInstances,
+    const bool isInsideSelectedSubtree = false) {
 
   TDF_LabelSequence children;
   const std::string labelPath = labelEntry(label);
@@ -4793,6 +4866,16 @@ void collectLeafInstances(
   if (shapeTool->IsReference(label)) {
     shapeTool->GetReferredShape(label, currentReferred);
   }
+
+  bool childInsideSelected = isInsideSelectedSubtree;
+  if (cliOptions.hasLabelList && !childInsideSelected) {
+    if (cliOptions.selectedLabels.count(labelPath) > 0) {
+      childInsideSelected = true;
+    } else if (!currentReferred.IsNull() && cliOptions.selectedLabels.count(labelEntry(currentReferred)) > 0) {
+      childInsideSelected = true;
+    }
+  }
+
   const auto currentLayers = collectLabelAndReferredLayers(layerTool, label, currentReferred);
   const auto childInheritedLayers = mergeLayers(inheritedLayers, currentLayers);
   const std::string currentParentChain = appendChain(parentChain, labelPath);
@@ -4844,8 +4927,13 @@ void collectLeafInstances(
           currentParentChain,
           currentDisplayName,
           currentProductName,
-          leafInstances);
+          leafInstances,
+          childInsideSelected);
     }
+    return;
+  }
+
+  if (cliOptions.hasLabelList && !childInsideSelected) {
     return;
   }
 
@@ -5390,8 +5478,8 @@ void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& ren
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3 || argc > 14) {
-    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear] [--parallel-mesh on|off] [--debug-super-coarse-mesh] [--debug-skip-raw-step-styles] [--debug-disable-style-cache]\n";
+  if (argc < 3 || argc > 20) {
+    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear] [--parallel-mesh on|off] [--debug-super-coarse-mesh] [--debug-skip-raw-step-styles] [--debug-disable-style-cache] [--label-list <file>]\n";
     return 2;
   }
 
@@ -5468,6 +5556,28 @@ int main(int argc, char** argv) {
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     Handle(XCAFDoc_ColorTool) colourTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
     Handle(XCAFDoc_LayerTool) layerTool = XCAFDoc_DocumentTool::LayerTool(doc->Main());
+
+    if (cliOptions.hasLabelList) {
+      std::vector<std::string> missingLabels;
+      for (const auto& entryStr : cliOptions.selectedLabels) {
+        TDF_Label label;
+        TDF_Tool::Label(doc->GetData(), entryStr.c_str(), label);
+        if (label.IsNull()) {
+          missingLabels.push_back(entryStr);
+        } else if (!shapeTool->IsShape(label)) {
+          missingLabels.push_back(entryStr + " (not a shape)");
+        }
+      }
+      if (!missingLabels.empty()) {
+        std::string err = "Failed validation: the following label paths were not found or not shapes in the document:\n";
+        for (const auto& m : missingLabels) {
+          err += "  - " + m + "\n";
+        }
+        logLine("[ERROR] " + err);
+        throw std::runtime_error(err);
+      }
+      logLine("Validated all " + std::to_string(cliOptions.selectedLabels.size()) + " selected label paths successfully.");
+    }
 
     globalDisableStyleCache = cliOptions.debugDisableStyleCache;
     if (!globalDisableStyleCache) {
@@ -5578,7 +5688,7 @@ int main(int argc, char** argv) {
       logLine("prototype-reuse-report.json written successfully.");
     }
     
-    countLeafLabels(shapeTool, freeShapes, totalShapesToMesh);
+    countLeafLabels(shapeTool, freeShapes, cliOptions, totalShapesToMesh);
     logLine("Total leaf shapes to mesh: " + std::to_string(totalShapesToMesh));
 
     for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
@@ -5645,7 +5755,7 @@ int main(int argc, char** argv) {
     const auto glbSize = std::filesystem::file_size(glbPath);
 
     logLine("Writing xcaf-report.json");
-    writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, colourMode, stats, rawStepStyles.colourAudit(), primitives, glbSize);
+    writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, colourMode, cliOptions, stats, rawStepStyles.colourAudit(), primitives, glbSize);
 
     logLine("Writing material-style-profile.json");
     writeMaterialStyleProfile(outputDir / "material-style-profile.json", rawStepStyles, stats);

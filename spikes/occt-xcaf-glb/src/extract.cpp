@@ -18,6 +18,7 @@
 #include <BRep_Builder.hxx>
 #include <Interface_Static.hxx>
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <set>
@@ -100,9 +101,15 @@ int main(int argc, char** argv) {
   
   int targetLeafCount = 100;
   std::string targetLabelEntry = "";
+  std::string labelListPath = "";
+  bool useList = false;
+
   if (argc >= 4) {
     std::string arg = argv[3];
-    if (arg.find(':') != std::string::npos) {
+    if (arg == "--list" && argc >= 5) {
+      labelListPath = argv[4];
+      useList = true;
+    } else if (arg.find(':') != std::string::npos) {
       targetLabelEntry = arg;
     } else {
       try {
@@ -140,9 +147,35 @@ int main(int argc, char** argv) {
   std::cout << "Root free shapes: " << freeShapes.Length() << std::endl;
 
   TDF_Label selectedLabel;
+  TDF_LabelSequence labelsToTransfer;
   bool found = false;
 
-  if (!targetLabelEntry.empty()) {
+  if (useList) {
+    std::ifstream infile(labelListPath);
+    if (!infile.is_open()) {
+      std::cerr << "Error opening label list file: " << labelListPath << std::endl;
+      return 1;
+    }
+    std::string line;
+    while (std::getline(infile, line)) {
+      while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+        line.pop_back();
+      }
+      if (line.empty()) continue;
+      TDF_Label label;
+      TDF_Tool::Label(doc->GetData(), line.c_str(), label);
+      if (!label.IsNull()) {
+        if (shapeTool->IsShape(label)) {
+          labelsToTransfer.Append(label);
+        } else {
+          std::cerr << "Warning: label path is NOT a shape: " << line << std::endl;
+        }
+      } else {
+        std::cerr << "Warning: label path not found in document: " << line << std::endl;
+      }
+    }
+    std::cout << "Read label list from " << labelListPath << ". Loaded " << labelsToTransfer.Length() << " labels to transfer.\n";
+  } else if (!targetLabelEntry.empty()) {
     // Find label by entry path
     TDF_Label label;
     TDF_Tool::Label(doc->GetData(), targetLabelEntry.c_str(), label);
@@ -215,18 +248,30 @@ int main(int argc, char** argv) {
   writer.SetColorMode(Standard_True);
   writer.SetLayerMode(Standard_True);
 
-  if (found) {
+  if (useList) {
+    if (labelsToTransfer.Length() > 0) {
+      std::cout << "Writing " << labelsToTransfer.Length() << " shapes to: " << outputPath << std::endl;
+      for (Standard_Integer i = 1; i <= labelsToTransfer.Length(); ++i) {
+        const TDF_Label& label = labelsToTransfer.Value(i);
+        std::cout << "Transferring label " << i << " / " << labelsToTransfer.Length() << ": " << labelEntry(label) << " (Name: " << labelName(label) << ")" << std::endl;
+        writer.Transfer(label);
+      }
+    } else {
+      std::cerr << "No labels found to transfer!\n";
+      return 1;
+    }
+  } else if (found) {
     std::cout << "Writing selected subassembly to: " << outputPath << std::endl;
     writer.Transfer(selectedLabel);
   } else {
     // If no assembly is found in target range, extract a subset of shapes/components
-    TDF_LabelSequence labelsToTransfer;
+    TDF_LabelSequence labelsToTransferFallback;
     
     if (freeShapes.Length() > 1) {
       int countToExtract = std::min(freeShapes.Length(), targetLeafCount);
       std::cout << "Extracting first " << countToExtract << " free shapes...\n";
       for (int i = 1; i <= countToExtract; ++i) {
-        labelsToTransfer.Append(freeShapes.Value(i));
+        labelsToTransferFallback.Append(freeShapes.Value(i));
       }
     } else if (freeShapes.Length() == 1) {
       // If we only have 1 root free shape, it is probably a root assembly.
@@ -245,16 +290,16 @@ int main(int argc, char** argv) {
         int countToExtract = std::min(children.Length(), targetLeafCount);
         std::cout << "Root assembly has " << children.Length() << " children. Extracting first " << countToExtract << " direct children...\n";
         for (int i = 1; i <= countToExtract; ++i) {
-          labelsToTransfer.Append(children.Value(i));
+          labelsToTransferFallback.Append(children.Value(i));
         }
       } else {
         std::cout << "Extracting the single root free shape...\n";
-        labelsToTransfer.Append(rootLabel);
+        labelsToTransferFallback.Append(rootLabel);
       }
     }
     
-    if (labelsToTransfer.Length() > 0) {
-      writer.Transfer(labelsToTransfer);
+    if (labelsToTransferFallback.Length() > 0) {
+      writer.Transfer(labelsToTransferFallback);
     } else {
       std::cerr << "No labels found to transfer!\n";
       return 1;
