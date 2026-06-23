@@ -2039,23 +2039,50 @@ bool firstColourForShape(
     const std::string& lookupPath,
     Colour& colour) {
   if (!globalDisableStyleCache && shape.TShape()) {
+    auto* tshapePtr = shape.TShape().get();
+    bool hasSurf = shapeColorCache.find({tshapePtr, XCAFDoc_ColorSurf}) != shapeColorCache.end();
+    bool hasGen = shapeColorCache.find({tshapePtr, XCAFDoc_ColorGen}) != shapeColorCache.end();
+    bool hasCurv = shapeColorCache.find({tshapePtr, XCAFDoc_ColorCurv}) != shapeColorCache.end();
+
+    if (hasSurf || hasGen || hasCurv) {
+      for (auto type : {XCAFDoc_ColorSurf, XCAFDoc_ColorGen, XCAFDoc_ColorCurv}) {
+        auto found = shapeColorCache.find({tshapePtr, type});
+        if (found != shapeColorCache.end()) {
+          shapeColorCacheHits++;
+          if (found->second.source != "NO_COLOUR") {
+            colour = found->second;
+            colour.source = prefix + (type == XCAFDoc_ColorSurf ? "surface" : (type == XCAFDoc_ColorGen ? "generic" : "curve"));
+            colour.materialSource = materialSource;
+            colour.lookupPath = lookupPath;
+            colour.colourType = (type == XCAFDoc_ColorSurf ? "surface" : (type == XCAFDoc_ColorGen ? "generic" : "curve"));
+            colour.fallbackReason.clear();
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    shapeColorCacheMisses++;
+    bool foundAny = false;
     for (const auto& item : std::vector<std::pair<XCAFDoc_ColorType, std::string>>{
              {XCAFDoc_ColorSurf, "surface"},
              {XCAFDoc_ColorGen, "generic"},
              {XCAFDoc_ColorCurv, "curve"}}) {
-      auto found = shapeColorCache.find({shape.TShape().get(), item.first});
-      if (found != shapeColorCache.end()) {
-        shapeColorCacheHits++;
-        colour = found->second;
-        colour.source = prefix + item.second;
-        colour.materialSource = materialSource;
-        colour.lookupPath = lookupPath;
-        colour.colourType = item.second;
-        colour.fallbackReason.clear();
-        return true;
+      Colour queriedColour;
+      if (readShapeColour(colourTool, shape, item.first, prefix + item.second, materialSource, lookupPath, item.second, queriedColour)) {
+        shapeColorCache[{tshapePtr, item.first}] = queriedColour;
+        if (!foundAny) {
+          colour = queriedColour;
+          foundAny = true;
+        }
+      } else {
+        Colour sentinel;
+        sentinel.source = "NO_COLOUR";
+        shapeColorCache[{tshapePtr, item.first}] = sentinel;
       }
     }
-    shapeColorCacheMisses++;
+    return foundAny;
   }
 
   for (const auto& item : std::vector<std::pair<XCAFDoc_ColorType, std::string>>{
