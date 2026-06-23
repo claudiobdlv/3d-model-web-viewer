@@ -71,3 +71,35 @@ target_link_libraries(xcaf-step-extractor PRIVATE
   TKXCAF
   TKXDESTEP
 )
+
+add_executable(xcaf-step-planner
+  src/planner.cpp
+)
+
+target_include_directories(xcaf-step-planner PRIVATE ${OpenCASCADE_INCLUDE_DIR})
+target_link_directories(xcaf-step-planner PRIVATE ${OpenCASCADE_LIBRARY_DIR})
+
+target_link_libraries(xcaf-step-planner PRIVATE
+  TKernel
+  TKMath
+  TKG2d
+  TKG3d
+  TKGeomBase
+  TKBRep
+  TKGeomAlgo
+  TKTopAlgo
+  TKPrim
+  TKBO
+  TKShHealing
+  TKMesh
+  TKXSBase
+  TKSTEPBase
+  TKSTEPAttr
+  TKSTEP209
+  TKSTEP
+  TKLCAF
+  TKCAF
+  TKVCAF
+  TKXCAF
+  TKXDESTEP
+)

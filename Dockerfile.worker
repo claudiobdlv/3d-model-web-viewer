@@ -33,7 +33,8 @@ RUN cmake -S /app/spikes/occt-xcaf-glb -B /app/spikes/occt-xcaf-glb/build -DCMAK
   && cmake --build /app/spikes/occt-xcaf-glb/build --parallel \
   && mkdir -p /app/bin \
   && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-to-glb /app/bin/xcaf-step-to-glb \
-  && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-extractor /app/bin/xcaf-step-extractor
+  && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-extractor /app/bin/xcaf-step-extractor \
+  && cp /app/spikes/occt-xcaf-glb/build/xcaf-step-planner /app/bin/xcaf-step-planner
 
 WORKDIR /app/apps/worker
 
