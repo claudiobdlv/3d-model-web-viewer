@@ -316,6 +316,9 @@ async function runXcafBaselineConverter(input: {
   if (process.env.DEBUG_DISABLE_STYLE_CACHE === "true") {
     args.push("--debug-disable-style-cache");
   }
+  if (process.env.DEBUG_LEGACY_TRANSFORM === "true") {
+    args.push("--debug-legacy-transform");
+  }
 
   await spawnProcess(input.xcafConverterBin, args, input.signal, input.onProgress);
 

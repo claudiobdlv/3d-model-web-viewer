@@ -2097,6 +2097,7 @@ struct CliOptions {
   bool debugSuperCoarseMesh = false;
   bool debugSkipRawStepStyles = false;
   bool debugDisableStyleCache = false;
+  bool debugLegacyTransform = false;
 };
 
 CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
@@ -2132,6 +2133,8 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
       options.debugSkipRawStepStyles = true;
     } else if (arg == "--debug-disable-style-cache") {
       options.debugDisableStyleCache = true;
+    } else if (arg == "--debug-legacy-transform") {
+      options.debugLegacyTransform = true;
     } else {
       throw std::runtime_error("Unknown argument: " + arg);
     }
@@ -2545,7 +2548,7 @@ void tessellateLabel(
     const TDF_Label& label,
     const Quality& quality,
     const std::string& instancePath,
-    const TopLoc_Location& accumulatedLocation,
+    const TopLoc_Location& parentAccumulatedLocation,
     const std::string& transformSource,
     const bool hasInheritedColour,
     const Colour& inheritedColour,
@@ -2562,11 +2565,65 @@ void tessellateLabel(
     stats.skippedShapes += 1;
     return;
   }
-  TopoDS_Shape renderShape = sourceShape;
   const TopLoc_Location localLocation = sourceShape.Location();
-  if (!accumulatedLocation.IsIdentity()) {
-    renderShape = sourceShape.Moved(accumulatedLocation);
+  const TopLoc_Location childAccumulatedLocation = parentAccumulatedLocation * localLocation;
+
+  TopoDS_Shape renderShape = sourceShape;
+  if (cliOptions.debugLegacyTransform) {
+    if (!childAccumulatedLocation.IsIdentity()) {
+      renderShape = sourceShape.Moved(childAccumulatedLocation);
+    }
+  } else {
+    if (!parentAccumulatedLocation.IsIdentity()) {
+      renderShape = sourceShape.Moved(parentAccumulatedLocation);
+    }
   }
+
+  // --- Transform Contract Documentation ---
+  // Vertices are baked into world coordinates during triangulation.
+  // The GLB writer writes identity node transforms (nodes have no translation/rotation/scale matrix).
+  // This is Option A (flattened, baked coordinates) to avoid double-transformation bugs.
+  // For the fixed path, we apply the parent's accumulated location to the shape's local location.
+  // For the legacy path, we compound the child's accumulated location with the shape's local location,
+  // which causes the local transform to be applied twice.
+  // ----------------------------------------
+
+  // Transform Audit Logging (first 20 non-identity / 3 identity)
+  static int auditCount = 0;
+  bool shouldAudit = false;
+  if (!localLocation.IsIdentity() && auditCount < 20) {
+    auditCount++;
+    shouldAudit = true;
+  } else if (localLocation.IsIdentity() && auditCount < 3) {
+    auditCount++;
+    shouldAudit = true;
+  }
+
+  if (shouldAudit) {
+    logLine("[TRANSFORM_AUDIT #" + std::to_string(auditCount) + "] Path: " + (instancePath.empty() ? labelEntry(label) : instancePath));
+    logLine("  - localLocation: " + transformSummary(localLocation));
+    logLine("  - parent accumulatedLocation: " + transformSummary(parentAccumulatedLocation));
+    logLine("  - childAccumulatedLocation (parent * local): " + transformSummary(childAccumulatedLocation));
+    logLine("  - sourceShape.Location(): " + transformSummary(sourceShape.Location()));
+    logLine("  - renderShape.Location(): " + transformSummary(renderShape.Location()));
+    logLine("  - transform mode: " + std::string(cliOptions.debugLegacyTransform ? "legacy (incorrect)" : "fixed (correct)"));
+    logLine("  - final GLB/node transform contract: identity (vertices baked in world coordinates)");
+  }
+
+  // Nested Transform Audit Logging (first 10 where parent is non-identity)
+  static int nestedAuditCount = 0;
+  if (!parentAccumulatedLocation.IsIdentity() && nestedAuditCount < 10) {
+    nestedAuditCount++;
+    logLine("[TRANSFORM_AUDIT_NESTED #" + std::to_string(nestedAuditCount) + "] Path: " + (instancePath.empty() ? labelEntry(label) : instancePath));
+    logLine("  - localLocation: " + transformSummary(localLocation));
+    logLine("  - parent accumulatedLocation: " + transformSummary(parentAccumulatedLocation));
+    logLine("  - childAccumulatedLocation (parent * local): " + transformSummary(childAccumulatedLocation));
+    logLine("  - sourceShape.Location(): " + transformSummary(sourceShape.Location()));
+    logLine("  - renderShape.Location(): " + transformSummary(renderShape.Location()));
+    logLine("  - transform mode: " + std::string(cliOptions.debugLegacyTransform ? "legacy (incorrect)" : "fixed (correct)"));
+    logLine("  - final GLB/node transform contract: identity (vertices baked in world coordinates)");
+  }
+
   const std::string localTransform = transformSummary(localLocation);
   const std::string accumulatedTransform = transformSummary(renderShape.Location());
 
@@ -3133,7 +3190,7 @@ void traverse(
       label,
       quality,
       currentInstancePath,
-      childAccumulatedLocation,
+      accumulatedLocation,
       transformSource,
       hasInheritedColour,
       inheritedColour,
@@ -4273,6 +4330,7 @@ int main(int argc, char** argv) {
     logLine("Debug super coarse mesh: " + (cliOptions.debugSuperCoarseMesh ? std::string("true") : std::string("false")));
     logLine("Debug skip raw STEP styles: " + (cliOptions.debugSkipRawStepStyles ? std::string("true") : std::string("false")));
     logLine("Debug disable style cache: " + (cliOptions.debugDisableStyleCache ? std::string("true") : std::string("false")));
+    logLine("Debug legacy transform: " + (cliOptions.debugLegacyTransform ? std::string("true") : std::string("false")));
     logLine("Hardware concurrency: " + std::to_string(std::thread::hardware_concurrency()));
 
     Interface_Static::SetIVal("read.step.assembly.level", 1);
