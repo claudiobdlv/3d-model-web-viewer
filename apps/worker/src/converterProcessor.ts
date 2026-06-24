@@ -11,6 +11,7 @@ import {
 
 import type { GlbOptimizationMode } from "./glbOptimizer.js";
 import { validateMergedGlb } from "./utils/mergeGlbs.js";
+import { decideLargeStepChunking } from "./utils/largeStepDecision.js";
 
 export type ConverterProcessorInput = {
   slug: string;
@@ -24,12 +25,27 @@ export type ConverterProcessorInput = {
   glbOptimizationMode: GlbOptimizationMode;
   signal?: AbortSignal;
   onProgress?: (percent: number, label: string) => void | Promise<void>;
-  largeStepChunkingMode?: "disabled" | "direct-filter";
-  largeStepFileSizeThresholdMb?: number;
+  largeStepChunkingMode?: "disabled" | "auto" | "direct-filter";
+  largeStepChunkConcurrencyMode?: "fixed" | "adaptive";
+  largeStepFileSizeThresholdMb?: number; // legacy fallback
+  largeStepAutoMinFileSizeMb?: number;
+  largeStepAutoPlannerFileSizeMb?: number;
+  largeStepAutoPrescanEnabled?: boolean;
+  largeStepForcePlanner?: boolean;
   largeStepLeafCountThreshold?: number;
   largeStepFaceCountThreshold?: number;
+  largeStepWorkScoreThreshold?: number;
+  largeStepMinExpectedSpeedupFraction?: number;
   largeStepTargetChunks?: number;
+  largeStepAutoMaxTargetChunks?: number;
+  largeStepMinConcurrentChunks?: number;
+  largeStepInitialConcurrentChunks?: number;
   largeStepMaxConcurrentChunks?: number;
+  largeStepResourcePollSeconds?: number;
+  largeStepMaxWorkerMemoryFraction?: number;
+  largeStepMinFreeMemoryMb?: number;
+  largeStepMaxSwapGrowthMb?: number;
+  largeStepEmergencyMemoryFraction?: number;
   largeStepChunkFallbackMode?: "fail" | "full-conversion";
 };
 
@@ -47,11 +63,25 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   fs.mkdirSync(jobDir, { recursive: true });
 
   const largeStepChunkingMode = input.largeStepChunkingMode ?? "disabled";
-  const largeStepFileSizeThresholdMb = input.largeStepFileSizeThresholdMb ?? 80;
+  const largeStepChunkConcurrencyMode = input.largeStepChunkConcurrencyMode ?? "adaptive";
+  const largeStepAutoMinFileSizeMb = input.largeStepAutoMinFileSizeMb ?? input.largeStepFileSizeThresholdMb ?? 25;
+  const largeStepAutoPlannerFileSizeMb = input.largeStepAutoPlannerFileSizeMb ?? 80;
+  const largeStepAutoPrescanEnabled = input.largeStepAutoPrescanEnabled ?? true;
+  const largeStepForcePlanner = input.largeStepForcePlanner ?? false;
   const largeStepLeafCountThreshold = input.largeStepLeafCountThreshold ?? 2000;
   const largeStepFaceCountThreshold = input.largeStepFaceCountThreshold ?? 50000;
+  const largeStepWorkScoreThreshold = input.largeStepWorkScoreThreshold ?? 35000;
+  const largeStepMinExpectedSpeedupFraction = input.largeStepMinExpectedSpeedupFraction ?? 0.15;
   const largeStepTargetChunks = input.largeStepTargetChunks ?? 3;
+  const largeStepAutoMaxTargetChunks = input.largeStepAutoMaxTargetChunks ?? 6;
+  const largeStepMinConcurrentChunks = input.largeStepMinConcurrentChunks ?? 1;
+  const largeStepInitialConcurrentChunks = input.largeStepInitialConcurrentChunks ?? 2;
   const largeStepMaxConcurrentChunks = input.largeStepMaxConcurrentChunks ?? 3;
+  const largeStepResourcePollSeconds = input.largeStepResourcePollSeconds ?? 10;
+  const largeStepMaxWorkerMemoryFraction = input.largeStepMaxWorkerMemoryFraction ?? 0.75;
+  const largeStepMinFreeMemoryMb = input.largeStepMinFreeMemoryMb ?? 900;
+  const largeStepMaxSwapGrowthMb = input.largeStepMaxSwapGrowthMb ?? 512;
+  const largeStepEmergencyMemoryFraction = input.largeStepEmergencyMemoryFraction ?? 0.92;
   const largeStepChunkFallbackMode = input.largeStepChunkFallbackMode ?? "fail";
 
   const conversionLogPath = path.join(jobDir, "conversion.log");
@@ -62,32 +92,46 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   };
 
   let useChunking = false;
-  const ext = path.extname(input.sourcePath).toLowerCase();
-  const isStep = ext === ".step" || ext === ".stp";
+  const sourceStat = await fs.promises.stat(input.sourcePath);
+  const fileSizeBytes = sourceStat.size;
 
-  if (largeStepChunkingMode === "direct-filter") {
-    if (!isStep) {
-      chunkingStats.status = "skipped";
-      chunkingStats.skipReason = "Not a STEP/STP file";
-      await appendLog(conversionLogPath, `[CHUNKING] Skipped chunking: file extension is "${ext}" (only STEP/STP supported).\n`);
-    } else if (input.converterBackend !== "xcaf-baseline") {
-      chunkingStats.status = "skipped";
-      chunkingStats.skipReason = `Converter backend is "${input.converterBackend}" (only xcaf-baseline supported)`;
-      await appendLog(conversionLogPath, `[CHUNKING] Skipped chunking: backend is "${input.converterBackend}" (only xcaf-baseline supported).\n`);
-    } else {
-      const sourceStat = await fs.promises.stat(input.sourcePath);
-      const fileSizeMb = sourceStat.size / (1024 * 1024);
-      if (fileSizeMb < largeStepFileSizeThresholdMb) {
-        chunkingStats.status = "skipped";
-        chunkingStats.skipReason = `File size ${fileSizeMb.toFixed(2)} MB is below threshold ${largeStepFileSizeThresholdMb} MB`;
-        await appendLog(conversionLogPath, `[CHUNKING] Skipped chunking: file size ${fileSizeMb.toFixed(2)} MB is below threshold ${largeStepFileSizeThresholdMb} MB.\n`);
-      } else {
-        useChunking = true;
-      }
-    }
+  const decisionConfig = {
+    largeStepChunkingMode,
+    largeStepAutoMinFileSizeMb,
+    largeStepAutoPlannerFileSizeMb,
+    largeStepAutoPrescanEnabled,
+    largeStepForcePlanner,
+    largeStepLeafCountThreshold,
+    largeStepFaceCountThreshold,
+    largeStepWorkScoreThreshold
+  };
+
+  const decisionInput = {
+    filePath: input.sourcePath,
+    fileSizeBytes,
+    converterBackend: input.converterBackend
+  };
+
+  // 1. Initial decision
+  let decision = decideLargeStepChunking(decisionInput, decisionConfig);
+
+  // 2. Pre-scan if requested
+  let preScanResult: any = null;
+  if (decision.shouldRunPreScan) {
+    await appendLog(conversionLogPath, `[CHUNKING] Running STEP pre-scan for medium file...\n`);
+    const { preScanStepFile } = await import("./utils/stepPreScan.js");
+    preScanResult = await preScanStepFile(input.sourcePath);
+    await appendLog(
+      conversionLogPath,
+      `[CHUNKING] Pre-scan finished. probablyComplex=${preScanResult.probablyComplex}, advancedFaceCount=${preScanResult.advancedFaceCount}, manifoldSolidBrepCount=${preScanResult.manifoldSolidBrepCount}, productCount=${preScanResult.productCount}, relationshipCount=${preScanResult.relationshipCount}\n`
+    );
+    // Call decision again with pre-scan result
+    decision = decideLargeStepChunking(decisionInput, decisionConfig, preScanResult);
   }
 
-  if (useChunking) {
+  // 3. Planner if requested
+  let plannerPlan: any = null;
+  if (decision.shouldRunPlanner) {
     const plannerBin = path.join(path.dirname(input.xcafConverterBin), "xcaf-step-planner");
     await input.onProgress?.(12, "Planning large model");
     await appendLog(conversionLogPath, `[CHUNKING] Running planner: ${plannerBin} with target chunks ${largeStepTargetChunks}\n`);
@@ -114,7 +158,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       }
     }
 
-    if (useChunking && plannerResult) {
+    if (useChunking === false && plannerResult) {
       if (plannerResult.code !== 0) {
         await appendLog(conversionLogPath, `[CHUNKING] Planner exited with non-zero code ${plannerResult.code}\n`);
         if (largeStepChunkFallbackMode === "full-conversion") {
@@ -128,9 +172,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       } else {
         await appendLog(conversionLogPath, `\n=== Planner stdout ===\n${plannerResult.stdout}\n======================\n`);
         const planPath = path.join(jobDir, "large-model-plan.json");
-        let plan: any;
         try {
-          plan = JSON.parse(await fs.promises.readFile(planPath, "utf8"));
+          plannerPlan = JSON.parse(await fs.promises.readFile(planPath, "utf8"));
         } catch (err: any) {
           await appendLog(conversionLogPath, `[CHUNKING] Failed to read or parse large-model-plan.json: ${err.message}\n`);
           if (largeStepChunkFallbackMode === "full-conversion") {
@@ -143,34 +186,70 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           }
         }
 
-        if (useChunking && plan) {
-          const leafCount = plan.model_summary?.total_leaf_shape_count ?? 0;
-          const faceCount = plan.model_summary?.total_face_count ?? 0;
-          const recommended = plan.chunking_recommendation?.chunking_enabled === true;
+        if (plannerPlan) {
+          const leafCount = plannerPlan.model_summary?.total_leaf_shape_count ?? 0;
+          const faceCount = plannerPlan.model_summary?.total_face_count ?? 0;
+          const workScore = plannerPlan.model_summary?.naive_complexity_score ?? 0;
+          const recommended = plannerPlan.chunking_recommendation?.chunking_enabled === true;
 
-          chunkingStats.planner = {
+          const plannerSummary = {
             leafCount,
             faceCount,
+            workScore,
             recommended
           };
 
-          const shouldChunk =
-            leafCount > largeStepLeafCountThreshold ||
-            faceCount > largeStepFaceCountThreshold ||
-            recommended;
-
-          if (!shouldChunk) {
-            chunkingStats.status = "skipped";
-            chunkingStats.skipReason = `Thresholds not exceeded (leaves=${leafCount}, faces=${faceCount}, recommended=${recommended})`;
-            await appendLog(conversionLogPath, `[CHUNKING] Skipped chunking: thresholds not met. Leaves=${leafCount}, Faces=${faceCount}, Recommended=${recommended}.\n`);
-            useChunking = false;
-          } else {
-            chunkingStats.targetChunks = plan.chunking_recommendation?.target_chunks ?? largeStepTargetChunks;
-            chunkingStats.actualChunks = plan.chunks?.length ?? 0;
-          }
+          decision = decideLargeStepChunking(decisionInput, decisionConfig, preScanResult, plannerSummary);
+          useChunking = decision.shouldChunk;
         }
       }
     }
+  }
+
+  // Populate chunkingStats
+  chunkingStats.mode = largeStepChunkingMode;
+  if (chunkingStats.status !== "fallback-full-conversion") {
+    if (useChunking) {
+      chunkingStats.status = "applied";
+    } else if (largeStepChunkingMode === "disabled") {
+      chunkingStats.status = "disabled";
+    } else if (decision.skipReason) {
+      chunkingStats.status = "skipped";
+      chunkingStats.skipReason = decision.skipReason;
+    } else {
+      chunkingStats.status = "disabled";
+    }
+  }
+
+  chunkingStats.decision = {
+    fileSizeBytes,
+    prescan: preScanResult ? {
+      probablyComplex: preScanResult.probablyComplex,
+      advancedFaceCount: preScanResult.advancedFaceCount,
+      manifoldSolidBrepCount: preScanResult.manifoldSolidBrepCount,
+      productCount: preScanResult.productCount,
+      relationshipCount: preScanResult.relationshipCount,
+      reasons: preScanResult.reasons
+    } : null,
+    plannerRecommended: plannerPlan?.chunking_recommendation?.chunking_enabled ?? null,
+    leafCount: plannerPlan?.model_summary?.total_leaf_shape_count ?? null,
+    faceCount: plannerPlan?.model_summary?.total_face_count ?? null,
+    workScore: plannerPlan?.model_summary?.naive_complexity_score ?? null,
+    reasons: decision.reasons
+  };
+
+  if (useChunking && plannerPlan) {
+    chunkingStats.planner = {
+      leafCount: plannerPlan.model_summary?.total_leaf_shape_count ?? 0,
+      faceCount: plannerPlan.model_summary?.total_face_count ?? 0,
+      recommended: plannerPlan.chunking_recommendation?.chunking_enabled === true
+    };
+    chunkingStats.targetChunks = plannerPlan.chunking_recommendation?.target_chunks ?? largeStepTargetChunks;
+    chunkingStats.actualChunks = plannerPlan.chunks?.length ?? 0;
+  }
+
+  if (!useChunking && decision.skipReason) {
+    await appendLog(conversionLogPath, `[CHUNKING] Skipped chunking. Reason: ${decision.skipReason}. Details: ${decision.reasons.join("; ")}\n`);
   }
 
   if (useChunking) {
@@ -197,7 +276,6 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       );
     }
 
-    const maxConcurrency = Math.min(largeStepMaxConcurrentChunks, chunks.length);
     const activeSubprocesses = new Set<any>();
 
     const abortListener = () => {
@@ -222,7 +300,6 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     const chunkStatsOutputs: any[] = [];
     const chunkReportPaths: string[] = [];
     const chunkGlbPaths: string[] = [];
-    let nextIndex = 0;
     const runningChunks = new Set<number>();
     const completedChunks = new Set<number>();
 
@@ -320,22 +397,155 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       });
     };
 
+    // Adaptive Concurrency Scheduler logic
+    const adaptiveMode = largeStepChunkConcurrencyMode === "adaptive";
+    const initialConcurrency = Math.min(largeStepInitialConcurrentChunks, chunks.length, largeStepMaxConcurrentChunks);
+    const maxConcurrency = Math.min(largeStepMaxConcurrentChunks, chunks.length);
+    const pollIntervalMs = largeStepResourcePollSeconds * 1000;
+
+    const resourceMonitorConfig = {
+      largeStepMaxWorkerMemoryFraction,
+      largeStepMinFreeMemoryMb,
+      largeStepMaxSwapGrowthMb,
+      largeStepEmergencyMemoryFraction
+    };
+
+    const { getResourceSnapshot, readCgroupBytes } = await import("./utils/resourceMonitor.js");
+    const initialSwapBytes = readCgroupBytes("/sys/fs/cgroup/memory.swap.current") || 0;
+
+    const snapshots: any[] = [];
+    let peakMemoryUsedFraction = 0;
+    let peakSwapBytes = 0;
+    let peakSwapGrowthBytes = 0;
+    let maxConcurrencyReached = 0;
+
+    const queue = [...chunks];
+    const activePromises = new Set<Promise<void>>();
+    const chunkErrors: any[] = [];
+
+    const recordSnapshot = () => {
+      const snap = getResourceSnapshot(resourceMonitorConfig, initialSwapBytes);
+      snapshots.push(snap);
+
+      if (snap.memoryUsedFraction !== undefined && snap.memoryUsedFraction > peakMemoryUsedFraction) {
+        peakMemoryUsedFraction = snap.memoryUsedFraction;
+      }
+      if (snap.swapCurrentBytes !== undefined && snap.swapCurrentBytes > peakSwapBytes) {
+        peakSwapBytes = snap.swapCurrentBytes;
+      }
+      if (snap.swapDeltaBytes !== undefined && snap.swapDeltaBytes > peakSwapGrowthBytes) {
+        peakSwapGrowthBytes = snap.swapDeltaBytes;
+      }
+
+      return snap;
+    };
+
     try {
-      const worker = async () => {
-        while (nextIndex < chunks.length) {
-          if (input.signal?.aborted) {
-            throw new DOMException("Conversion cancelled.", "AbortError");
-          }
-          const chunk = chunks[nextIndex++];
-          await runChunk(chunk);
+      let lastPollTime = 0;
+      let launchedCount = 0;
+
+      while (queue.length > 0 || activePromises.size > 0) {
+        if (input.signal?.aborted) {
+          throw new DOMException("Conversion cancelled.", "AbortError");
         }
-      };
-      const workers = Array.from({ length: maxConcurrency }, () => worker());
-      await Promise.all(workers);
+        if (chunkErrors.length > 0) {
+          abortListener();
+          throw chunkErrors[0];
+        }
+
+        const nowMs = Date.now();
+        let currentSnapshot = snapshots[snapshots.length - 1];
+        if (nowMs - lastPollTime >= pollIntervalMs || !currentSnapshot) {
+          currentSnapshot = recordSnapshot();
+          lastPollTime = nowMs;
+
+          await appendLog(
+            conversionLogPath,
+            `[RESOURCE_MONITOR] UsedMemFraction=${currentSnapshot.memoryUsedFraction?.toFixed(4) ?? "N/A"}, FreeMemMb=${((currentSnapshot.memoryFreeBytes ?? 0) / (1024 * 1024)).toFixed(1)}, SwapDeltaMb=${((currentSnapshot.swapDeltaBytes ?? 0) / (1024 * 1024)).toFixed(1)}, SafeToLaunch=${currentSnapshot.safeToLaunchMore}, EmergencyPressure=${currentSnapshot.emergencyPressure}\n`
+          );
+
+          if (currentSnapshot.emergencyPressure) {
+            await appendLog(conversionLogPath, `[RESOURCE_MONITOR] EMERGENCY pressure triggered! Aborting chunks.\n`);
+            abortListener();
+            throw new Error(`Aborted due to emergency memory pressure: ${currentSnapshot.reasons.join("; ")}`);
+          }
+        }
+
+        const activeCount = activePromises.size;
+        if (activeCount > maxConcurrencyReached) {
+          maxConcurrencyReached = activeCount;
+        }
+
+        if (queue.length > 0 && activeCount < maxConcurrency) {
+          let shouldLaunch = false;
+
+          if (activeCount < largeStepMinConcurrentChunks) {
+            shouldLaunch = true;
+          } else if (launchedCount < initialConcurrency) {
+            shouldLaunch = true;
+          } else if (adaptiveMode) {
+            shouldLaunch = currentSnapshot.safeToLaunchMore;
+          } else {
+            shouldLaunch = true;
+          }
+
+          if (shouldLaunch) {
+            const nextChunk = queue.shift();
+            launchedCount++;
+
+            const chunkPromise = runChunk(nextChunk)
+              .then(() => {
+                activePromises.delete(chunkPromise);
+              })
+              .catch((err) => {
+                activePromises.delete(chunkPromise);
+                chunkErrors.push(err);
+              });
+
+            activePromises.add(chunkPromise);
+            if (activePromises.size > maxConcurrencyReached) {
+              maxConcurrencyReached = activePromises.size;
+            }
+            continue;
+          }
+        }
+
+        if (activePromises.size > 0) {
+          await Promise.race([
+            new Promise((resolve) => setTimeout(resolve, 1000)),
+            Promise.any(activePromises)
+          ]).catch(() => {
+            // chunkPromise catch block handles removing itself, errors are propagated below
+          });
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+
+      if (chunkErrors.length > 0) {
+        throw chunkErrors[0];
+      }
+
+      // Propagate errors from chunk promises if any failed
+      await Promise.all(activePromises);
 
       if (input.signal) {
         input.signal.removeEventListener("abort", abortListener);
       }
+
+      chunkingStats.adaptiveConcurrency = {
+        enabled: adaptiveMode,
+        initial: initialConcurrency,
+        maxConfigured: largeStepMaxConcurrentChunks,
+        maxReached: maxConcurrencyReached,
+        pollSeconds: largeStepResourcePollSeconds,
+        snapshots,
+        summary: {
+          peakMemoryUsedFraction,
+          peakSwapBytes,
+          swapGrowthBytes: peakSwapGrowthBytes
+        }
+      };
     } catch (chunkErr: any) {
       if (input.signal) {
         input.signal.removeEventListener("abort", abortListener);

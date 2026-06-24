@@ -15,12 +15,27 @@ export type WorkerConfig = {
   runOnce: boolean;
   keepWorkerOutput: boolean;
   maxModelArtifactBytes: number;
-  largeStepChunkingMode: "disabled" | "direct-filter";
+  largeStepChunkingMode: "disabled" | "auto" | "direct-filter";
+  largeStepChunkConcurrencyMode: "fixed" | "adaptive";
   largeStepFileSizeThresholdMb: number;
+  largeStepAutoMinFileSizeMb: number;
+  largeStepAutoPlannerFileSizeMb: number;
+  largeStepAutoPrescanEnabled: boolean;
+  largeStepForcePlanner: boolean;
   largeStepLeafCountThreshold: number;
   largeStepFaceCountThreshold: number;
+  largeStepWorkScoreThreshold: number;
+  largeStepMinExpectedSpeedupFraction: number;
   largeStepTargetChunks: number;
+  largeStepAutoMaxTargetChunks: number;
+  largeStepMinConcurrentChunks: number;
+  largeStepInitialConcurrentChunks: number;
   largeStepMaxConcurrentChunks: number;
+  largeStepResourcePollSeconds: number;
+  largeStepMaxWorkerMemoryFraction: number;
+  largeStepMinFreeMemoryMb: number;
+  largeStepMaxSwapGrowthMb: number;
+  largeStepEmergencyMemoryFraction: number;
   largeStepChunkFallbackMode: "fail" | "full-conversion";
 };
 
@@ -51,14 +66,24 @@ export function loadConfig(argv = process.argv): WorkerConfig {
   }
 
   const largeStepChunkingMode = process.env.LARGE_STEP_CHUNKING_MODE || "disabled";
-  if (!["disabled", "direct-filter"].includes(largeStepChunkingMode)) {
-    throw new Error("LARGE_STEP_CHUNKING_MODE must be disabled or direct-filter.");
+  if (!["disabled", "auto", "direct-filter"].includes(largeStepChunkingMode)) {
+    throw new Error("LARGE_STEP_CHUNKING_MODE must be disabled, auto, or direct-filter.");
+  }
+
+  const largeStepChunkConcurrencyMode = process.env.LARGE_STEP_CHUNK_CONCURRENCY_MODE || "adaptive";
+  if (!["fixed", "adaptive"].includes(largeStepChunkConcurrencyMode)) {
+    throw new Error("LARGE_STEP_CHUNK_CONCURRENCY_MODE must be fixed or adaptive.");
   }
 
   const largeStepChunkFallbackMode = process.env.LARGE_STEP_CHUNK_FALLBACK_MODE || "fail";
   if (!["fail", "full-conversion"].includes(largeStepChunkFallbackMode)) {
     throw new Error("LARGE_STEP_CHUNK_FALLBACK_MODE must be fail or full-conversion.");
   }
+
+  // Support LARGE_STEP_FILE_SIZE_THRESHOLD_MB as a fallback for LARGE_STEP_AUTO_MIN_FILE_SIZE_MB if defined.
+  const defaultMinSize = process.env.LARGE_STEP_FILE_SIZE_THRESHOLD_MB
+    ? Number(process.env.LARGE_STEP_FILE_SIZE_THRESHOLD_MB)
+    : 25;
 
   return {
     serverUrl: trimTrailingSlash(process.env.SERVER_URL || "http://localhost:3009"),
@@ -83,11 +108,30 @@ export function loadConfig(argv = process.argv): WorkerConfig {
       262144000,
       "MAX_MODEL_ARTIFACT_BYTES"
     ),
-    largeStepChunkingMode: largeStepChunkingMode as "disabled" | "direct-filter",
+    largeStepChunkingMode: largeStepChunkingMode as "disabled" | "auto" | "direct-filter",
+    largeStepChunkConcurrencyMode: largeStepChunkConcurrencyMode as "fixed" | "adaptive",
     largeStepFileSizeThresholdMb: positiveInteger(
-      process.env.LARGE_STEP_FILE_SIZE_THRESHOLD_MB,
+      process.env.LARGE_STEP_AUTO_MIN_FILE_SIZE_MB || process.env.LARGE_STEP_FILE_SIZE_THRESHOLD_MB,
       80,
       "LARGE_STEP_FILE_SIZE_THRESHOLD_MB"
+    ),
+    largeStepAutoMinFileSizeMb: positiveInteger(
+      process.env.LARGE_STEP_AUTO_MIN_FILE_SIZE_MB,
+      defaultMinSize,
+      "LARGE_STEP_AUTO_MIN_FILE_SIZE_MB"
+    ),
+    largeStepAutoPlannerFileSizeMb: positiveInteger(
+      process.env.LARGE_STEP_AUTO_PLANNER_FILE_SIZE_MB,
+      80,
+      "LARGE_STEP_AUTO_PLANNER_FILE_SIZE_MB"
+    ),
+    largeStepAutoPrescanEnabled: parseBoolean(
+      process.env.LARGE_STEP_AUTO_PRESCAN_ENABLED,
+      true
+    ),
+    largeStepForcePlanner: parseBoolean(
+      process.env.LARGE_STEP_FORCE_PLANNER,
+      false
     ),
     largeStepLeafCountThreshold: positiveInteger(
       process.env.LARGE_STEP_LEAF_COUNT_THRESHOLD,
@@ -99,15 +143,65 @@ export function loadConfig(argv = process.argv): WorkerConfig {
       50000,
       "LARGE_STEP_FACE_COUNT_THRESHOLD"
     ),
+    largeStepWorkScoreThreshold: positiveInteger(
+      process.env.LARGE_STEP_WORK_SCORE_THRESHOLD,
+      35000,
+      "LARGE_STEP_WORK_SCORE_THRESHOLD"
+    ),
+    largeStepMinExpectedSpeedupFraction: positiveFloat(
+      process.env.LARGE_STEP_MIN_EXPECTED_SPEEDUP_FRACTION,
+      0.15,
+      "LARGE_STEP_MIN_EXPECTED_SPEEDUP_FRACTION"
+    ),
     largeStepTargetChunks: positiveInteger(
       process.env.LARGE_STEP_TARGET_CHUNKS,
       3,
       "LARGE_STEP_TARGET_CHUNKS"
     ),
+    largeStepAutoMaxTargetChunks: positiveInteger(
+      process.env.LARGE_STEP_AUTO_MAX_TARGET_CHUNKS,
+      6,
+      "LARGE_STEP_AUTO_MAX_TARGET_CHUNKS"
+    ),
+    largeStepMinConcurrentChunks: positiveInteger(
+      process.env.LARGE_STEP_MIN_CONCURRENT_CHUNKS,
+      1,
+      "LARGE_STEP_MIN_CONCURRENT_CHUNKS"
+    ),
+    largeStepInitialConcurrentChunks: positiveInteger(
+      process.env.LARGE_STEP_INITIAL_CONCURRENT_CHUNKS,
+      2,
+      "LARGE_STEP_INITIAL_CONCURRENT_CHUNKS"
+    ),
     largeStepMaxConcurrentChunks: positiveInteger(
       process.env.LARGE_STEP_MAX_CONCURRENT_CHUNKS,
       3,
       "LARGE_STEP_MAX_CONCURRENT_CHUNKS"
+    ),
+    largeStepResourcePollSeconds: positiveInteger(
+      process.env.LARGE_STEP_RESOURCE_POLL_SECONDS,
+      10,
+      "LARGE_STEP_RESOURCE_POLL_SECONDS"
+    ),
+    largeStepMaxWorkerMemoryFraction: positiveFloat(
+      process.env.LARGE_STEP_MAX_WORKER_MEMORY_FRACTION,
+      0.75,
+      "LARGE_STEP_MAX_WORKER_MEMORY_FRACTION"
+    ),
+    largeStepMinFreeMemoryMb: positiveInteger(
+      process.env.LARGE_STEP_MIN_FREE_MEMORY_MB,
+      900,
+      "LARGE_STEP_MIN_FREE_MEMORY_MB"
+    ),
+    largeStepMaxSwapGrowthMb: positiveInteger(
+      process.env.LARGE_STEP_MAX_SWAP_GROWTH_MB,
+      512,
+      "LARGE_STEP_MAX_SWAP_GROWTH_MB"
+    ),
+    largeStepEmergencyMemoryFraction: positiveFloat(
+      process.env.LARGE_STEP_EMERGENCY_MEMORY_FRACTION,
+      0.92,
+      "LARGE_STEP_EMERGENCY_MEMORY_FRACTION"
     ),
     largeStepChunkFallbackMode: largeStepChunkFallbackMode as "fail" | "full-conversion"
   };
@@ -120,6 +214,20 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
     throw new Error(`${name} must be a positive integer.`);
   }
   return parsed;
+}
+
+function positiveFloat(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a positive float.`);
+  }
+  return parsed;
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  return value.toLowerCase() === "true";
 }
 
 function trimTrailingSlash(value: string): string {

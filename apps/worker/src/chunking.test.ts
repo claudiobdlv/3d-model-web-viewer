@@ -201,7 +201,7 @@ test("non-STEP does not run chunking", async (t) => {
     
     const manifest = JSON.parse(await fs.promises.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.largeStepChunking.status, "skipped");
-    assert.equal(manifest.largeStepChunking.skipReason, "Not a STEP/STP file");
+    assert.equal(manifest.largeStepChunking.skipReason, "non-step");
   } finally {
     await fs.promises.rm(dir, { recursive: true, force: true });
   }
@@ -253,7 +253,7 @@ test("below threshold does not run chunking", async (t) => {
 
     const manifest = JSON.parse(await fs.promises.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.largeStepChunking.status, "skipped");
-    assert.match(manifest.largeStepChunking.skipReason, /below threshold/);
+    assert.match(manifest.largeStepChunking.skipReason, /below-auto-min-size/);
   } finally {
     await fs.promises.rm(dir, { recursive: true, force: true });
   }
