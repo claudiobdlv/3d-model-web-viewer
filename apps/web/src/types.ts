@@ -21,6 +21,7 @@ export type ModelRecord = {
   created_at: string;
   updated_at: string;
   default_view_json?: string | null;
+  largeStepChunkingSummary?: LargeStepChunkingSummary;
 };
 
 export type ProjectRecord = {
@@ -115,4 +116,29 @@ export type PublicModel = {
   slug: string;
   glb_url: string;
   default_view_json?: string | null;
+};
+
+export type LargeStepChunkingSummary = {
+  mode?: string;
+  status?: string;
+  label?: string;
+  detailLabel?: string;
+  skipReason?: string;
+  targetChunks?: number;
+  actualChunks?: number;
+  maxActiveChunks?: number;
+  plannerDurationSeconds?: number;
+  totalWallClockSeconds?: number;
+  rawGlbBytes?: number;
+  finalGlbBytes?: number;
+  meshoptReductionPercent?: number;
+  peakMemoryFraction?: number;
+  swapGrowthBytes?: number;
+  decisionReasons?: string[];
+  chunks?: Array<{
+    index?: number;
+    durationSeconds?: number;
+    triangles?: number;
+    glbBytes?: number;
+  }>;
 };

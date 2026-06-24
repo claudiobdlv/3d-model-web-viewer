@@ -256,6 +256,195 @@ function QuotaCard({quota}:{quota:StorageQuota|null}) {
     <div className="quota-available">{quota ? `${formatBytes(quota.availableBytes)} available` : ""}</div></div>;
 }
 
+function formatDuration(seconds?: number): string {
+  if (seconds === undefined || seconds === null) return "Not recorded";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}m ${s}s`;
+}
+
+function formatMB(bytes?: number): string {
+  if (bytes === undefined || bytes === null) return "Not recorded";
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function formatPercent(fraction?: number): string {
+  if (fraction === undefined || fraction === null) return "Not recorded";
+  return `${Math.round(fraction * 100)}%`;
+}
+
+function formatSwap(bytes?: number): string {
+  if (bytes === undefined || bytes === null) return "Not recorded";
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(2)} MB`;
+}
+
+function formatReduction(reductionPercent?: number): string {
+  if (reductionPercent === undefined || reductionPercent === null) return "Not recorded";
+  return `${reductionPercent}%`;
+}
+
+function ModelDetailsPanel({ summary }: { summary?: any }) {
+  if (!summary) {
+    return <div className="model-details-empty">No conversion details available.</div>;
+  }
+
+  const {
+    mode,
+    status,
+    skipReason,
+    decisionReasons,
+    targetChunks,
+    actualChunks,
+    maxActiveChunks,
+    plannerDurationSeconds,
+    totalWallClockSeconds,
+    rawGlbBytes,
+    finalGlbBytes,
+    meshoptReductionPercent,
+    peakMemoryFraction,
+    swapGrowthBytes,
+    chunks,
+    fallbackReason,
+    processingProgress
+  } = summary;
+
+  return (
+    <div className="model-details-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="details-grid">
+        <div className="details-section">
+          <h4>Chunking Configuration</h4>
+          <div className="details-row-item">
+            <span className="details-label">Mode:</span>
+            <span className="details-val">{mode ?? "Not recorded"}</span>
+          </div>
+          <div className="details-row-item">
+            <span className="details-label">Status:</span>
+            <span className="details-val">{status ?? "Not recorded"}</span>
+          </div>
+          {skipReason && (
+            <div className="details-row-item">
+              <span className="details-label">Skip Reason:</span>
+              <span className="details-val">{skipReason}</span>
+            </div>
+          )}
+          {fallbackReason && (
+            <div className="details-row-item">
+              <span className="details-label">Failure/Fallback:</span>
+              <span className="details-val danger-text">{fallbackReason}</span>
+            </div>
+          )}
+          {processingProgress && (
+            <div className="details-row-item">
+              <span className="details-label">Progress:</span>
+              <span className="details-val highlight-text">{processingProgress}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="details-section">
+          <h4>Execution & Timing</h4>
+          <div className="details-row-item">
+            <span className="details-label">Total Time:</span>
+            <span className="details-val">{formatDuration(totalWallClockSeconds)}</span>
+          </div>
+          {plannerDurationSeconds !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Planner Time:</span>
+              <span className="details-val">{formatDuration(plannerDurationSeconds)}</span>
+            </div>
+          )}
+          {targetChunks !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Target Chunks:</span>
+              <span className="details-val">{targetChunks}</span>
+            </div>
+          )}
+          {actualChunks !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Actual Chunks:</span>
+              <span className="details-val">{actualChunks}</span>
+            </div>
+          )}
+          {maxActiveChunks !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Max Active:</span>
+              <span className="details-val">{maxActiveChunks}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="details-section">
+          <h4>Optimization & Size</h4>
+          {rawGlbBytes !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Raw GLB Size:</span>
+              <span className="details-val">{formatMB(rawGlbBytes)}</span>
+            </div>
+          )}
+          {finalGlbBytes !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Final GLB Size:</span>
+              <span className="details-val">{formatMB(finalGlbBytes)}</span>
+            </div>
+          )}
+          {meshoptReductionPercent !== undefined && meshoptReductionPercent !== null && (
+            <div className="details-row-item">
+              <span className="details-label">Meshopt Reduction:</span>
+              <span className="details-val">{formatReduction(meshoptReductionPercent)}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="details-section">
+          <h4>Resources & Memory</h4>
+          {peakMemoryFraction !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Peak Memory:</span>
+              <span className="details-val">{formatPercent(peakMemoryFraction)}</span>
+            </div>
+          )}
+          {swapGrowthBytes !== undefined && (
+            <div className="details-row-item">
+              <span className="details-label">Swap Growth:</span>
+              <span className="details-val">{formatSwap(swapGrowthBytes)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {decisionReasons && decisionReasons.length > 0 && (
+        <div className="details-full-width">
+          <h5>Decision Reasons</h5>
+          <ul className="reasons-list">
+            {decisionReasons.map((r: string, idx: number) => (
+              <li key={idx}>{r}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {chunks && chunks.length > 0 && (
+        <div className="details-full-width">
+          <h5>Per-Chunk Durations</h5>
+          <div className="chunks-grid">
+            {chunks.map((c: any) => (
+              <div key={c.index} className="chunk-info-card">
+                <strong>Chunk {c.index + 1}</strong>
+                <span>Time: {formatDuration(c.durationSeconds)}</span>
+                {c.triangles !== undefined && (
+                  <span>Faces: {c.triangles.toLocaleString()}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];uploadTasks:UploadTask[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
   models=[...uploadTasks.map(task=>({id:-1,slug:`upload-${task.clientUploadId}`,name:task.filename.replace(/\.[^.]+$/,"") ,source_filename:task.filename,source_ext:"",status:`upload:${task.stage}:${task.percent}:${task.currentChunk}:${task.totalChunks}`,has_display_glb:0,glb_size_bytes:null,original_size_bytes:task.sizeBytes,folder_id:task.projectId,project_id:task.projectId,project_name:task.projectName,quality:task.quality,deleted_at:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString()} as ModelRecord)),...models];
   const rangeAnchor = useRef<string | null>(null);
@@ -263,6 +452,16 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
     const defaults=Object.fromEntries(columnDefinitions.map(column=>[column.key,column.defaultWidth])) as Record<ColumnKey,number>;
     try { const saved=JSON.parse(localStorage.getItem(columnWidthsKey)??"{}"); return Object.fromEntries(columnDefinitions.map(column=>{const value=saved[column.key];return [column.key,typeof value==="number"&&Number.isFinite(value)?Math.min(column.maxWidth,Math.max(column.minWidth,value)):defaults[column.key]]})) as Record<ColumnKey,number>; } catch{return defaults}
   });
+  const [expandedSlugs, setExpandedSlugs] = useState<Set<string>>(new Set());
+  const toggleExpand = (slug: string) => {
+    const next = new Set(expandedSlugs);
+    if (next.has(slug)) {
+      next.delete(slug);
+    } else {
+      next.add(slug);
+    }
+    setExpandedSlugs(next);
+  };
   const selectableModels=models.filter(model=>!model.status.startsWith("upload:"));
   const all=selectableModels.length>0&&selectableModels.every(m=>selected.has(m.slug));
   const toggle=(slug:string,shiftKey:boolean)=>{const next=new Set(selected);const shouldSelect=!next.has(slug);const anchorIndex=rangeAnchor.current?models.findIndex(model=>model.slug===rangeAnchor.current):-1;const targetIndex=models.findIndex(model=>model.slug===slug);if(shiftKey&&anchorIndex>=0&&targetIndex>=0){models.slice(Math.min(anchorIndex,targetIndex),Math.max(anchorIndex,targetIndex)+1).forEach(model=>shouldSelect?next.add(model.slug):next.delete(model.slug));}else{shouldSelect?next.add(slug):next.delete(slug);}rangeAnchor.current=slug;onSelected(next)};
@@ -272,10 +471,55 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
   const resize=(key:ColumnKey,width:number)=>{const next={...widths,[key]:width};setWidths(next);localStorage.setItem(columnWidthsKey,JSON.stringify(next))};
   return <div className="table-scroll"><table className="asset-table" style={{width:tableWidth,minWidth:"100%"}}><thead><tr><th className="check-cell"><input type="checkbox" checked={all} onChange={()=>onSelected(all?new Set():new Set(selectableModels.map(m=>m.slug)))} aria-label="Select all visible"/></th>
     {columnDefinitions.map(column=><ResizableHeaderCell key={column.key} width={widths[column.key]} minWidth={column.minWidth} maxWidth={column.maxWidth} onResize={(width)=>resize(column.key,width)}>{column.sortKey?<button className="sort-button" onClick={()=>onSort(column.sortKey!)}>{column.label}{sortBy===column.sortKey&&(sortDir==="asc"?<ArrowUp/>:<ArrowDown/>)}</button>:<span>{column.label}</span>}</ResizableHeaderCell>)}<th className="action-cell">Actions</th></tr></thead>
-    <tbody>{models.map(model=>{const isUpload=model.status.startsWith("upload:");const open=()=>{if(!isUpload)window.location.href=viewerPath(model.slug,returnTo)};return <tr key={model.slug} className={`${selected.has(model.slug)?"selected ":""}${trash||isUpload?"":"clickable-row"}`} tabIndex={trash||isUpload?undefined:0} role={trash||isUpload?undefined:"link"} onClick={event=>{if(!trash&&!isUpload&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}} onKeyDown={event=>{if(!trash&&!isUpload&&event.key==="Enter"&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}}><td className="check-cell">{!isUpload&&<input type="checkbox" checked={selected.has(model.slug)} onChange={event=>toggle(model.slug,(event.nativeEvent as MouseEvent).shiftKey)} aria-label={`Select ${model.name}`}/>}</td>
-      <td>{trash||isUpload?<div className="model-name"><span className="file-icon">{isUpload?<Upload size={17}/>:<Box size={17}/>}</span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></div>:<a className="model-name" href={viewerPath(model.slug,returnTo)}><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></a>}</td>
-      <td>{model.project_name??<span className="muted">Unsorted</span>}</td><td><Status status={model.status}/></td><td className="quality-cell">{model.quality??"—"}</td><td>{formatFileSize(model.glb_size_bytes)}</td><td>{formatDate(model.created_at)}</td>
-      <td className="action-cell">{!isUpload&&<RowMenu model={model} trash={trash} returnTo={returnTo} onAction={onAction} onRefresh={onRefresh}/>}</td></tr>})}</tbody></table></div>;
+    <tbody>{models.map(model=>{
+      const isUpload=model.status.startsWith("upload:");
+      const hasSummary = !!model.largeStepChunkingSummary;
+      const isExpanded = expandedSlugs.has(model.slug);
+      const open=()=>{if(!isUpload)window.location.href=viewerPath(model.slug,returnTo)};
+      return <React.Fragment key={model.slug}>
+        <tr className={`${selected.has(model.slug)?"selected ":""}${trash||isUpload?"":"clickable-row"}`} tabIndex={trash||isUpload?undefined:0} role={trash||isUpload?undefined:"link"} onClick={event=>{if(!trash&&!isUpload&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}} onKeyDown={event=>{if(!trash&&!isUpload&&event.key==="Enter"&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}}>
+          <td className="check-cell">{!isUpload&&<input type="checkbox" checked={selected.has(model.slug)} onChange={event=>toggle(model.slug,(event.nativeEvent as MouseEvent).shiftKey)} aria-label={`Select ${model.name}`}/>}</td>
+          <td>
+            <div style={{ display: "flex", alignItems: "center" }}>
+              {!trash && !isUpload && (
+                hasSummary ? (
+                  <button className="expand-button" onClick={(e) => { e.stopPropagation(); toggleExpand(model.slug); }} title="Toggle details">
+                    <ChevronRight className={`expand-icon ${isExpanded ? 'rotated' : ''}`} />
+                  </button>
+                ) : (
+                  <div style={{ width: "24px", flexShrink: 0 }} />
+                )
+              )}
+              {trash||isUpload?<div className="model-name"><span className="file-icon">{isUpload?<Upload size={17}/>:<Box size={17}/>}</span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></div>:<a className="model-name" href={viewerPath(model.slug,returnTo)}><span className="file-icon"><Box size={17}/></span><span><strong>{model.name}</strong><small>{model.source_filename}</small></span></a>}
+            </div>
+          </td>
+          <td>{model.project_name??<span className="muted">Unsorted</span>}</td>
+          <td>
+            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+              <Status status={model.status}/>
+              {model.largeStepChunkingSummary?.label && (
+                <span className="chunking-badge-text">
+                  {model.largeStepChunkingSummary.label}
+                  {model.largeStepChunkingSummary.detailLabel ? ` — ${model.largeStepChunkingSummary.detailLabel}` : ""}
+                </span>
+              )}
+            </div>
+          </td>
+          <td className="quality-cell">{model.quality??"—"}</td>
+          <td>{formatFileSize(model.glb_size_bytes)}</td>
+          <td>{formatDate(model.created_at)}</td>
+          <td className="action-cell">{!isUpload&&<RowMenu model={model} trash={trash} returnTo={returnTo} onAction={onAction} onRefresh={onRefresh}/>}</td>
+        </tr>
+        {isExpanded && !isUpload && (
+          <tr className="details-row">
+            <td />
+            <td colSpan={7}>
+              <ModelDetailsPanel summary={model.largeStepChunkingSummary} />
+            </td>
+          </tr>
+        )}
+      </React.Fragment>
+    })}</tbody></table></div>;
 }
 
 function Status({status}:{status:string}){if(status.startsWith("upload:")){const[,stage,percent,current,total]=status.split(":");return <div className={`row-progress ${stage==="failed"||stage==="cancelled"?"failed":""}`}><strong>{stage==="uploading"?`Uploading ${percent}%`:stage[0].toUpperCase()+stage.slice(1)}</strong>{Number(total)>0&&stage==="uploading"&&<small>chunk {current} of {total}</small>}<span><i style={{width:`${percent}%`}}/></span></div>}if(status.startsWith("progress|")){const[,stage,percent,label,started]=status.split("|");const minutes=started?Math.floor(Math.max(0,Date.now()-new Date(`${started}Z`).getTime())/60000):0;return <div className="row-progress"><strong>{label} - {percent}%</strong><small>{minutes?`${minutes}m elapsed`:stage==="cancelling"?"Stopping worker process":"Stage-based progress"}</small><span><i style={{width:`${percent}%`}}/></span></div>}return <span className={`compact-status ${statusKind(status)}`}><span/>{statusLabel(status)}</span>}

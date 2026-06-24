@@ -26,6 +26,7 @@ import {
   isSafeSlug
 } from "../storage.js";
 import { parseConversionQuality, type ConversionQuality } from "../quality.js";
+import { getLargeStepChunkingSummary } from "../utils/largeStepChunkingSummary.js";
 
 const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
 
@@ -48,7 +49,12 @@ export const modelsRouter = express.Router();
 
 modelsRouter.get("/", (req, res) => {
   try {
-    res.json(listModels(parseListOptions(req.query)));
+    const list = listModels(parseListOptions(req.query));
+    const listWithSummary = list.map((model) => {
+      const summary = getLargeStepChunkingSummary(model.slug, false);
+      return summary ? { ...model, largeStepChunkingSummary: summary } : model;
+    });
+    res.json(listWithSummary);
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : "Invalid list options." });
   }
@@ -132,7 +138,8 @@ modelsRouter.get("/:slug", (req, res) => {
     return;
   }
 
-  res.json(model);
+  const summary = getLargeStepChunkingSummary(slug, true);
+  res.json(summary ? { ...model, largeStepChunkingSummary: summary } : model);
 });
 
 export async function registerModelAndJob({

@@ -65,6 +65,7 @@ export type ConverterProcessorOutput = {
 };
 
 export async function convertStepJob(input: ConverterProcessorInput): Promise<ConverterProcessorOutput> {
+  const jobStartTime = Date.now();
   const jobDir = path.join(input.outputDir, input.slug);
   fs.mkdirSync(jobDir, { recursive: true });
 
@@ -147,6 +148,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     await input.onProgress?.(12, "Planning large model");
     await appendLog(conversionLogPath, `[CHUNKING] Running planner: ${plannerBin} with target chunks ${largeStepTargetChunks}\n`);
 
+    const plannerStartTime = Date.now();
     let plannerResult: { stdout: string; code: number } | null = null;
     try {
       plannerResult = await runPlanner({
@@ -156,6 +158,9 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
         targetChunks: largeStepTargetChunks,
         signal: input.signal
       });
+      const plannerDurationMs = Date.now() - plannerStartTime;
+      chunkingStats.plannerDurationSeconds = Number((plannerDurationMs / 1000).toFixed(2));
+      await appendLog(conversionLogPath, `[CHUNKING] Planner finished in ${chunkingStats.plannerDurationSeconds}s\n`);
     } catch (err: any) {
       if (input.signal?.aborted) throw err;
       await appendLog(conversionLogPath, `[CHUNKING] Planner failed with error: ${err.message || err}\n`);
@@ -832,6 +837,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           fallbackUsed: optimizationResult.fallbackUsed,
           message: optimizationResult.message
         };
+        chunkingStats.totalWallClockSeconds = Number(((Date.now() - jobStartTime) / 1000).toFixed(2));
         statsObj.largeStepChunking = chunkingStats;
         await fs.promises.writeFile(statsPath, JSON.stringify(statsObj, null, 2) + "\n");
 
@@ -1017,6 +1023,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     fallbackUsed: optimizationResult.fallbackUsed,
     message: optimizationResult.message
   };
+  chunkingStats.totalWallClockSeconds = Number(((Date.now() - jobStartTime) / 1000).toFixed(2));
   statsObj.largeStepChunking = chunkingStats;
   await fs.promises.writeFile(statsPath, JSON.stringify(statsObj, null, 2) + "\n");
 
