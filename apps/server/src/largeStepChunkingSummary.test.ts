@@ -124,6 +124,9 @@ test("largeStepChunkingSummary helper normalization and log parsing", async (t) 
   });
 
   await t.test("parses conversion log if readLog is true", () => {
+    if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
+    if (fs.existsSync(statsPath)) fs.unlinkSync(statsPath);
+
     // Write conversion.log
     fs.writeFileSync(logPath, `
 [CHUNKING] Running STEP pre-scan for medium file...

@@ -130,25 +130,28 @@ export function getLargeStepChunkingSummary(slug: string, readLog = false): Larg
     if (logFilePath) {
       const logContent = readLogTail(logFilePath);
       if (logContent) {
-        // 1. Determine active processing progress from log
-        if (logContent.includes("[CHUNKING] Merging chunk GLBs...")) {
-          processingProgress = "Processing: merging";
-        } else {
-          const startMatches = [...logContent.matchAll(/\[CHUNKING\] Starting chunk (\d+)/g)];
-          if (startMatches.length > 0) {
-            const currentIdx = parseInt(startMatches[startMatches.length - 1][1], 10);
-            const currentNum = currentIdx + 1;
-            const targetMatch = logContent.match(/with target chunks (\d+)/);
-            if (targetMatch) {
-              const target = parseInt(targetMatch[1], 10);
-              processingProgress = `Processing: chunk ${currentNum}/${target}`;
-            } else {
-              processingProgress = `Processing: chunk ${currentNum}`;
+        // 1. Determine active processing progress from log if not completed yet
+        const isComplete = summary.status && ["applied", "skipped", "disabled", "fallback-full-conversion"].includes(summary.status);
+        if (!isComplete) {
+          if (logContent.includes("[CHUNKING] Merging chunk GLBs...")) {
+            processingProgress = "Processing: merging";
+          } else {
+            const startMatches = [...logContent.matchAll(/\[CHUNKING\] Starting chunk (\d+)/g)];
+            if (startMatches.length > 0) {
+              const currentIdx = parseInt(startMatches[startMatches.length - 1][1], 10);
+              const currentNum = currentIdx + 1;
+              const targetMatch = logContent.match(/with target chunks (\d+)/);
+              if (targetMatch) {
+                const target = parseInt(targetMatch[1], 10);
+                processingProgress = `Processing: chunk ${currentNum}/${target}`;
+              } else {
+                processingProgress = `Processing: chunk ${currentNum}`;
+              }
+            } else if (logContent.includes("[CHUNKING] Running planner:")) {
+              processingProgress = "Processing: planner";
+            } else if (logContent.includes("[CHUNKING] Running STEP pre-scan")) {
+              processingProgress = "Processing: pre-scan";
             }
-          } else if (logContent.includes("[CHUNKING] Running planner:")) {
-            processingProgress = "Processing: planner";
-          } else if (logContent.includes("[CHUNKING] Running STEP pre-scan")) {
-            processingProgress = "Processing: pre-scan";
           }
         }
 
