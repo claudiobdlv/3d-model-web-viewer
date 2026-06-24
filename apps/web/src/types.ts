@@ -30,21 +30,35 @@ export type ModelRevisionRecord = {
   id: number;
   model_id: number;
   revision_label: string;
-  date_issued: string;
+  revision_sort_order: number;
+  issued_date: string;
+  quality_preset: string;
   status: "uploaded" | "queued" | "processing" | "ready" | "failed" | string;
-  has_display_glb: number;
-  glb_size_bytes: number | null;
-  original_size_bytes: number | null;
-  quality: ConversionQuality;
-  source_filename: string;
-  source_ext: string;
-  is_active: number;
-  replaced_by_id: number | null;
-  replacement_reason: string | null;
-  allowed_in_public_viewer: number;
   is_current: number;
-  created_at: string;
+  is_publicly_selectable: number;
+  source_filename: string;
+  source_path: string;
+  display_glb_path: string;
+  source_size_bytes: number;
+  glb_size_bytes: number | null;
+  conversion_job_id: number | null;
+  uploaded_at: string;
   updated_at: string;
+  deleted_at: string | null;
+};
+
+export type RevisionFileVersionRecord = {
+  id: number;
+  revision_id: number;
+  file_version_number: number;
+  source_filename: string;
+  source_path: string;
+  display_glb_path: string;
+  quality_preset: string;
+  replacement_reason: string | null;
+  is_active: number;
+  uploaded_at: string;
+  uploaded_by: string | null;
 };
 
 export type ProjectRecord = {
@@ -104,6 +118,7 @@ export type JobRecord = {
   started_at: string | null;
   completed_at: string | null;
   failed_at: string | null;
+  revision_id?: number | null;
 };
 
 export type ConversionQuality = "low" | "medium" | "high";

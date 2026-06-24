@@ -3,14 +3,16 @@ import path from "node:path";
 import express from "express";
 import crypto from "node:crypto";
 import {
+  db,
   createPublicShare,
   getActivePublicShareForModel,
   getModelById,
-  getPublicShareModelByHash,
   getStorageQuota,
   initDb,
   recordPublicShareAccess,
-  revokePublicSharesForModel
+  revokePublicSharesForModel,
+  resolvePublicShareRevision,
+  type PublicShareRecord
 } from "./db.js";
 import {
   generatePublicToken,
@@ -33,7 +35,8 @@ import {
   isSafeSlug,
   publicRoot,
   webRoot,
-  cleanAbandonedChunkedUploads
+  cleanAbandonedChunkedUploads,
+  resolveDisplayGlbPath
 } from "./storage.js";
 
 const port = Number(process.env.PORT || 3009);
@@ -304,7 +307,7 @@ app.get("/public/:token/model.glb", (req, res) => {
   }
   res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("Referrer-Policy", "no-referrer");
-  res.type("model/gltf-binary").sendFile(path.join(getModelDir(share.slug), "display.glb"));
+  res.type("model/gltf-binary").sendFile(share.glbPath);
 });
 
 app.get("/public/:token", (req, res) => {
@@ -324,9 +327,39 @@ app.get("/public/:token", (req, res) => {
 
 function resolvePublicShare(token: string) {
   if (!isValidPublicToken(token)) return undefined;
-  const share = getPublicShareModelByHash(hashPublicToken(token));
-  if (!share || !["ready", "viewer-ready"].includes(share.status) || !share.has_display_glb) return undefined;
-  return fs.existsSync(path.join(getModelDir(share.slug), "display.glb")) ? share : undefined;
+  const tokenHash = hashPublicToken(token);
+  const share = db.prepare("SELECT * FROM public_shares WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1").get(tokenHash) as PublicShareRecord | undefined;
+  if (!share) return undefined;
+
+  const rev = resolvePublicShareRevision(tokenHash);
+  if (rev) {
+    if (rev.status !== "ready") return undefined;
+    const model = getModelById(rev.model_id);
+    if (!model) return undefined;
+    const glbPath = resolveDisplayGlbPath(model, rev);
+    if (!fs.existsSync(glbPath)) return undefined;
+    return {
+      share_id: share.id,
+      name: model.name,
+      slug: model.slug,
+      default_view_json: model.default_view_json,
+      glbPath
+    };
+  }
+
+  // Legacy fallback
+  const model = getModelById(share.model_id);
+  if (!model || !["ready", "viewer-ready"].includes(model.status) || !model.has_display_glb) return undefined;
+  const glbPath = path.join(getModelDir(model.slug), "display.glb");
+  if (!fs.existsSync(glbPath)) return undefined;
+
+  return {
+    share_id: share.id,
+    name: model.name,
+    slug: model.slug,
+    default_view_json: model.default_view_json,
+    glbPath
+  };
 }
 
 function sendPublicNotFound(res: express.Response, html: boolean): void {

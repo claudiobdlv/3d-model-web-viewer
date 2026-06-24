@@ -10,9 +10,20 @@ import {
   markJobProcessing,
   markJobReady,
   updateJobProgress,
-  deleteModelBySlug
+  deleteModelBySlug,
+  getRevisionById
 } from "../db.js";
-import { getLogDir, getModelDir, getUploadDir, getWorkerOutputDir, isSafeSlug } from "../storage.js";
+import {
+  getLogDir,
+  getModelDir,
+  getUploadDir,
+  getWorkerOutputDir,
+  isSafeSlug,
+  getRevisionModelDir,
+  getRevisionLogDir,
+  resolveSourcePath,
+  resolveDisplayGlbPath
+} from "../storage.js";
 import { workerJobPayload } from "../workerPayload.js";
 
 const developmentWorkerToken = "dev-worker-token";
@@ -94,7 +105,9 @@ workerRouter.get("/jobs/:jobId/source", (req, res) => {
     return;
   }
 
-  const sourcePath = path.join(getUploadDir(job.model_slug), `original${job.source_ext}`);
+  const revision = job.revision_id ? getRevisionById(job.revision_id) : null;
+  const sourcePath = resolveSourcePath({ slug: job.model_slug, source_ext: job.source_ext }, revision);
+
   if (!fs.existsSync(sourcePath)) {
     res.status(404).json({ error: "Source file not found." });
     return;
@@ -168,7 +181,9 @@ workerRouter.post(
       return;
     }
 
-    const modelDir = getModelDir(job.model_slug);
+    const modelDir = job.revision_id
+      ? getRevisionModelDir(job.model_slug, job.revision_id)
+      : getModelDir(job.model_slug);
     fs.mkdirSync(modelDir, { recursive: true });
     fs.writeFileSync(path.join(modelDir, "display.glb"), displayGlb.buffer);
 
@@ -194,14 +209,19 @@ workerRouter.post(
 
     const conversionLog = firstFile(files, "conversion.log", "conversionLog");
     if (conversionLog) {
-      const logDir = getLogDir(job.model_slug);
+      const logDir = job.revision_id
+        ? getRevisionLogDir(job.model_slug, job.revision_id)
+        : getLogDir(job.model_slug);
       fs.mkdirSync(logDir, { recursive: true });
       fs.writeFileSync(path.join(logDir, "conversion.log"), conversionLog.buffer);
     }
 
     if (!markJobReady(job.id, "Worker completed STEP/STP conversion.", displayGlb.size)) {
       fs.rmSync(modelDir, { recursive: true, force: true });
-      fs.rmSync(getLogDir(job.model_slug), { recursive: true, force: true });
+      const logDir = job.revision_id
+        ? getRevisionLogDir(job.model_slug, job.revision_id)
+        : getLogDir(job.model_slug);
+      fs.rmSync(logDir, { recursive: true, force: true });
       res.status(409).json({ error: "Job was cancelled while artifacts were being received; artifacts were discarded." });
       return;
     }
@@ -223,7 +243,9 @@ workerRouter.post("/jobs/:jobId/fail", failureUpload.single("conversion.log"), (
       : "Worker failed without an error message.";
 
   if (req.file) {
-    const logDir = getLogDir(job.model_slug);
+    const logDir = job.revision_id
+      ? getRevisionLogDir(job.model_slug, job.revision_id)
+      : getLogDir(job.model_slug);
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(path.join(logDir, "conversion.log"), req.file.buffer);
   }

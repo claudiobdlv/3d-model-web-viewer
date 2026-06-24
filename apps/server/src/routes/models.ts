@@ -15,7 +15,9 @@ import {
   restoreModel,
   saveModelDefaultView,
   trashModel,
-  type ModelListOptions
+  type ModelListOptions,
+  getCurrentRevisionForModel,
+  listRevisionsForModel
 } from "../db.js";
 import {
   createSlug,
@@ -138,8 +140,16 @@ modelsRouter.get("/:slug", (req, res) => {
     return;
   }
 
+  const currentRevision = getCurrentRevisionForModel(model.id);
+  const revisions = listRevisionsForModel(model.id);
+  const modelWithRevisions = {
+    ...model,
+    currentRevision: currentRevision || null,
+    revisions: revisions || []
+  };
+
   const summary = getLargeStepChunkingSummary(slug, true);
-  res.json(summary ? { ...model, largeStepChunkingSummary: summary } : model);
+  res.json(summary ? { ...modelWithRevisions, largeStepChunkingSummary: summary } : modelWithRevisions);
 });
 
 export async function registerModelAndJob({

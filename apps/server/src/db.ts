@@ -35,21 +35,35 @@ export type ModelRevisionRecord = {
   id: number;
   model_id: number;
   revision_label: string;
-  date_issued: string;
+  revision_sort_order: number;
+  issued_date: string;
+  quality_preset: string;
   status: string;
-  has_display_glb: number;
-  glb_size_bytes: number | null;
-  original_size_bytes: number | null;
-  quality: ConversionQuality;
-  source_filename: string;
-  source_ext: string;
-  is_active: number;
-  replaced_by_id: number | null;
-  replacement_reason: string | null;
-  allowed_in_public_viewer: number;
   is_current: number;
-  created_at: string;
+  is_publicly_selectable: number;
+  source_filename: string;
+  source_path: string;
+  display_glb_path: string;
+  source_size_bytes: number;
+  glb_size_bytes: number | null;
+  conversion_job_id: number | null;
+  uploaded_at: string;
   updated_at: string;
+  deleted_at: string | null;
+};
+
+export type RevisionFileVersionRecord = {
+  id: number;
+  revision_id: number;
+  file_version_number: number;
+  source_filename: string;
+  source_path: string;
+  display_glb_path: string;
+  quality_preset: string;
+  replacement_reason: string | null;
+  is_active: number;
+  uploaded_at: string;
+  uploaded_by: string | null;
 };
 
 export type FolderRecord = {
@@ -102,6 +116,7 @@ export type JobRecord = {
   progress_percent: number | null;
   progress_label: string | null;
   progress_updated_at: string | null;
+  revision_id?: number | null;
 };
 
 export type PublicShareRecord = {
@@ -114,6 +129,8 @@ export type PublicShareRecord = {
   revoked_at: string | null;
   last_accessed_at: string | null;
   access_count: number;
+  revision_id?: number | null;
+  link_mode?: string | null;
 };
 
 export type PublicShareModelRecord = ModelRecord & {
@@ -185,6 +202,44 @@ export function initDb(): void {
       FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS model_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      model_id INTEGER NOT NULL,
+      revision_label TEXT NOT NULL,
+      revision_sort_order INTEGER NOT NULL,
+      issued_date TEXT NOT NULL,
+      quality_preset TEXT NOT NULL,
+      status TEXT NOT NULL,
+      is_current INTEGER NOT NULL DEFAULT 0,
+      is_publicly_selectable INTEGER NOT NULL DEFAULT 1,
+      source_filename TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      display_glb_path TEXT NOT NULL,
+      source_size_bytes INTEGER NOT NULL,
+      glb_size_bytes INTEGER,
+      conversion_job_id INTEGER,
+      uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      deleted_at TEXT,
+      FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE,
+      FOREIGN KEY (conversion_job_id) REFERENCES jobs(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS revision_file_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      revision_id INTEGER NOT NULL,
+      file_version_number INTEGER NOT NULL,
+      source_filename TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      display_glb_path TEXT NOT NULL,
+      quality_preset TEXT NOT NULL,
+      replacement_reason TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      uploaded_by TEXT,
+      FOREIGN KEY (revision_id) REFERENCES model_revisions(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS public_shares_model_active_idx
       ON public_shares (model_id, revoked_at);
   `);
@@ -205,6 +260,11 @@ export function initDb(): void {
   ensureColumn("models", "pending_delete_at", "TEXT");
   ensureColumn("models", "default_view_json", "TEXT");
   ensureColumn("public_shares", "public_token", "TEXT");
+  ensureColumn("jobs", "revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
+  ensureColumn("public_shares", "revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
+  ensureColumn("public_shares", "link_mode", "TEXT DEFAULT 'locked_revision'");
+  ensureColumn("models", "current_revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
+
   db.exec(`
     CREATE INDEX IF NOT EXISTS models_deleted_at_idx
       ON models (deleted_at);
@@ -213,9 +273,18 @@ export function initDb(): void {
     CREATE UNIQUE INDEX IF NOT EXISTS public_shares_public_token_idx
       ON public_shares (public_token)
       WHERE public_token IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS model_revisions_model_idx ON model_revisions (model_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS model_revisions_model_label_idx ON model_revisions (model_id, revision_label);
+    CREATE INDEX IF NOT EXISTS model_revisions_model_current_idx ON model_revisions (model_id, is_current);
+    CREATE INDEX IF NOT EXISTS revision_file_versions_revision_idx ON revision_file_versions (revision_id);
+    CREATE INDEX IF NOT EXISTS jobs_revision_idx ON jobs (revision_id);
+    CREATE INDEX IF NOT EXISTS public_shares_revision_idx ON public_shares (revision_id);
+    CREATE INDEX IF NOT EXISTS public_shares_model_link_mode_idx ON public_shares (model_id, link_mode);
   `);
   backfillGlbSizes();
   backfillOriginalSizes();
+  backfillModelRevisions();
 }
 
 function backfillGlbSizes(): void {
@@ -244,6 +313,83 @@ function backfillOriginalSizes(): void {
       update.run(fs.statSync(path.join(getUploadDir(model.slug), `original${model.source_ext}`)).size, model.id);
     } catch {
       // Missing legacy source files stay nullable and contribute zero to quota.
+    }
+  }
+}
+
+export function backfillModelRevisions(): void {
+  const models = db.prepare("SELECT * FROM models").all() as ModelRecord[];
+
+  for (const model of models) {
+    const existing = db.prepare("SELECT COUNT(*) AS count FROM model_revisions WHERE model_id = ?").get(model.id) as { count: number };
+    if (existing.count > 0) {
+      continue;
+    }
+
+    db.exec("BEGIN TRANSACTION");
+    try {
+      const lastJob = db.prepare("SELECT id, quality FROM jobs WHERE model_id = ? ORDER BY id DESC LIMIT 1").get(model.id) as { id: number; quality: string } | undefined;
+      const qualityPreset = lastJob?.quality || "medium";
+
+      let issuedDate = new Date().toISOString().slice(0, 10);
+      if (model.created_at) {
+        const parsed = model.created_at.slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(parsed)) {
+          issuedDate = parsed;
+        }
+      }
+
+      // Store relative paths from storageRoot
+      const sourcePath = `uploads/${model.slug}/original${model.source_ext}`;
+      const displayGlbPath = `models/${model.slug}/display.glb`;
+
+      const revisionRes = db.prepare(`
+        INSERT INTO model_revisions (
+          model_id, revision_label, revision_sort_order, issued_date, quality_preset,
+          status, is_current, is_publicly_selectable, source_filename, source_path,
+          display_glb_path, source_size_bytes, glb_size_bytes, conversion_job_id,
+          uploaded_at, updated_at
+        ) VALUES (?, '1', 1, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        model.id,
+        issuedDate,
+        qualityPreset,
+        model.status,
+        model.source_filename,
+        sourcePath,
+        displayGlbPath,
+        model.original_size_bytes || 0,
+        model.glb_size_bytes || null,
+        lastJob ? lastJob.id : null,
+        model.created_at,
+        model.updated_at
+      );
+
+      const revisionId = Number(revisionRes.lastInsertRowid);
+
+      db.prepare(`
+        INSERT INTO revision_file_versions (
+          revision_id, file_version_number, source_filename, source_path,
+          display_glb_path, quality_preset, is_active, uploaded_at
+        ) VALUES (?, 1, ?, ?, ?, ?, 1, ?)
+      `).run(
+        revisionId,
+        model.source_filename,
+        sourcePath,
+        displayGlbPath,
+        qualityPreset,
+        model.created_at
+      );
+
+      db.prepare("UPDATE models SET current_revision_id = ? WHERE id = ?").run(revisionId, model.id);
+      db.prepare("UPDATE jobs SET revision_id = ? WHERE model_id = ?").run(revisionId, model.id);
+      db.prepare("UPDATE public_shares SET revision_id = ?, link_mode = 'locked_revision' WHERE model_id = ?").run(revisionId, model.id);
+
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      console.error(`Failed to backfill model ${model.slug}:`, err);
+      throw err;
     }
   }
 }
@@ -551,9 +697,26 @@ export function markJobCancelled(jobId: number, message = "Worker acknowledged c
        progress_updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
      WHERE id = ? AND status IN ('processing', 'cancelling')`
   ).run(message, jobId);
-  db.prepare(
-    `UPDATE models SET status = 'cancelled', has_display_glb = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-  ).run(job.model_id);
+
+  if ((job as any).revision_id) {
+    db.prepare(
+      `UPDATE model_revisions
+       SET status = 'cancelled',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run((job as any).revision_id);
+
+    const rev = getRevisionById((job as any).revision_id);
+    if (rev && rev.is_current === 1) {
+      db.prepare(
+        `UPDATE models SET status = 'cancelled', has_display_glb = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).run(job.model_id);
+    }
+  } else {
+    db.prepare(
+      `UPDATE models SET status = 'cancelled', has_display_glb = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+    ).run(job.model_id);
+  }
   return getModelById(job.model_id, true);
 }
 
@@ -729,6 +892,9 @@ export function markJobProcessing(jobId: number): void {
 }
 
 export function markJobReady(jobId: number, message = "Worker completed fake processing.", glbSizeBytes?: number): boolean {
+  const job = getJobForWorker(jobId);
+  if (!job) return false;
+
   const result = db.prepare(
     `UPDATE jobs
      SET status = 'ready',
@@ -741,18 +907,43 @@ export function markJobReady(jobId: number, message = "Worker completed fake pro
 
   if (result.changes !== 1) return false;
 
-  db.prepare(
-    `UPDATE models
-     SET status = 'ready',
-         has_display_glb = 1,
-         glb_size_bytes = COALESCE(?, glb_size_bytes),
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = (SELECT model_id FROM jobs WHERE id = ? AND status = 'ready') AND deleted_at IS NULL`
-  ).run(glbSizeBytes ?? null, jobId);
+  if ((job as any).revision_id) {
+    db.prepare(
+      `UPDATE model_revisions
+       SET status = 'ready',
+           glb_size_bytes = COALESCE(?, glb_size_bytes),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(glbSizeBytes ?? null, (job as any).revision_id);
+
+    const rev = getRevisionById((job as any).revision_id);
+    if (rev && rev.is_current === 1) {
+      db.prepare(
+        `UPDATE models
+         SET status = 'ready',
+             has_display_glb = 1,
+             glb_size_bytes = COALESCE(?, glb_size_bytes),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND deleted_at IS NULL`
+      ).run(glbSizeBytes ?? null, job.model_id);
+    }
+  } else {
+    db.prepare(
+      `UPDATE models
+       SET status = 'ready',
+       has_display_glb = 1,
+       glb_size_bytes = COALESCE(?, glb_size_bytes),
+       updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND deleted_at IS NULL`
+    ).run(glbSizeBytes ?? null, job.model_id);
+  }
   return true;
 }
 
 export function markJobFailed(jobId: number, message: string): void {
+  const job = getJobForWorker(jobId);
+  if (!job) return;
+
   db.prepare(
     `UPDATE jobs
      SET status = 'failed',
@@ -762,12 +953,31 @@ export function markJobFailed(jobId: number, message: string): void {
      WHERE id = ?`
   ).run(message, jobId);
 
-  db.prepare(
-    `UPDATE models
-     SET status = 'failed',
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
-  ).run(jobId);
+  if ((job as any).revision_id) {
+    db.prepare(
+      `UPDATE model_revisions
+       SET status = 'failed',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run((job as any).revision_id);
+
+    const rev = getRevisionById((job as any).revision_id);
+    if (rev && rev.is_current === 1) {
+      db.prepare(
+        `UPDATE models
+         SET status = 'failed',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      ).run(job.model_id);
+    }
+  } else {
+    db.prepare(
+      `UPDATE models
+       SET status = 'failed',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(job.model_id);
+  }
 }
 
 export function saveModelDefaultView(slug: string, defaultViewJson: string | null): ModelRecord | undefined {
@@ -779,4 +989,134 @@ export function saveModelDefaultView(slug: string, defaultViewJson: string | nul
   ).run(defaultViewJson, slug);
 
   return getModelBySlug(slug);
+}
+
+export function getRevisionById(revisionId: number): ModelRevisionRecord | undefined {
+  return db.prepare("SELECT * FROM model_revisions WHERE id = ?").get(revisionId) as ModelRevisionRecord | undefined;
+}
+
+export function getCurrentRevisionForModel(modelId: number): ModelRevisionRecord | undefined {
+  return db.prepare("SELECT * FROM model_revisions WHERE model_id = ? AND is_current = 1 LIMIT 1").get(modelId) as ModelRevisionRecord | undefined;
+}
+
+export function listRevisionsForModel(modelId: number): ModelRevisionRecord[] {
+  return db.prepare("SELECT * FROM model_revisions WHERE model_id = ? ORDER BY revision_sort_order ASC").all(modelId) as ModelRevisionRecord[];
+}
+
+export function getNextNumericRevisionLabel(modelId: number): string {
+  const rows = db.prepare("SELECT revision_label FROM model_revisions WHERE model_id = ?").all(modelId) as Array<{ revision_label: string }>;
+  const numbers = rows
+    .map((r) => Number(r.revision_label))
+    .filter((num) => Number.isInteger(num) && num > 0);
+  if (numbers.length === 0) {
+    return "1";
+  }
+  return String(Math.max(...numbers) + 1);
+}
+
+export function createRevisionForModel(input: {
+  modelId: number;
+  revisionLabel?: string;
+  issuedDate?: string;
+  qualityPreset: string;
+  status: string;
+  sourceFilename: string;
+  sourcePath: string;
+  displayGlbPath: string;
+  sourceSizeBytes: number;
+  glbSizeBytes?: number | null;
+  conversionJobId?: number | null;
+  isCurrent?: number;
+  isPubliclySelectable?: number;
+}): ModelRevisionRecord {
+  const modelId = input.modelId;
+  const label = input.revisionLabel || getNextNumericRevisionLabel(modelId);
+
+  let issuedDate = input.issuedDate;
+  if (!issuedDate) {
+    issuedDate = new Date().toISOString().slice(0, 10);
+  }
+
+  const maxSortRow = db.prepare("SELECT COALESCE(MAX(revision_sort_order), 0) AS max_sort FROM model_revisions WHERE model_id = ?").get(modelId) as { max_sort: number };
+  const sortOrder = maxSortRow.max_sort + 1;
+  const isCurrent = input.isCurrent ?? 0;
+  const isPubliclySelectable = input.isPubliclySelectable ?? 1;
+
+  db.exec("BEGIN TRANSACTION");
+  try {
+    if (isCurrent === 1) {
+      db.prepare("UPDATE model_revisions SET is_current = 0 WHERE model_id = ?").run(modelId);
+    }
+
+    const res = db.prepare(`
+      INSERT INTO model_revisions (
+        model_id, revision_label, revision_sort_order, issued_date, quality_preset,
+        status, is_current, is_publicly_selectable, source_filename, source_path,
+        display_glb_path, source_size_bytes, glb_size_bytes, conversion_job_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      modelId,
+      label,
+      sortOrder,
+      issuedDate,
+      input.qualityPreset,
+      input.status,
+      isCurrent,
+      isPubliclySelectable,
+      input.sourceFilename,
+      input.sourcePath,
+      input.displayGlbPath,
+      input.sourceSizeBytes,
+      input.glbSizeBytes ?? null,
+      input.conversionJobId ?? null
+    );
+
+    const revisionId = Number(res.lastInsertRowid);
+
+    db.prepare(`
+      INSERT INTO revision_file_versions (
+        revision_id, file_version_number, source_filename, source_path,
+        display_glb_path, quality_preset, is_active
+      ) VALUES (?, 1, ?, ?, ?, ?, 1)
+    `).run(
+      revisionId,
+      input.sourceFilename,
+      input.sourcePath,
+      input.displayGlbPath,
+      input.qualityPreset
+    );
+
+    if (isCurrent === 1) {
+      db.prepare("UPDATE models SET current_revision_id = ? WHERE id = ?").run(revisionId, modelId);
+      db.prepare("UPDATE models SET status = ?, glb_size_bytes = ?, original_size_bytes = ?, has_display_glb = ? WHERE id = ?").run(
+        input.status,
+        input.glbSizeBytes ?? null,
+        input.sourceSizeBytes,
+        input.status === "ready" ? 1 : 0,
+        modelId
+      );
+    }
+
+    db.exec("COMMIT");
+    return getRevisionById(revisionId)!;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+export function resolvePublicShareRevision(tokenHash: string): ModelRevisionRecord | undefined {
+  const share = db.prepare("SELECT * FROM public_shares WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1").get(tokenHash) as PublicShareRecord & { link_mode?: string; revision_id?: number | null } | undefined;
+  if (!share) return undefined;
+
+  const linkMode = share.link_mode || "locked_revision";
+  if (linkMode === "locked_revision") {
+    if (share.revision_id) {
+      return getRevisionById(share.revision_id);
+    }
+    return getCurrentRevisionForModel(share.model_id);
+  } else if (linkMode === "latest_current") {
+    return getCurrentRevisionForModel(share.model_id);
+  }
+  return undefined;
 }

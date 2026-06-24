@@ -76,6 +76,60 @@ export function getWorkerOutputDir(slug: string): string {
   return path.join(workerOutputRoot, slug);
 }
 
+export function getLegacyModelDir(slug: string): string {
+  return path.join(modelsRoot, slug);
+}
+
+export function getLegacyUploadDir(slug: string): string {
+  return path.join(uploadsRoot, slug);
+}
+
+export function getRevisionModelDir(slug: string, revisionId: number): string {
+  return path.join(modelsRoot, slug, "revisions", String(revisionId));
+}
+
+export function getRevisionUploadDir(slug: string, revisionId: number): string {
+  return path.join(uploadsRoot, slug, "revisions", String(revisionId));
+}
+
+export function getRevisionLogDir(slug: string, revisionId: number): string {
+  return path.join(logsRoot, slug, "revisions", String(revisionId));
+}
+
+export function resolveDisplayGlbPath(
+  model: { slug: string },
+  revision?: { id: number; display_glb_path?: string | null } | null
+): string {
+  if (revision) {
+    if (revision.display_glb_path) {
+      if (path.isAbsolute(revision.display_glb_path)) {
+        return revision.display_glb_path;
+      }
+      return path.resolve(storageRoot, revision.display_glb_path);
+    }
+    return path.join(getRevisionModelDir(model.slug, revision.id), "display.glb");
+  }
+  return path.join(getLegacyModelDir(model.slug), "display.glb");
+}
+
+export function resolveSourcePath(
+  model: { slug: string; source_ext?: string | null; source_filename?: string | null },
+  revision?: { id: number; source_path?: string | null; source_ext?: string | null } | null
+): string {
+  if (revision) {
+    if (revision.source_path) {
+      if (path.isAbsolute(revision.source_path)) {
+        return revision.source_path;
+      }
+      return path.resolve(storageRoot, revision.source_path);
+    }
+    const ext = revision.source_ext || model.source_ext || (model.source_filename ? path.extname(model.source_filename) : ".step");
+    return path.join(getRevisionUploadDir(model.slug, revision.id), `original${ext}`);
+  }
+  const ext = model.source_ext || (model.source_filename ? path.extname(model.source_filename) : ".step");
+  return path.join(getLegacyUploadDir(model.slug), `original${ext}`);
+}
+
 export function isSafeSlug(slug: string): boolean {
   return /^[a-z0-9][a-z0-9-]*$/.test(slug);
 }
