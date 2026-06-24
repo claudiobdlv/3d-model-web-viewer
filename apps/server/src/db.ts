@@ -27,6 +27,29 @@ export type ModelRecord = {
   created_at: string;
   updated_at: string;
   default_view_json?: string | null;
+  current_revision_id?: number | null;
+  current_revision_label?: string | null;
+};
+
+export type ModelRevisionRecord = {
+  id: number;
+  model_id: number;
+  revision_label: string;
+  date_issued: string;
+  status: string;
+  has_display_glb: number;
+  glb_size_bytes: number | null;
+  original_size_bytes: number | null;
+  quality: ConversionQuality;
+  source_filename: string;
+  source_ext: string;
+  is_active: number;
+  replaced_by_id: number | null;
+  replacement_reason: string | null;
+  allowed_in_public_viewer: number;
+  is_current: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export type FolderRecord = {
