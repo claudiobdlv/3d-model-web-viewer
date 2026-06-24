@@ -1,4 +1,5 @@
 import child_process from "node:child_process";
+import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -46,6 +47,11 @@ export type ConverterProcessorInput = {
   largeStepMinFreeMemoryMb?: number;
   largeStepMaxSwapGrowthMb?: number;
   largeStepEmergencyMemoryFraction?: number;
+  largeStepScaleUpWarmupSeconds?: number;
+  largeStepScaleUpCooldownSeconds?: number;
+  largeStepEstimatedChunkMemoryMb?: number;
+  largeStepScaleUpMinFreeAfterReserveMb?: number;
+  largeStepMemoryBasedMaxCapEnabled?: boolean;
   largeStepChunkFallbackMode?: "fail" | "full-conversion";
 };
 
@@ -82,6 +88,11 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   const largeStepMinFreeMemoryMb = input.largeStepMinFreeMemoryMb ?? 900;
   const largeStepMaxSwapGrowthMb = input.largeStepMaxSwapGrowthMb ?? 512;
   const largeStepEmergencyMemoryFraction = input.largeStepEmergencyMemoryFraction ?? 0.92;
+  const largeStepScaleUpWarmupSeconds = input.largeStepScaleUpWarmupSeconds ?? 300;
+  const largeStepScaleUpCooldownSeconds = input.largeStepScaleUpCooldownSeconds ?? 120;
+  const largeStepEstimatedChunkMemoryMb = input.largeStepEstimatedChunkMemoryMb ?? 2600;
+  const largeStepScaleUpMinFreeAfterReserveMb = input.largeStepScaleUpMinFreeAfterReserveMb ?? 900;
+  const largeStepMemoryBasedMaxCapEnabled = input.largeStepMemoryBasedMaxCapEnabled ?? true;
   const largeStepChunkFallbackMode = input.largeStepChunkFallbackMode ?? "fail";
 
   const conversionLogPath = path.join(jobDir, "conversion.log");
@@ -399,8 +410,23 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
 
     // Adaptive Concurrency Scheduler logic
     const adaptiveMode = largeStepChunkConcurrencyMode === "adaptive";
-    const initialConcurrency = Math.min(largeStepInitialConcurrentChunks, chunks.length, largeStepMaxConcurrentChunks);
-    const maxConcurrency = Math.min(largeStepMaxConcurrentChunks, chunks.length);
+    const { getResourceSnapshot, readCgroupBytes } = await import("./utils/resourceMonitor.js");
+
+    // Memory-based auto-cap logic
+    let memoryBasedCap = largeStepMaxConcurrentChunks;
+    if (largeStepMemoryBasedMaxCapEnabled) {
+      const cgroupMemMax = readCgroupBytes("/sys/fs/cgroup/memory.max");
+      const hostMemory = cgroupMemMax !== null ? cgroupMemMax : os.totalmem();
+      if (hostMemory < 6 * 1024 * 1024 * 1024) {
+        memoryBasedCap = 1;
+      } else if (hostMemory < 10 * 1024 * 1024 * 1024) {
+        memoryBasedCap = 2;
+      }
+    }
+
+    const effectiveMaxConcurrentChunks = Math.min(largeStepMaxConcurrentChunks, memoryBasedCap);
+    const maxConcurrency = Math.min(effectiveMaxConcurrentChunks, chunks.length);
+    const initialConcurrency = Math.min(largeStepInitialConcurrentChunks, chunks.length, effectiveMaxConcurrentChunks);
     const pollIntervalMs = largeStepResourcePollSeconds * 1000;
 
     const resourceMonitorConfig = {
@@ -410,10 +436,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       largeStepEmergencyMemoryFraction
     };
 
-    const { getResourceSnapshot, readCgroupBytes } = await import("./utils/resourceMonitor.js");
     const initialSwapBytes = readCgroupBytes("/sys/fs/cgroup/memory.swap.current") || 0;
 
     const snapshots: any[] = [];
+    const decisions: any[] = [];
     let peakMemoryUsedFraction = 0;
     let peakSwapBytes = 0;
     let peakSwapGrowthBytes = 0;
@@ -441,8 +467,14 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     };
 
     try {
+      const schedulerStartTime = Date.now();
       let lastPollTime = 0;
       let launchedCount = 0;
+      let initialBatchLaunchedAt: number | null = null;
+      let lastScaleUpTime: number | null = null;
+
+      let lastLoggedRejectReason: string | null = null;
+      let lastLoggedActiveCount: number | null = null;
 
       while (queue.length > 0 || activePromises.size > 0) {
         if (input.signal?.aborted) {
@@ -476,22 +508,107 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           maxConcurrencyReached = activeCount;
         }
 
-        if (queue.length > 0 && activeCount < maxConcurrency) {
+        if (queue.length > 0) {
           let shouldLaunch = false;
+          let rejectReason: string | null = null;
 
-          if (activeCount < largeStepMinConcurrentChunks) {
+          if (activeCount >= maxConcurrency) {
+            if (activeCount >= effectiveMaxConcurrentChunks) {
+              if (effectiveMaxConcurrentChunks < largeStepMaxConcurrentChunks) {
+                rejectReason = "memory_based_cap";
+              } else {
+                rejectReason = "max_concurrency_reached";
+              }
+            } else {
+              rejectReason = "max_concurrency_reached";
+            }
+          } else if (activeCount < initialConcurrency) {
+            // Hard initial concurrency cap is respected
             shouldLaunch = true;
-          } else if (launchedCount < initialConcurrency) {
+          } else if (!adaptiveMode) {
             shouldLaunch = true;
-          } else if (adaptiveMode) {
-            shouldLaunch = currentSnapshot.safeToLaunchMore;
           } else {
-            shouldLaunch = true;
+            // Adaptive Mode scale-up checks
+            if (activeCount >= effectiveMaxConcurrentChunks) {
+              rejectReason = "memory_based_cap";
+            } else if (initialBatchLaunchedAt === null || (Date.now() - initialBatchLaunchedAt) < largeStepScaleUpWarmupSeconds * 1000) {
+              rejectReason = "warmup_not_elapsed";
+            } else if (lastScaleUpTime !== null && (Date.now() - lastScaleUpTime) < largeStepScaleUpCooldownSeconds * 1000) {
+              rejectReason = "cooldown_not_elapsed";
+            } else if (currentSnapshot.emergencyPressure) {
+              rejectReason = "emergency_pressure";
+            } else if (currentSnapshot.swapDeltaBytes !== undefined && currentSnapshot.swapDeltaBytes >= largeStepMaxSwapGrowthMb * 1024 * 1024) {
+              rejectReason = "swap_growth_too_high";
+            } else if (currentSnapshot.memoryUsedFraction !== undefined && currentSnapshot.memoryUsedFraction >= largeStepMaxWorkerMemoryFraction) {
+              rejectReason = "memory_fraction_too_high";
+            } else if (!currentSnapshot.safeToLaunchMore) {
+              rejectReason = "not_enough_free_after_chunk_reserve";
+            } else {
+              // Custom reserve headroom check
+              const currentFreeMemoryMB = (currentSnapshot.memoryFreeBytes ?? 0) / (1024 * 1024);
+              if (currentFreeMemoryMB - largeStepEstimatedChunkMemoryMb < largeStepScaleUpMinFreeAfterReserveMb) {
+                rejectReason = "not_enough_free_after_chunk_reserve";
+              } else {
+                shouldLaunch = true;
+              }
+            }
+          }
+
+          const stateChanged = shouldLaunch || (rejectReason !== lastLoggedRejectReason || activeCount !== lastLoggedActiveCount);
+
+          if (stateChanged) {
+            const elapsedSeconds = Math.round((Date.now() - schedulerStartTime) / 1000);
+            const memoryFreeMb = currentSnapshot?.memoryFreeBytes !== undefined ? Math.round(currentSnapshot.memoryFreeBytes / (1024 * 1024)) : undefined;
+            const swapGrowthMb = currentSnapshot?.swapDeltaBytes !== undefined ? Math.round(currentSnapshot.swapDeltaBytes / (1024 * 1024)) : undefined;
+
+            const decision = {
+              elapsedSeconds,
+              activeChunks: activeCount,
+              queuedChunks: queue.length,
+              safeToLaunchMore: shouldLaunch,
+              reasons: shouldLaunch ? ["resource_headroom_safe"] : [rejectReason || "unknown"],
+              memoryUsedFraction: currentSnapshot?.memoryUsedFraction,
+              memoryFreeMb,
+              swapGrowthMb
+            };
+
+            decisions.push(decision);
+
+            lastLoggedRejectReason = rejectReason;
+            lastLoggedActiveCount = activeCount;
+
+            if (shouldLaunch) {
+              if (launchedCount < initialConcurrency) {
+                await appendLog(conversionLogPath, `[SCHEDULER] Launching initial chunk. ActiveCount=${activeCount}, QueuedCount=${queue.length}\n`);
+              } else {
+                const elapsed = ((Date.now() - (initialBatchLaunchedAt ?? nowMs)) / 1000).toFixed(1);
+                const freeMb = ((currentSnapshot?.memoryFreeBytes ?? 0) / (1024 * 1024)).toFixed(1);
+                const swapDeltaMb = ((currentSnapshot?.swapDeltaBytes ?? 0) / (1024 * 1024)).toFixed(1);
+                await appendLog(
+                  conversionLogPath,
+                  `[SCHEDULER] Launching extra chunk. ElapsedSinceInitial=${elapsed}s, ActiveBefore=${activeCount}, FreeMem=${freeMb}MB, ReserveMem=${largeStepEstimatedChunkMemoryMb}MB, MemFraction=${currentSnapshot?.memoryUsedFraction?.toFixed(4) ?? "N/A"}, SwapGrowth=${swapDeltaMb}MB, Reason=resource_headroom_safe\n`
+                );
+              }
+            } else {
+              await appendLog(
+                conversionLogPath,
+                `[SCHEDULER] Scale-up blocked. ActiveCount=${activeCount}, QueuedCount=${queue.length}, Reason=${rejectReason}\n`
+              );
+            }
           }
 
           if (shouldLaunch) {
-            const nextChunk = queue.shift();
+            const nextChunk = queue.shift()!;
             launchedCount++;
+
+            if (launchedCount === initialConcurrency || queue.length === 0) {
+              if (initialBatchLaunchedAt === null) {
+                initialBatchLaunchedAt = Date.now();
+              }
+            }
+            if (launchedCount > initialConcurrency) {
+              lastScaleUpTime = Date.now();
+            }
 
             const chunkPromise = runChunk(nextChunk)
               .then(() => {
@@ -540,6 +657,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
         maxReached: maxConcurrencyReached,
         pollSeconds: largeStepResourcePollSeconds,
         snapshots,
+        decisions,
         summary: {
           peakMemoryUsedFraction,
           peakSwapBytes,

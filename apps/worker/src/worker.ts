@@ -137,6 +137,11 @@ async function processJob(job: WorkerJob): Promise<void> {
       largeStepMinFreeMemoryMb: config.largeStepMinFreeMemoryMb,
       largeStepMaxSwapGrowthMb: config.largeStepMaxSwapGrowthMb,
       largeStepEmergencyMemoryFraction: config.largeStepEmergencyMemoryFraction,
+      largeStepScaleUpWarmupSeconds: config.largeStepScaleUpWarmupSeconds,
+      largeStepScaleUpCooldownSeconds: config.largeStepScaleUpCooldownSeconds,
+      largeStepEstimatedChunkMemoryMb: config.largeStepEstimatedChunkMemoryMb,
+      largeStepScaleUpMinFreeAfterReserveMb: config.largeStepScaleUpMinFreeAfterReserveMb,
+      largeStepMemoryBasedMaxCapEnabled: config.largeStepMemoryBasedMaxCapEnabled,
       largeStepChunkFallbackMode: config.largeStepChunkFallbackMode
     });
 

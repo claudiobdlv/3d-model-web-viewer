@@ -465,6 +465,8 @@ test("converterProcessor: adaptive scheduler loops and completes chunking", asyn
       largeStepAutoPlannerFileSizeMb: 0,
       largeStepInitialConcurrentChunks: 2,
       largeStepMaxConcurrentChunks: 3,
+      largeStepScaleUpWarmupSeconds: 0,
+      largeStepScaleUpCooldownSeconds: 0,
       largeStepResourcePollSeconds: 1
     });
 
@@ -481,6 +483,530 @@ test("converterProcessor: adaptive scheduler loops and completes chunking", asyn
     assert.equal(chunking.adaptiveConcurrency.maxConfigured, 3);
     assert.ok(chunking.adaptiveConcurrency.maxReached >= 2);
     assert.ok(chunking.adaptiveConcurrency.snapshots.length > 0);
+  } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ----------------------------------------------------
+// 5. Adaptive Scheduler Safety & Headroom Tests
+// ----------------------------------------------------
+test("adaptive scheduler: initial concurrency cap and warmup delay", async (t) => {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "scheduler-test-"));
+  const spawnMock = t.mock.method(child_process, "spawn");
+
+  // Mock cgroup reads to simulate safe memory conditions
+  t.mock.method(fs, "existsSync", (p: string) => true);
+  t.mock.method(fs, "readFileSync", (p: string) => {
+    if (p.includes("memory.current")) return "2000000000"; // 2GB
+    if (p.includes("memory.max")) return "16000000000"; // 16GB
+    if (p.includes("memory.swap.current")) return "0";
+    return "0";
+  });
+
+  try {
+    const { xcafConverterBin } = await setupTestDir(dir);
+    const sourcePath = path.join(dir, "large_model.step");
+    await fs.promises.writeFile(sourcePath, "dummy complex STEP content");
+
+    const plannerPlan = {
+      model_summary: { total_leaf_shape_count: 5000, total_face_count: 100000, naive_complexity_score: 40000, total_solid_count: 1000, free_shape_count: 1 },
+      chunking_recommendation: { chunking_enabled: true, target_chunks: 3 },
+      chunks: [
+        { chunk_index: 0, name: "chunk_0", root_label_paths: ["/0/1"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 1, name: "chunk_1", root_label_paths: ["/0/2"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 2, name: "chunk_2", root_label_paths: ["/0/3"], leaf_count: 1000, face_count: 20000, naive_work_score: 10000 }
+      ]
+    };
+
+    const xcafReport = {
+      openCascadeVersion: "7.8.0",
+      summary: { triangles: 10, nodeCount: 5, meshesPrimitivesExported: 1, primitiveCount: 1, materialCount: 1 },
+      quality: { preset: "balanced" }
+    };
+
+    // We control when chunk exits using promise resolver
+    const activeResolvers: (() => void)[] = [];
+
+    spawnMock.mock.mockImplementation((cmd: any, args: any) => {
+      const child = new MockChildProcess();
+      const outDir = args[1] || dir;
+
+      if (cmd.includes("xcaf-step-planner")) {
+        process.nextTick(() => {
+          fs.mkdirSync(outDir, { recursive: true });
+          fs.writeFileSync(path.join(outDir, "large-model-plan.json"), JSON.stringify(plannerPlan));
+          child.emit("exit", 0);
+        });
+      } else {
+        activeResolvers.push(() => {
+          const run = async () => {
+            const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+            const glbPath = path.join(outDir, "display.glb");
+            fs.mkdirSync(outDir, { recursive: true });
+            await io.write(glbPath, createChunkFixture("c"));
+            fs.writeFileSync(path.join(outDir, "xcaf-report.json"), JSON.stringify(xcafReport));
+            child.emit("exit", 0);
+          };
+          run();
+        });
+      }
+      return child as any;
+    });
+
+    const jobPromise = convertStepJob({
+      slug: "test-warmup-model",
+      sourcePath,
+      outputDir: dir,
+      converterBackend: "xcaf-baseline",
+      converterCli: "cli.js",
+      xcafConverterBin,
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "disabled",
+      largeStepChunkingMode: "auto",
+      largeStepChunkConcurrencyMode: "adaptive",
+      largeStepAutoMinFileSizeMb: 0,
+      largeStepAutoPlannerFileSizeMb: 0,
+      largeStepInitialConcurrentChunks: 2,
+      largeStepMaxConcurrentChunks: 3,
+      largeStepScaleUpWarmupSeconds: 100, // Large warmup delay to ensure it doesn't scale up
+      largeStepResourcePollSeconds: 1
+    });
+
+    // Wait a short moment to let initial chunks start
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify initial cap: only 2 chunks launched initially, not 3
+    assert.equal(spawnMock.mock.calls.length, 3);
+    assert.equal(activeResolvers.length, 2);
+
+    // Let the first chunk complete
+    activeResolvers[0]();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Warmup is still active (100 seconds), but activeCount went from 2 to 1.
+    // The scheduler can launch chunk 2 because launching it makes activeCount = 2,
+    // which does not exceed the initial cap of 2. So it is not a scale-up.
+    assert.equal(activeResolvers.length, 3);
+
+    // Let other chunks complete to finish the job
+    activeResolvers[1]();
+    activeResolvers[2]();
+
+    const result = await jobPromise;
+    assert.ok(result.displayGlbPath);
+
+    const stats = JSON.parse(await fs.promises.readFile(result.statsPath, "utf8"));
+    const chunking = stats.largeStepChunking;
+    const decisions = chunking.adaptiveConcurrency.decisions;
+    assert.ok(decisions.length > 0);
+    const warmupBlocked = decisions.find((d: any) => d.reasons.includes("warmup_not_elapsed"));
+    assert.ok(warmupBlocked);
+  } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("adaptive scheduler: memory reserve headroom check", async (t) => {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "reserve-test-"));
+  const spawnMock = t.mock.method(child_process, "spawn");
+
+  // We want to test two different memory levels
+  let currentMem = "2000000000"; // 2GB (leaving 14GB free)
+  t.mock.method(fs, "existsSync", (p: string) => true);
+  t.mock.method(fs, "readFileSync", (p: string) => {
+    if (p.includes("memory.current")) return currentMem;
+    if (p.includes("memory.max")) return "16000000000"; // 16GB
+    if (p.includes("memory.swap.current")) return "0";
+    return "0";
+  });
+
+  try {
+    const { xcafConverterBin } = await setupTestDir(dir);
+    const sourcePath = path.join(dir, "large_model.step");
+    await fs.promises.writeFile(sourcePath, "dummy complex STEP content");
+
+    const plannerPlan = {
+      model_summary: { total_leaf_shape_count: 5000, total_face_count: 100000, naive_complexity_score: 40000, total_solid_count: 1000, free_shape_count: 1 },
+      chunking_recommendation: { chunking_enabled: true, target_chunks: 3 },
+      chunks: [
+        { chunk_index: 0, name: "chunk_0", root_label_paths: ["/0/1"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 1, name: "chunk_1", root_label_paths: ["/0/2"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 2, name: "chunk_2", root_label_paths: ["/0/3"], leaf_count: 1000, face_count: 20000, naive_work_score: 10000 }
+      ]
+    };
+
+    const xcafReport = {
+      openCascadeVersion: "7.8.0",
+      summary: { triangles: 10, nodeCount: 5, meshesPrimitivesExported: 1, primitiveCount: 1, materialCount: 1 },
+      quality: { preset: "balanced" }
+    };
+
+    const activeResolvers: (() => void)[] = [];
+    spawnMock.mock.mockImplementation((cmd: any, args: any) => {
+      const child = new MockChildProcess();
+      const outDir = args[1] || dir;
+
+      if (cmd.includes("xcaf-step-planner")) {
+        process.nextTick(() => {
+          fs.mkdirSync(outDir, { recursive: true });
+          fs.writeFileSync(path.join(outDir, "large-model-plan.json"), JSON.stringify(plannerPlan));
+          child.emit("exit", 0);
+        });
+      } else {
+        activeResolvers.push(() => {
+          const run = async () => {
+            const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+            const glbPath = path.join(outDir, "display.glb");
+            fs.mkdirSync(outDir, { recursive: true });
+            await io.write(glbPath, createChunkFixture("c"));
+            fs.writeFileSync(path.join(outDir, "xcaf-report.json"), JSON.stringify(xcafReport));
+            child.emit("exit", 0);
+          };
+          run();
+        });
+      }
+      return child as any;
+    });
+
+    // Run first with unsafe memory (high memory usage -> low free memory)
+    currentMem = "14000000000"; // 14GB used, leaving only 2GB free.
+
+    const jobPromise1 = convertStepJob({
+      slug: "test-reserve-fail",
+      sourcePath,
+      outputDir: dir,
+      converterBackend: "xcaf-baseline",
+      converterCli: "cli.js",
+      xcafConverterBin,
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "disabled",
+      largeStepChunkingMode: "auto",
+      largeStepChunkConcurrencyMode: "adaptive",
+      largeStepAutoMinFileSizeMb: 0,
+      largeStepAutoPlannerFileSizeMb: 0,
+      largeStepInitialConcurrentChunks: 2,
+      largeStepMaxConcurrentChunks: 3,
+      largeStepScaleUpWarmupSeconds: 0, // no warmup delay
+      largeStepScaleUpCooldownSeconds: 0, // no cooldown delay
+      largeStepEstimatedChunkMemoryMb: 2600,
+      largeStepScaleUpMinFreeAfterReserveMb: 900,
+      largeStepMaxWorkerMemoryFraction: 0.95, // bypass memory fraction check
+      largeStepResourcePollSeconds: 1
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(activeResolvers.length, 2);
+
+    // Let them finish
+    activeResolvers[0]();
+    activeResolvers[1]();
+
+    let attempts = 0;
+    while (activeResolvers.length < 3 && attempts < 50) {
+      await new Promise((r) => setTimeout(r, 50));
+      attempts++;
+    }
+    if (activeResolvers[2]) {
+      activeResolvers[2]();
+    }
+    const res1 = await jobPromise1;
+
+    // Check that reserve blocked was logged in manifest
+    const chunking1 = JSON.parse(await fs.promises.readFile(res1.statsPath, "utf8")).largeStepChunking;
+    const blockedDec = chunking1.adaptiveConcurrency.decisions.find((d: any) => d.reasons.includes("not_enough_free_after_chunk_reserve"));
+    assert.ok(blockedDec);
+
+    // Now run with safe memory (low memory usage -> high free memory)
+    currentMem = "2000000000"; // 2GB used -> 14GB free.
+    activeResolvers.length = 0;
+    spawnMock.mock.resetCalls();
+
+    const jobPromise2 = convertStepJob({
+      slug: "test-reserve-pass",
+      sourcePath,
+      outputDir: dir,
+      converterBackend: "xcaf-baseline",
+      converterCli: "cli.js",
+      xcafConverterBin,
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "disabled",
+      largeStepChunkingMode: "auto",
+      largeStepChunkConcurrencyMode: "adaptive",
+      largeStepAutoMinFileSizeMb: 0,
+      largeStepAutoPlannerFileSizeMb: 0,
+      largeStepInitialConcurrentChunks: 2,
+      largeStepMaxConcurrentChunks: 3,
+      largeStepScaleUpWarmupSeconds: 0,
+      largeStepScaleUpCooldownSeconds: 0,
+      largeStepEstimatedChunkMemoryMb: 2600,
+      largeStepScaleUpMinFreeAfterReserveMb: 900,
+      largeStepResourcePollSeconds: 1
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    // All 3 chunks should launch immediately
+    assert.equal(activeResolvers.length, 3);
+
+    activeResolvers[0]();
+    activeResolvers[1]();
+    activeResolvers[2]();
+    await jobPromise2;
+  } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("adaptive scheduler: memory-based cap", async (t) => {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "memcap-test-"));
+  const spawnMock = t.mock.method(child_process, "spawn");
+
+  let totalMem = "8000000000"; // 8GB by default
+  t.mock.method(fs, "existsSync", (p: string) => true);
+  t.mock.method(fs, "readFileSync", (p: string) => {
+    if (p.includes("memory.current")) return "2000000000";
+    if (p.includes("memory.max")) return totalMem;
+    if (p.includes("memory.swap.current")) return "0";
+    return "0";
+  });
+
+  try {
+    const { xcafConverterBin } = await setupTestDir(dir);
+    const sourcePath = path.join(dir, "large_model.step");
+    await fs.promises.writeFile(sourcePath, "dummy complex STEP content");
+
+    const plannerPlan = {
+      model_summary: { total_leaf_shape_count: 5000, total_face_count: 100000, naive_complexity_score: 40000, total_solid_count: 1000, free_shape_count: 1 },
+      chunking_recommendation: { chunking_enabled: true, target_chunks: 3 },
+      chunks: [
+        { chunk_index: 0, name: "chunk_0", root_label_paths: ["/0/1"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 1, name: "chunk_1", root_label_paths: ["/0/2"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 2, name: "chunk_2", root_label_paths: ["/0/3"], leaf_count: 1000, face_count: 20000, naive_work_score: 10000 }
+      ]
+    };
+
+    const xcafReport = {
+      openCascadeVersion: "7.8.0",
+      summary: { triangles: 10, nodeCount: 5, meshesPrimitivesExported: 1, primitiveCount: 1, materialCount: 1 },
+      quality: { preset: "balanced" }
+    };
+
+    const activeResolvers: (() => void)[] = [];
+    spawnMock.mock.mockImplementation((cmd: any, args: any) => {
+      const child = new MockChildProcess();
+      const outDir = args[1] || dir;
+
+      if (cmd.includes("xcaf-step-planner")) {
+        process.nextTick(() => {
+          fs.mkdirSync(outDir, { recursive: true });
+          fs.writeFileSync(path.join(outDir, "large-model-plan.json"), JSON.stringify(plannerPlan));
+          child.emit("exit", 0);
+        });
+      } else {
+        activeResolvers.push(() => {
+          const run = async () => {
+            const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+            const glbPath = path.join(outDir, "display.glb");
+            fs.mkdirSync(outDir, { recursive: true });
+            await io.write(glbPath, createChunkFixture("c"));
+            fs.writeFileSync(path.join(outDir, "xcaf-report.json"), JSON.stringify(xcafReport));
+            child.emit("exit", 0);
+          };
+          run();
+        });
+      }
+      return child as any;
+    });
+
+    // 1. Host has 4GB memory (< 6 GiB -> cap = 1)
+    totalMem = "4000000000";
+    const jobPromise1 = convertStepJob({
+      slug: "test-memcap-4gb",
+      sourcePath,
+      outputDir: dir,
+      converterBackend: "xcaf-baseline",
+      converterCli: "cli.js",
+      xcafConverterBin,
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "disabled",
+      largeStepChunkingMode: "auto",
+      largeStepChunkConcurrencyMode: "adaptive",
+      largeStepAutoMinFileSizeMb: 0,
+      largeStepAutoPlannerFileSizeMb: 0,
+      largeStepInitialConcurrentChunks: 2,
+      largeStepMaxConcurrentChunks: 3,
+      largeStepMemoryBasedMaxCapEnabled: true,
+      largeStepResourcePollSeconds: 1
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    // Should cap at 1 active chunk even though initial concurrency is 2
+    assert.equal(activeResolvers.length, 1);
+
+    activeResolvers[0]();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(activeResolvers.length, 2);
+    activeResolvers[1]();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(activeResolvers.length, 3);
+    activeResolvers[2]();
+
+    await jobPromise1;
+
+    // 2. Host has 8GB memory (< 10 GiB -> cap = 2)
+    totalMem = "8000000000";
+    activeResolvers.length = 0;
+    spawnMock.mock.resetCalls();
+
+    const jobPromise2 = convertStepJob({
+      slug: "test-memcap-8gb",
+      sourcePath,
+      outputDir: dir,
+      converterBackend: "xcaf-baseline",
+      converterCli: "cli.js",
+      xcafConverterBin,
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "disabled",
+      largeStepChunkingMode: "auto",
+      largeStepChunkConcurrencyMode: "adaptive",
+      largeStepAutoMinFileSizeMb: 0,
+      largeStepAutoPlannerFileSizeMb: 0,
+      largeStepInitialConcurrentChunks: 2,
+      largeStepMaxConcurrentChunks: 3,
+      largeStepScaleUpWarmupSeconds: 0, // no warmup delay
+      largeStepScaleUpCooldownSeconds: 0,
+      largeStepMemoryBasedMaxCapEnabled: true,
+      largeStepResourcePollSeconds: 1
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    // Should cap at 2 active chunks even though max concurrency is 3 and warmup is 0
+    assert.equal(activeResolvers.length, 2);
+
+    activeResolvers[0]();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(activeResolvers.length, 3);
+    activeResolvers[1]();
+    activeResolvers[2]();
+
+    const res2 = await jobPromise2;
+    const chunking2 = JSON.parse(await fs.promises.readFile(res2.statsPath, "utf8")).largeStepChunking;
+    const capBlocked = chunking2.adaptiveConcurrency.decisions.find((d: any) => d.reasons.includes("memory_based_cap"));
+    assert.ok(capBlocked);
+  } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("adaptive scheduler: cooldown delay", async (t) => {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "cooldown-test-"));
+  const spawnMock = t.mock.method(child_process, "spawn");
+
+  t.mock.method(fs, "existsSync", (p: string) => true);
+  t.mock.method(fs, "readFileSync", (p: string) => {
+    if (p.includes("memory.current")) return "2000000000";
+    if (p.includes("memory.max")) return "16000000000";
+    if (p.includes("memory.swap.current")) return "0";
+    return "0";
+  });
+
+  try {
+    const { xcafConverterBin } = await setupTestDir(dir);
+    const sourcePath = path.join(dir, "large_model.step");
+    await fs.promises.writeFile(sourcePath, "dummy complex STEP content");
+
+    const plannerPlan = {
+      model_summary: { total_leaf_shape_count: 5000, total_face_count: 100000, naive_complexity_score: 40000, total_solid_count: 1000, free_shape_count: 1 },
+      chunking_recommendation: { chunking_enabled: true, target_chunks: 3 },
+      chunks: [
+        { chunk_index: 0, name: "chunk_0", root_label_paths: ["/0/1"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 1, name: "chunk_1", root_label_paths: ["/0/2"], leaf_count: 2000, face_count: 40000, naive_work_score: 15000 },
+        { chunk_index: 2, name: "chunk_2", root_label_paths: ["/0/3"], leaf_count: 1000, face_count: 20000, naive_work_score: 10000 }
+      ]
+    };
+
+    const xcafReport = {
+      openCascadeVersion: "7.8.0",
+      summary: { triangles: 10, nodeCount: 5, meshesPrimitivesExported: 1, primitiveCount: 1, materialCount: 1 },
+      quality: { preset: "balanced" }
+    };
+
+    const activeResolvers: (() => void)[] = [];
+    spawnMock.mock.mockImplementation((cmd: any, args: any) => {
+      const child = new MockChildProcess();
+      const outDir = args[1] || dir;
+
+      if (cmd.includes("xcaf-step-planner")) {
+        process.nextTick(() => {
+          fs.mkdirSync(outDir, { recursive: true });
+          fs.writeFileSync(path.join(outDir, "large-model-plan.json"), JSON.stringify(plannerPlan));
+          child.emit("exit", 0);
+        });
+      } else {
+        activeResolvers.push(() => {
+          const run = async () => {
+            const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+            const glbPath = path.join(outDir, "display.glb");
+            fs.mkdirSync(outDir, { recursive: true });
+            await io.write(glbPath, createChunkFixture("c"));
+            fs.writeFileSync(path.join(outDir, "xcaf-report.json"), JSON.stringify(xcafReport));
+            child.emit("exit", 0);
+          };
+          run();
+        });
+      }
+      return child as any;
+    });
+
+    const jobPromise = convertStepJob({
+      slug: "test-cooldown",
+      sourcePath,
+      outputDir: dir,
+      converterBackend: "xcaf-baseline",
+      converterCli: "cli.js",
+      xcafConverterBin,
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "disabled",
+      largeStepChunkingMode: "auto",
+      largeStepChunkConcurrencyMode: "adaptive",
+      largeStepAutoMinFileSizeMb: 0,
+      largeStepAutoPlannerFileSizeMb: 0,
+      largeStepInitialConcurrentChunks: 1,
+      largeStepMaxConcurrentChunks: 3,
+      largeStepScaleUpWarmupSeconds: 0,
+      largeStepScaleUpCooldownSeconds: 100, // large cooldown delay
+      largeStepResourcePollSeconds: 1
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    // Should start chunk 0 immediately. Then try to scale up to chunk 1 immediately (warmup=0).
+    // Chunk 1 will start, setting lastScaleUpTime.
+    // Chunk 2 will check cooldown (100) and block.
+    // So activeResolvers length should be 2.
+    assert.equal(activeResolvers.length, 2);
+
+    // Let them finish
+    activeResolvers[0]();
+    activeResolvers[1]();
+
+    let attempts = 0;
+    while (activeResolvers.length < 3 && attempts < 50) {
+      await new Promise((r) => setTimeout(r, 50));
+      attempts++;
+    }
+    assert.equal(activeResolvers.length, 3);
+    activeResolvers[2]();
+
+    const res = await jobPromise;
+    const chunking = JSON.parse(await fs.promises.readFile(res.statsPath, "utf8")).largeStepChunking;
+    const cooldownBlocked = chunking.adaptiveConcurrency.decisions.find((d: any) => d.reasons.includes("cooldown_not_elapsed"));
+    assert.ok(cooldownBlocked);
   } finally {
     await fs.promises.rm(dir, { recursive: true, force: true });
   }

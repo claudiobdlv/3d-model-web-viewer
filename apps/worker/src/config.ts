@@ -36,6 +36,11 @@ export type WorkerConfig = {
   largeStepMinFreeMemoryMb: number;
   largeStepMaxSwapGrowthMb: number;
   largeStepEmergencyMemoryFraction: number;
+  largeStepScaleUpWarmupSeconds: number;
+  largeStepScaleUpCooldownSeconds: number;
+  largeStepEstimatedChunkMemoryMb: number;
+  largeStepScaleUpMinFreeAfterReserveMb: number;
+  largeStepMemoryBasedMaxCapEnabled: boolean;
   largeStepChunkFallbackMode: "fail" | "full-conversion";
 };
 
@@ -203,8 +208,41 @@ export function loadConfig(argv = process.argv): WorkerConfig {
       0.92,
       "LARGE_STEP_EMERGENCY_MEMORY_FRACTION"
     ),
+    largeStepScaleUpWarmupSeconds: nonNegativeInteger(
+      process.env.LARGE_STEP_SCALE_UP_WARMUP_SECONDS,
+      300,
+      "LARGE_STEP_SCALE_UP_WARMUP_SECONDS"
+    ),
+    largeStepScaleUpCooldownSeconds: nonNegativeInteger(
+      process.env.LARGE_STEP_SCALE_UP_COOLDOWN_SECONDS,
+      120,
+      "LARGE_STEP_SCALE_UP_COOLDOWN_SECONDS"
+    ),
+    largeStepEstimatedChunkMemoryMb: nonNegativeInteger(
+      process.env.LARGE_STEP_ESTIMATED_CHUNK_MEMORY_MB,
+      2600,
+      "LARGE_STEP_ESTIMATED_CHUNK_MEMORY_MB"
+    ),
+    largeStepScaleUpMinFreeAfterReserveMb: nonNegativeInteger(
+      process.env.LARGE_STEP_SCALE_UP_MIN_FREE_AFTER_RESERVE_MB,
+      900,
+      "LARGE_STEP_SCALE_UP_MIN_FREE_AFTER_RESERVE_MB"
+    ),
+    largeStepMemoryBasedMaxCapEnabled: parseBoolean(
+      process.env.LARGE_STEP_MEMORY_BASED_MAX_CAP_ENABLED,
+      true
+    ),
     largeStepChunkFallbackMode: largeStepChunkFallbackMode as "fail" | "full-conversion"
   };
+}
+
+function nonNegativeInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer.`);
+  }
+  return parsed;
 }
 
 function positiveInteger(value: string | undefined, fallback: number, name: string): number {
