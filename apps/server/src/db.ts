@@ -431,6 +431,9 @@ export function listModels(options: ModelListOptions = {}): ModelRecord[] {
   const sortDir = options.sortDir === "asc" ? "ASC" : "DESC";
   const records = db.prepare(
     `SELECT models.*, models.folder_id AS project_id, folders.name AS project_name,
+            (SELECT model_revisions.revision_label
+             FROM model_revisions
+             WHERE model_revisions.id = models.current_revision_id) AS current_revision_label,
             (SELECT jobs.quality FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS quality,
             (SELECT jobs.progress_percent FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS progress_percent,
             (SELECT jobs.progress_label FROM jobs WHERE jobs.model_id = models.id ORDER BY jobs.id DESC LIMIT 1) AS progress_label,
@@ -1243,6 +1246,23 @@ export function setCurrentRevision(modelId: number, revisionId: number): ModelRe
     if (db.isTransaction) db.exec("ROLLBACK");
     throw error;
   }
+}
+
+export function updateRevisionPublicSelectable(
+  modelId: number,
+  revisionId: number,
+  isPubliclySelectable: boolean
+): ModelRevisionRecord {
+  const revision = getRevisionForModel(modelId, revisionId);
+  if (!revision) {
+    throw new Error("Revision does not belong to model.");
+  }
+  db.prepare(
+    `UPDATE model_revisions
+     SET is_publicly_selectable = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).run(isPubliclySelectable ? 1 : 0, revisionId);
+  return getRevisionById(revisionId)!;
 }
 
 export function replaceRevisionFileVersion(input: {

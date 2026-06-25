@@ -85,6 +85,41 @@ test("revision upload and replacement controllers preserve revision history", as
   const currentRows = db.prepare("SELECT id FROM model_revisions WHERE model_id = ? AND is_current = 1").all(model.id) as any[];
   assert.deepEqual(currentRows.map((row) => row.id), [automatic.body.revision.id]);
   assert.equal((db.prepare("SELECT current_revision_id FROM models WHERE id = ?").get(model.id) as any).current_revision_id, automatic.body.revision.id);
+
+  const makeCurrentResponse = await fetch(`${origin}/api/models/${model.slug}/revisions/${explicit.body.revision.id}/current`, {
+    method: "PATCH",
+    headers
+  });
+  assert.equal(makeCurrentResponse.status, 200);
+  assert.equal((await makeCurrentResponse.json() as any).is_current, 1);
+  const currentAfterPatch = db.prepare("SELECT id FROM model_revisions WHERE model_id = ? AND is_current = 1").all(model.id) as any[];
+  assert.deepEqual(currentAfterPatch.map((row) => row.id), [explicit.body.revision.id]);
+  assert.equal((db.prepare("SELECT current_revision_id FROM models WHERE id = ?").get(model.id) as any).current_revision_id, explicit.body.revision.id);
+
+  const publicSelectableResponse = await fetch(`${origin}/api/models/${model.slug}/revisions/${explicit.body.revision.id}`, {
+    method: "PATCH",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ isPubliclySelectable: true })
+  });
+  assert.equal(publicSelectableResponse.status, 200);
+  assert.equal((await publicSelectableResponse.json() as any).is_publicly_selectable, 1);
+
+  const unsafeRevisionUpdate = await fetch(`${origin}/api/models/${model.slug}/revisions/${explicit.body.revision.id}`, {
+    method: "PATCH",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ revision_label: "unsafe" })
+  });
+  assert.equal(unsafeRevisionUpdate.status, 400);
+
+  const modelDetailsResponse = await fetch(`${origin}/api/models/${model.slug}`, { headers });
+  assert.equal(modelDetailsResponse.status, 200);
+  const modelDetails = await modelDetailsResponse.json() as any;
+  assert.equal(modelDetails.currentRevision.id, explicit.body.revision.id);
+  assert.equal(modelDetails.revisions.length, 3);
+  const modelListResponse = await fetch(`${origin}/api/models`, { headers });
+  const modelList = await modelListResponse.json() as any[];
+  assert.equal(modelList.find((item) => item.id === model.id).current_revision_label, "A");
+
   const lockedBeforeReplacement = await fetch(`${origin}/public/${share.token}/model.glb`);
   assert.equal(await lockedBeforeReplacement.text(), "first-glb");
 

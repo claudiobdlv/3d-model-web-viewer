@@ -24,6 +24,8 @@ export type ModelRecord = {
   largeStepChunkingSummary?: LargeStepChunkingSummary;
   current_revision_id?: number | null;
   current_revision_label?: string | null;
+  currentRevision?: ModelRevisionRecord | null;
+  revisions?: ModelRevisionRecord[];
 };
 
 export type ModelRevisionRecord = {
@@ -122,6 +124,13 @@ export type JobRecord = {
 };
 
 export type ConversionQuality = "low" | "medium" | "high";
+
+export type RevisionMetadata = {
+  revisionLabel?: string;
+  issuedDate?: string;
+  makeCurrent?: boolean;
+  allowPublicSelectable?: boolean;
+};
 
 export type UploadTask = {
   clientUploadId: string;

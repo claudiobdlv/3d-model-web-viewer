@@ -26,7 +26,8 @@ import {
   markRevisionViewerReady,
   replaceRevisionFileVersion,
   setCurrentRevision,
-  setRevisionConversionJob
+  setRevisionConversionJob,
+  updateRevisionPublicSelectable
 } from "../db.js";
 import {
   createSlug,
@@ -489,6 +490,29 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
   }
 });
 
+modelsRouter.patch("/:slug/revisions/:revisionId/current", (req, res) => {
+  const context = getRevisionRouteContext(req.params.slug, req.params.revisionId);
+  if ("errorStatus" in context) {
+    res.status(context.errorStatus!).json({ error: context.error });
+    return;
+  }
+  res.json(setCurrentRevision(context.model.id, context.revision.id));
+});
+
+modelsRouter.patch("/:slug/revisions/:revisionId", (req, res) => {
+  const context = getRevisionRouteContext(req.params.slug, req.params.revisionId);
+  if ("errorStatus" in context) {
+    res.status(context.errorStatus!).json({ error: context.error });
+    return;
+  }
+  const keys = Object.keys(req.body || {});
+  if (keys.length !== 1 || keys[0] !== "isPubliclySelectable" || typeof req.body.isPubliclySelectable !== "boolean") {
+    res.status(400).json({ error: "Only isPubliclySelectable may be updated, and it must be true or false." });
+    return;
+  }
+  res.json(updateRevisionPublicSelectable(context.model.id, context.revision.id, req.body.isPubliclySelectable));
+});
+
 modelsRouter.patch("/:slug", (req, res, next) => {
   try {
     const { slug } = req.params;
@@ -789,6 +813,18 @@ function isValidIssuedDate(value: string): boolean {
 function getUploadedModelFile(req: express.Request): Express.Multer.File | undefined {
   const files = req.files as Record<string, Express.Multer.File[] | undefined> | undefined;
   return files?.modelFile?.[0] || files?.file?.[0];
+}
+
+function getRevisionRouteContext(slugValue: string, revisionIdValue: string) {
+  const slug = String(slugValue);
+  if (!isSafeSlug(slug)) return { errorStatus: 400 as const, error: "Invalid model slug." };
+  const model = getModelBySlug(slug);
+  if (!model) return { errorStatus: 404 as const, error: "Model not found." };
+  const revisionId = Number(revisionIdValue);
+  if (!Number.isInteger(revisionId) || revisionId < 1) return { errorStatus: 400 as const, error: "Invalid revisionId." };
+  const revision = getRevisionForModel(model.id, revisionId);
+  if (!revision) return { errorStatus: 404 as const, error: "Revision not found for model." };
+  return { model, revision };
 }
 
 function validateUploadSize(sourceExt: string, sizeBytes: number): void {

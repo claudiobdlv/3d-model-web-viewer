@@ -297,3 +297,63 @@ Phase 3 adds server-side upload and replacement behaviour without adding the adm
 - Existing legacy root files are not moved, renamed, deleted, or overwritten.
 - Chunked creation of new models and new revisions is complete for Phase 3. Chunked replacement of an existing revision is not exposed; the replacement endpoint currently uses the normal multipart upload path and existing upload limits.
 - Admin controls for entering metadata, uploading/replacing revisions, making revisions current, and managing public selectability remain Phase 4 work.
+
+---
+
+## 18. Phase 4: Admin UI for Revisions
+
+Phase 4 exposes the existing revision foundation through the production-style admin interface without changing public viewer or QR link behaviour.
+
+### File manager and first upload
+
+- The file manager remains one row per model and adds a **Revision** column showing the current label as `Rev <label>`.
+- Models without revision summary data show the safe fallback `Legacy`; uploads still in progress show `Rev —`.
+- The normal upload dialog adds optional **Revision**, **Date issued**, and **Allow public revision selection** fields alongside the existing quality selector.
+- Revision labels may be left blank for backend auto-numbering. Date issued defaults to the administrator's local calendar date, and public selectability defaults to enabled.
+- Both normal and chunked first uploads send the revision metadata. Ignoring the fields preserves the existing upload workflow and creates Rev 1.
+
+### Upload new revision workflow
+
+- The model action menu now opens an **Upload new revision** dialog.
+- The dialog supports revision label, issued date, quality, file, make-current, and public-selectability controls.
+- It submits to `POST /api/models/:slug/revisions`, displays multipart upload progress, reports backend validation errors, and refreshes the model list after success.
+- A blank label uses the next numeric revision. Disabling **Make this the current revision after processing** preserves the existing current revision while retaining the new entry in revision history.
+
+### Replace revision workflow
+
+- **Replace existing revision** loads the model's revision list and lets the administrator choose the issued revision being corrected.
+- The dialog includes the required warning that replacement is for a bad upload/export/conversion, not a design change.
+- It submits the selected file, quality, and optional reason to `POST /api/models/:slug/revisions/:revisionId/replace`.
+- The revision label and locked share reference remain unchanged. Phase 3's immutable file-version storage preserves the previous source and display files.
+- Chunked replacement remains deferred. The UI gives a clear limitation message for replacement files over the normal multipart threshold rather than attempting an unreliable oversized request.
+
+### Manage revisions workflow
+
+- **Manage revisions** opens a history table with revision label, issued date, conversion status, current state, public-selectability state, source and GLB sizes, upload date, and actions.
+- **Make current** calls the transactional current-revision helper through the new route below, then refreshes both revision history and the file manager.
+- **Available in public revision dropdown** can be toggled independently for each revision.
+- **Replace** opens the replacement dialog with that revision preselected.
+- Opening a specific historical revision in the admin viewer remains deferred because no dedicated safe historical-viewer route is exposed yet.
+
+### New admin routes
+
+- `PATCH /api/models/:slug/revisions/:revisionId/current`
+  - Validates model and revision ownership.
+  - Calls `setCurrentRevision`, which transactionally clears the prior current flag, sets exactly one current revision, and updates the legacy model summary.
+- `PATCH /api/models/:slug/revisions/:revisionId`
+  - Accepts only `{ "isPubliclySelectable": boolean }`.
+  - Rejects arbitrary revision-field updates.
+
+### Frontend API and types
+
+- Model detail types now expose `currentRevision` and `revisions`.
+- Added helpers for uploading a new revision, replacing a revision, making a revision current, updating public selectability, and fetching model revisions.
+- Existing upload and model-list calls remain backward-compatible.
+
+### Deferred after Phase 4
+
+- Public viewer revision dropdown.
+- Public QR revision-switching UI.
+- Admin historical-revision viewer route.
+- Change highlighting and geometric diff.
+- Chunked replacement uploads.
