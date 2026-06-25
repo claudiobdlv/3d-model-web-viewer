@@ -21,7 +21,8 @@ test("RevVault Revisions and Storage System Tests", async (t) => {
     getRevisionById,
     getNextNumericRevisionLabel,
     resolvePublicShareRevision,
-    markJobReady
+    markJobReady,
+    setCurrentRevision
   } = await import("./db.js");
 
   // Initialize DB tables
@@ -183,12 +184,18 @@ test("RevVault Revisions and Storage System Tests", async (t) => {
     VALUES (?, 'test-legacy-slug', 'step-to-glb', 'processing', 'medium', ?)
   `).run(modelId, rev2.id);
   const jobWithRevId = Number(jobWithRevRes.lastInsertRowid);
+  db.prepare("UPDATE model_revisions SET conversion_job_id = ? WHERE id = ?").run(jobWithRevId, rev2.id);
 
   assert.equal(markJobReady(jobWithRevId, "success", 456), true);
 
   const checkedRev2 = getRevisionById(rev2.id)!;
   assert.equal(checkedRev2.glb_size_bytes, 456);
   assert.equal(checkedRev2.status, "ready");
+
+  setCurrentRevision(modelId, rev2.id);
+  const onlyCurrent = db.prepare("SELECT id FROM model_revisions WHERE model_id = ? AND is_current = 1").all(modelId) as Array<{ id: number }>;
+  assert.deepEqual(onlyCurrent.map((row) => row.id), [rev2.id]);
+  assert.equal((db.prepare("SELECT current_revision_id FROM models WHERE id = ?").get(modelId) as any).current_revision_id, rev2.id);
 
   // 5. Public share resolution
   const resolvedRev = resolvePublicShareRevision(shareTokenHash);

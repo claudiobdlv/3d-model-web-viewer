@@ -473,10 +473,11 @@ export function createPublicShare(input: {
   tokenPrefix: string;
   publicToken: string;
 }): PublicShareRecord {
+  const currentRevision = getCurrentRevisionForModel(input.modelId);
   db.prepare(
-    `INSERT INTO public_shares (id, model_id, token_hash, token_prefix, public_token)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(input.id, input.modelId, input.tokenHash, input.tokenPrefix, input.publicToken);
+    `INSERT INTO public_shares (id, model_id, token_hash, token_prefix, public_token, revision_id, link_mode)
+     VALUES (?, ?, ?, ?, ?, ?, 'locked_revision')`
+  ).run(input.id, input.modelId, input.tokenHash, input.tokenPrefix, input.publicToken, currentRevision?.id ?? null);
   return db.prepare("SELECT * FROM public_shares WHERE id = ?").get(input.id) as PublicShareRecord;
 }
 
@@ -569,14 +570,15 @@ export function createJob(input: {
   status: string;
   message?: string;
   quality?: ConversionQuality;
+  revisionId?: number | null;
 }): JobRecord {
   const quality = parseConversionQuality(input.quality);
   const result = db
     .prepare(
-      `INSERT INTO jobs (model_id, model_slug, type, status, message, quality)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO jobs (model_id, model_slug, type, status, message, quality, revision_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(input.modelId, input.modelSlug, input.type, input.status, input.message ?? null, quality);
+    .run(input.modelId, input.modelSlug, input.type, input.status, input.message ?? null, quality, input.revisionId ?? null);
 
   return db.prepare("SELECT * FROM jobs WHERE id = ?").get(result.lastInsertRowid) as JobRecord;
 }
@@ -699,6 +701,10 @@ export function markJobCancelled(jobId: number, message = "Worker acknowledged c
   ).run(message, jobId);
 
   if ((job as any).revision_id) {
+    const currentRevision = getRevisionById((job as any).revision_id);
+    if (!currentRevision || currentRevision.conversion_job_id !== job.id) {
+      return getModelById(job.model_id, true);
+    }
     db.prepare(
       `UPDATE model_revisions
        SET status = 'cancelled',
@@ -807,13 +813,26 @@ export function claimNextWorkerJob(): WorkerJobRecord | undefined {
   try {
     const job = db
       .prepare(
-      `SELECT jobs.*, models.source_filename, models.source_ext
+      `SELECT jobs.*,
+              COALESCE(model_revisions.source_filename, models.source_filename) AS source_filename,
+              CASE
+                WHEN lower(model_revisions.source_filename) LIKE '%.step' THEN '.step'
+                WHEN lower(model_revisions.source_filename) LIKE '%.stp' THEN '.stp'
+                WHEN lower(model_revisions.source_filename) LIKE '%.glb' THEN '.glb'
+                WHEN lower(model_revisions.source_filename) LIKE '%.gltf' THEN '.gltf'
+                ELSE models.source_ext
+              END AS source_ext
        FROM jobs
        JOIN models ON models.id = jobs.model_id
+       LEFT JOIN model_revisions ON model_revisions.id = jobs.revision_id
        WHERE jobs.type = 'step-to-glb'
          AND jobs.status IN ('uploaded', 'queued')
          AND jobs.cancellation_requested_at IS NULL
-         AND models.source_ext IN ('.step', '.stp')
+         AND CASE
+               WHEN lower(model_revisions.source_filename) LIKE '%.step' THEN '.step'
+               WHEN lower(model_revisions.source_filename) LIKE '%.stp' THEN '.stp'
+               ELSE models.source_ext
+             END IN ('.step', '.stp')
          AND models.deleted_at IS NULL
        ORDER BY jobs.created_at ASC, jobs.id ASC
        LIMIT 1`
@@ -845,12 +864,15 @@ export function claimNextWorkerJob(): WorkerJobRecord | undefined {
       return undefined;
     }
 
-    db.prepare(
-      `UPDATE models
-       SET status = 'processing',
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`
-    ).run(job.model_id);
+    if (job.revision_id) {
+      db.prepare("UPDATE model_revisions SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.revision_id);
+      db.prepare(
+        `UPDATE models SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND current_revision_id = ?`
+      ).run(job.model_id, job.revision_id);
+    } else {
+      db.prepare("UPDATE models SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.model_id);
+    }
 
     db.exec("COMMIT");
     return { ...job, status: "processing" };
@@ -863,15 +885,26 @@ export function claimNextWorkerJob(): WorkerJobRecord | undefined {
 export function getJobForWorker(jobId: number): WorkerJobRecord | undefined {
   return db
     .prepare(
-      `SELECT jobs.*, models.source_filename, models.source_ext
+      `SELECT jobs.*,
+              COALESCE(model_revisions.source_filename, models.source_filename) AS source_filename,
+              CASE
+                WHEN lower(model_revisions.source_filename) LIKE '%.step' THEN '.step'
+                WHEN lower(model_revisions.source_filename) LIKE '%.stp' THEN '.stp'
+                WHEN lower(model_revisions.source_filename) LIKE '%.glb' THEN '.glb'
+                WHEN lower(model_revisions.source_filename) LIKE '%.gltf' THEN '.gltf'
+                ELSE models.source_ext
+              END AS source_ext
        FROM jobs
        JOIN models ON models.id = jobs.model_id
+       LEFT JOIN model_revisions ON model_revisions.id = jobs.revision_id
        WHERE jobs.id = ?`
     )
     .get(jobId) as WorkerJobRecord | undefined;
 }
 
 export function markJobProcessing(jobId: number): void {
+  const job = getJobForWorker(jobId);
+  if (!job) return;
   db.prepare(
     `UPDATE jobs
      SET status = 'processing',
@@ -883,17 +916,24 @@ export function markJobProcessing(jobId: number): void {
      WHERE id = ?`
   ).run(jobId);
 
-  db.prepare(
-    `UPDATE models
-     SET status = 'processing',
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = (SELECT model_id FROM jobs WHERE id = ?)`
-  ).run(jobId);
+  if (job.revision_id) {
+    db.prepare("UPDATE model_revisions SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.revision_id);
+    db.prepare(
+      `UPDATE models SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND current_revision_id = ?`
+    ).run(job.model_id, job.revision_id);
+  } else {
+    db.prepare("UPDATE models SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.model_id);
+  }
 }
 
 export function markJobReady(jobId: number, message = "Worker completed fake processing.", glbSizeBytes?: number): boolean {
   const job = getJobForWorker(jobId);
   if (!job) return false;
+  if (job.revision_id) {
+    const revision = getRevisionById(job.revision_id);
+    if (!revision || revision.conversion_job_id !== job.id) return false;
+  }
 
   const result = db.prepare(
     `UPDATE jobs
@@ -954,6 +994,8 @@ export function markJobFailed(jobId: number, message: string): void {
   ).run(message, jobId);
 
   if ((job as any).revision_id) {
+    const currentRevision = getRevisionById((job as any).revision_id);
+    if (!currentRevision || currentRevision.conversion_job_id !== job.id) return;
     db.prepare(
       `UPDATE model_revisions
        SET status = 'failed',
@@ -995,6 +1037,33 @@ export function getRevisionById(revisionId: number): ModelRevisionRecord | undef
   return db.prepare("SELECT * FROM model_revisions WHERE id = ?").get(revisionId) as ModelRevisionRecord | undefined;
 }
 
+export function getRevisionForModel(modelId: number, revisionId: number): ModelRevisionRecord | undefined {
+  return db.prepare("SELECT * FROM model_revisions WHERE id = ? AND model_id = ?").get(revisionId, modelId) as ModelRevisionRecord | undefined;
+}
+
+export function getRevisionByLabel(modelId: number, revisionLabel: string): ModelRevisionRecord | undefined {
+  return db.prepare("SELECT * FROM model_revisions WHERE model_id = ? AND revision_label = ?").get(modelId, revisionLabel) as ModelRevisionRecord | undefined;
+}
+
+export function listRevisionFileVersions(revisionId: number): RevisionFileVersionRecord[] {
+  return db.prepare(
+    "SELECT * FROM revision_file_versions WHERE revision_id = ? ORDER BY file_version_number ASC"
+  ).all(revisionId) as RevisionFileVersionRecord[];
+}
+
+export function getActiveRevisionFileVersion(revisionId: number): RevisionFileVersionRecord | undefined {
+  return db.prepare(
+    "SELECT * FROM revision_file_versions WHERE revision_id = ? AND is_active = 1 ORDER BY file_version_number DESC LIMIT 1"
+  ).get(revisionId) as RevisionFileVersionRecord | undefined;
+}
+
+export function getNextRevisionFileVersionNumber(revisionId: number): number {
+  const row = db.prepare(
+    "SELECT COALESCE(MAX(file_version_number), 0) + 1 AS next_version FROM revision_file_versions WHERE revision_id = ?"
+  ).get(revisionId) as { next_version: number };
+  return row.next_version;
+}
+
 export function getCurrentRevisionForModel(modelId: number): ModelRevisionRecord | undefined {
   return db.prepare("SELECT * FROM model_revisions WHERE model_id = ? AND is_current = 1 LIMIT 1").get(modelId) as ModelRevisionRecord | undefined;
 }
@@ -1021,8 +1090,8 @@ export function createRevisionForModel(input: {
   qualityPreset: string;
   status: string;
   sourceFilename: string;
-  sourcePath: string;
-  displayGlbPath: string;
+  sourcePath: string | ((revisionId: number) => string);
+  displayGlbPath: string | ((revisionId: number) => string);
   sourceSizeBytes: number;
   glbSizeBytes?: number | null;
   conversionJobId?: number | null;
@@ -1064,14 +1133,22 @@ export function createRevisionForModel(input: {
       isCurrent,
       isPubliclySelectable,
       input.sourceFilename,
-      input.sourcePath,
-      input.displayGlbPath,
+      typeof input.sourcePath === "function" ? "" : input.sourcePath,
+      typeof input.displayGlbPath === "function" ? "" : input.displayGlbPath,
       input.sourceSizeBytes,
       input.glbSizeBytes ?? null,
       input.conversionJobId ?? null
     );
 
     const revisionId = Number(res.lastInsertRowid);
+    const sourcePath = typeof input.sourcePath === "function" ? input.sourcePath(revisionId) : input.sourcePath;
+    const displayGlbPath = typeof input.displayGlbPath === "function" ? input.displayGlbPath(revisionId) : input.displayGlbPath;
+
+    db.prepare(
+      `UPDATE model_revisions
+       SET source_path = ?, display_glb_path = ?
+       WHERE id = ?`
+    ).run(sourcePath, displayGlbPath, revisionId);
 
     db.prepare(`
       INSERT INTO revision_file_versions (
@@ -1081,8 +1158,8 @@ export function createRevisionForModel(input: {
     `).run(
       revisionId,
       input.sourceFilename,
-      input.sourcePath,
-      input.displayGlbPath,
+      sourcePath,
+      displayGlbPath,
       input.qualityPreset
     );
 
@@ -1102,6 +1179,150 @@ export function createRevisionForModel(input: {
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;
+  }
+}
+
+export function setRevisionConversionJob(revisionId: number, jobId: number): void {
+  db.prepare(
+    `UPDATE model_revisions
+     SET conversion_job_id = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).run(jobId, revisionId);
+}
+
+export function markRevisionViewerReady(revisionId: number, modelId: number, glbSizeBytes: number): void {
+  const revision = getRevisionForModel(modelId, revisionId);
+  if (!revision) throw new Error("Revision does not belong to model.");
+  db.prepare(
+    `UPDATE model_revisions
+     SET status = 'ready', glb_size_bytes = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).run(glbSizeBytes, revisionId);
+  if (revision.is_current === 1) {
+    db.prepare(
+      `UPDATE models
+       SET status = 'ready', has_display_glb = 1, glb_size_bytes = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(glbSizeBytes, modelId);
+  }
+}
+
+export function deleteRevisionById(revisionId: number): void {
+  db.prepare("DELETE FROM model_revisions WHERE id = ?").run(revisionId);
+}
+
+export function setCurrentRevision(modelId: number, revisionId: number): ModelRevisionRecord {
+  db.exec("BEGIN TRANSACTION");
+  try {
+    const revision = getRevisionForModel(modelId, revisionId);
+    if (!revision) {
+      throw new Error("Revision does not belong to model.");
+    }
+    db.prepare("UPDATE model_revisions SET is_current = 0, updated_at = CURRENT_TIMESTAMP WHERE model_id = ?").run(modelId);
+    db.prepare("UPDATE model_revisions SET is_current = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(revisionId);
+    db.prepare(
+      `UPDATE models
+       SET current_revision_id = ?,
+           status = ?,
+           has_display_glb = ?,
+           glb_size_bytes = ?,
+           original_size_bytes = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(
+      revisionId,
+      revision.status,
+      revision.status === "ready" ? 1 : 0,
+      revision.glb_size_bytes,
+      revision.source_size_bytes,
+      modelId
+    );
+    db.exec("COMMIT");
+    return getRevisionById(revisionId)!;
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function replaceRevisionFileVersion(input: {
+  modelId: number;
+  revisionId: number;
+  sourceFilename: string;
+  sourcePath: (fileVersionNumber: number) => string;
+  displayGlbPath: (fileVersionNumber: number) => string;
+  qualityPreset: string;
+  replacementReason?: string | null;
+  sourceSizeBytes: number;
+  fileVersionNumber?: number;
+}): { revision: ModelRevisionRecord; fileVersion: RevisionFileVersionRecord } {
+  db.exec("BEGIN TRANSACTION");
+  try {
+    const revision = getRevisionForModel(input.modelId, input.revisionId);
+    if (!revision) {
+      throw new Error("Revision does not belong to model.");
+    }
+    const fileVersionNumber = getNextRevisionFileVersionNumber(input.revisionId);
+    if (input.fileVersionNumber !== undefined && input.fileVersionNumber !== fileVersionNumber) {
+      throw new Error("Revision file version changed during replacement upload.");
+    }
+    const sourcePath = input.sourcePath(fileVersionNumber);
+    const displayGlbPath = input.displayGlbPath(fileVersionNumber);
+
+    db.prepare(
+      `UPDATE jobs
+       SET status = 'cancelled',
+           cancellation_requested_at = COALESCE(cancellation_requested_at, CURRENT_TIMESTAMP),
+           completed_at = CURRENT_TIMESTAMP,
+           message = 'Superseded by a replacement file upload.',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE revision_id = ? AND status IN ('uploaded', 'queued', 'processing', 'cancelling')`
+    ).run(input.revisionId);
+    db.prepare("UPDATE revision_file_versions SET is_active = 0 WHERE revision_id = ? AND is_active = 1").run(input.revisionId);
+    const inserted = db.prepare(
+      `INSERT INTO revision_file_versions (
+         revision_id, file_version_number, source_filename, source_path,
+         display_glb_path, quality_preset, replacement_reason, is_active
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
+    ).run(
+      input.revisionId,
+      fileVersionNumber,
+      input.sourceFilename,
+      sourcePath,
+      displayGlbPath,
+      input.qualityPreset,
+      input.replacementReason || null
+    );
+    db.prepare(
+      `UPDATE model_revisions
+       SET source_filename = ?, source_path = ?, display_glb_path = ?,
+           quality_preset = ?, source_size_bytes = ?, glb_size_bytes = NULL,
+           status = 'uploaded', conversion_job_id = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(
+      input.sourceFilename,
+      sourcePath,
+      displayGlbPath,
+      input.qualityPreset,
+      input.sourceSizeBytes,
+      input.revisionId
+    );
+    if (revision.is_current === 1) {
+      db.prepare(
+        `UPDATE models
+         SET status = 'uploaded', has_display_glb = 0, glb_size_bytes = NULL,
+             original_size_bytes = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      ).run(input.sourceSizeBytes, input.modelId);
+    }
+    db.exec("COMMIT");
+    return {
+      revision: getRevisionById(input.revisionId)!,
+      fileVersion: db.prepare("SELECT * FROM revision_file_versions WHERE id = ?").get(inserted.lastInsertRowid) as RevisionFileVersionRecord
+    };
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    throw error;
   }
 }
 

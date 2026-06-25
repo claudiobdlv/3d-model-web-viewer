@@ -7,6 +7,8 @@ import {
   createPublicShare,
   getActivePublicShareForModel,
   getModelById,
+  getCurrentRevisionForModel,
+  getActiveRevisionFileVersion,
   getStorageQuota,
   initDb,
   recordPublicShareAccess,
@@ -32,11 +34,14 @@ import {
   getModelDir,
   getUploadDir,
   getWorkerOutputDir,
+  getRevisionLogDir,
+  getRevisionVersionLogDir,
   isSafeSlug,
   publicRoot,
   webRoot,
   cleanAbandonedChunkedUploads,
-  resolveDisplayGlbPath
+  resolveDisplayGlbPath,
+  resolveSourcePath
 } from "./storage.js";
 
 const port = Number(process.env.PORT || 3009);
@@ -109,7 +114,8 @@ app.post("/api/models/:id/share", requireAdmin, (req, res) => {
     return;
   }
 
-  const glbPath = path.join(getModelDir(model.slug), "display.glb");
+  const currentRevision = getCurrentRevisionForModel(model.id);
+  const glbPath = resolveDisplayGlbPath(model, currentRevision);
   if (!["ready", "viewer-ready"].includes(model.status) || !model.has_display_glb || !fs.existsSync(glbPath)) {
     res.status(409).json({ error: "Only viewer-ready models can be shared." });
     return;
@@ -175,7 +181,11 @@ app.get("/model-files/:slug/:file", requireAdmin, (req, res) => {
     return;
   }
 
-  const filePath = path.join(getModelDir(slug), file);
+  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
+  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  const filePath = file === "display.glb"
+    ? resolveDisplayGlbPath({ slug }, revision)
+    : path.join(revision ? path.dirname(resolveDisplayGlbPath({ slug }, revision)) : getModelDir(slug), file);
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;
@@ -191,21 +201,18 @@ app.get("/downloads/:slug/original", requireAdmin, (req, res) => {
     return;
   }
 
-  const uploadDir = getUploadDir(slug);
-  if (!fs.existsSync(uploadDir)) {
+  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; source_ext: string; source_filename: string } | undefined;
+  if (!model) {
     res.status(404).send("Not found");
     return;
   }
-
-  const original = fs.readdirSync(uploadDir, { withFileTypes: true })
-    .find((entry) => entry.isFile() && /^original\.(step|stp|glb|gltf)$/i.test(entry.name));
-
-  if (!original) {
+  const revision = getCurrentRevisionForModel(model.id);
+  const sourcePath = resolveSourcePath(model, revision);
+  if (!fs.existsSync(sourcePath)) {
     res.status(404).send("Not found");
     return;
   }
-
-  res.download(path.join(uploadDir, original.name));
+  res.download(sourcePath, revision?.source_filename || model.source_filename);
 });
 
 app.get("/downloads/:slug/display.glb", requireAdmin, (req, res) => {
@@ -215,7 +222,9 @@ app.get("/downloads/:slug/display.glb", requireAdmin, (req, res) => {
     return;
   }
 
-  const filePath = path.join(getModelDir(slug), "display.glb");
+  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
+  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  const filePath = resolveDisplayGlbPath({ slug }, revision);
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;
@@ -231,8 +240,16 @@ app.get("/admin/logs/:slug/conversion.log", requireAdmin, (req, res) => {
     return;
   }
 
+  const model = db.prepare("SELECT id FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number } | undefined;
+  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  const fileVersion = revision ? getActiveRevisionFileVersion(revision.id) : undefined;
+  const currentLogDir = revision
+    ? fileVersion && fileVersion.file_version_number > 1
+      ? getRevisionVersionLogDir(slug, revision.id, fileVersion.file_version_number)
+      : getRevisionLogDir(slug, revision.id)
+    : getLogDir(slug);
   const filePath = [
-    path.join(getLogDir(slug), "conversion.log"),
+    path.join(currentLogDir, "conversion.log"),
     path.join(getWorkerOutputDir(slug), "conversion.log")
   ].find((candidate) => fs.existsSync(candidate));
 
@@ -251,7 +268,7 @@ app.get("/admin/models/:slug/material-debug.json", requireAdmin, (req, res) => {
     return;
   }
 
-  const filePath = path.join(getModelDir(slug), "material-debug.json");
+  const filePath = path.join(getCurrentArtifactDir(slug), "material-debug.json");
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;
@@ -267,7 +284,7 @@ app.get("/admin/models/:slug/xcaf-report.json", requireAdmin, (req, res) => {
     return;
   }
 
-  const filePath = path.join(getModelDir(slug), "xcaf-report.json");
+  const filePath = path.join(getCurrentArtifactDir(slug), "xcaf-report.json");
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;
@@ -374,9 +391,18 @@ function sendPublicNotFound(res: express.Response, html: boolean): void {
   );
 }
 
+function getCurrentArtifactDir(slug: string): string {
+  const model = db.prepare("SELECT id, slug FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
+  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  return revision ? path.dirname(resolveDisplayGlbPath({ slug }, revision)) : getModelDir(slug);
+}
+
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = err instanceof Error ? err.message : "Unexpected server error.";
-  res.status(400).send(message);
+  const statusCode = typeof (err as { statusCode?: unknown })?.statusCode === "number"
+    ? (err as { statusCode: number }).statusCode
+    : 400;
+  res.status(statusCode).send(message);
 });
 
 if (process.env.NODE_ENV !== "test") {

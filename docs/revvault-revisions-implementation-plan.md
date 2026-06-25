@@ -239,3 +239,61 @@ export function getLogDir(slug: string, revisionId?: number): string {
 ## 16. Out of Scope
 
 - **Geometric Diff / Change Highlighting**: Explicitly out of scope for now. The database schema and viewer UI will have room to support geometric comparisons in a future phase.
+
+---
+
+## 17. Phase 3: Revision Upload and Replacement Controllers
+
+Phase 3 adds server-side upload and replacement behaviour without adding the admin revision modals or viewer revision selector.
+
+### Endpoints and request fields
+
+- `POST /api/models`
+  - Existing multipart field: `modelFile`
+  - New optional fields: `revisionLabel`, `issuedDate`, `quality`, `makeCurrent`, `allowPublicSelectable`
+  - The first revision always becomes current. Blank labels default to `1`; blank dates default to the current UTC date.
+- `POST /api/models/:slug/revisions`
+  - Multipart file field: `modelFile` or `file`
+  - Optional fields: `revisionLabel`, `issuedDate`, `quality`, `makeCurrent` (default `true`), `allowPublicSelectable` (default `true`)
+  - Blank labels use the next positive numeric label for that model.
+- `POST /api/models/:slug/revisions/:revisionId/replace`
+  - Multipart file field: `modelFile` or `file`
+  - Optional fields: `replacementReason`, `quality`
+  - Keeps the existing public revision label and revision ID while creating a new immutable file-version row.
+- `POST /api/uploads/chunked/init` and `POST /api/uploads/chunked/:uploadId/complete`
+  - Accept the same revision metadata.
+  - When `modelSlug` is omitted, completion creates a new model and first revision.
+  - When `modelSlug` is supplied, completion adds a revision to the existing model.
+
+### Validation
+
+- Model slugs and revision IDs are validated and revision ownership is enforced.
+- Missing files, unsupported extensions, existing size limits, invalid quality presets, invalid booleans, and invalid `YYYY-MM-DD` dates are rejected.
+- New-revision labels are trimmed and must be unique within the model. Replacement uploads intentionally retain the existing label.
+- `makeCurrent=false` leaves the model's current revision unchanged.
+
+### Storage and replacement behaviour
+
+- New revision source: `uploads/<slug>/revisions/<revision-id>/original.<ext>`
+- New revision display: `models/<slug>/revisions/<revision-id>/display.glb`
+- Replacement source: `uploads/<slug>/revisions/<revision-id>/versions/<file-version>/original.<ext>`
+- Replacement display: `models/<slug>/revisions/<revision-id>/versions/<file-version>/display.glb`
+- Database paths remain relative to the storage root.
+- Replacements mark the prior `revision_file_versions` row inactive but never delete or overwrite its source, display artifact, or history.
+- Existing locked public shares continue to reference the same revision ID. Once a replacement conversion completes, that revision resolves to its new active display path.
+
+### Job and worker linkage
+
+- Every new revision and replacement job stores `jobs.revision_id`.
+- Worker payloads include additive `revisionId`.
+- Worker source downloads resolve `model_revisions.source_path`.
+- Worker completion writes to `model_revisions.display_glb_path`, including versioned replacement paths.
+- Revision status and size metadata are updated independently; the legacy `models` summary changes only when the affected revision is current.
+- Jobs with `revision_id = NULL` retain the legacy source and output behaviour.
+
+### Compatibility and known limitations before Phase 4
+
+- Existing model, download, model-file, public-share, and worker URLs remain unchanged; current-revision resolution happens server-side.
+- Existing legacy root files are not moved, renamed, deleted, or overwritten.
+- Chunked creation of new models and new revisions is complete for Phase 3. Chunked replacement of an existing revision is not exposed; the replacement endpoint currently uses the normal multipart upload path and existing upload limits.
+- Admin controls for entering metadata, uploading/replacing revisions, making revisions current, and managing public selectability remain Phase 4 work.

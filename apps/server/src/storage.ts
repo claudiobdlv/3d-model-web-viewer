@@ -96,6 +96,26 @@ export function getRevisionLogDir(slug: string, revisionId: number): string {
   return path.join(logsRoot, slug, "revisions", String(revisionId));
 }
 
+export function getRevisionVersionUploadDir(slug: string, revisionId: number, fileVersionNumber: number): string {
+  return path.join(getRevisionUploadDir(slug, revisionId), "versions", String(fileVersionNumber));
+}
+
+export function getRevisionVersionModelDir(slug: string, revisionId: number, fileVersionNumber: number): string {
+  return path.join(getRevisionModelDir(slug, revisionId), "versions", String(fileVersionNumber));
+}
+
+export function getRevisionVersionLogDir(slug: string, revisionId: number, fileVersionNumber: number): string {
+  return path.join(getRevisionLogDir(slug, revisionId), "versions", String(fileVersionNumber));
+}
+
+export function toStorageRelativePath(absolutePath: string): string {
+  const relativePath = path.relative(storageRoot, absolutePath);
+  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    throw new Error("Path must be inside the configured storage root.");
+  }
+  return relativePath.split(path.sep).join("/");
+}
+
 export function resolveDisplayGlbPath(
   model: { slug: string },
   revision?: { id: number; display_glb_path?: string | null } | null

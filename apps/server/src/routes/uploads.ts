@@ -3,9 +3,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import express from "express";
 import multer from "multer";
-import { getFolderById } from "../db.js";
+import { getFolderById, getModelBySlug } from "../db.js";
 import { chunkedUploadsRoot } from "../storage.js";
-import { registerModelAndJob } from "./models.js";
+import { parseRevisionMetadata, registerModelAndJob, registerRevisionAndJob } from "./models.js";
 import { parseConversionQuality } from "../quality.js";
 
 const MAX_UPLOAD_BYTES = 524288000;       // 500 MB
@@ -46,7 +46,7 @@ function parseProjectId(value: unknown): number | null {
 // Initialize a chunked upload
 uploadsRouter.post("/init", (req, res) => {
   try {
-    const { filename, sizeBytes, projectId, quality } = req.body || {};
+    const { filename, sizeBytes, projectId, quality, modelSlug } = req.body || {};
 
     if (typeof filename !== "string" || !filename) {
       res.status(400).json({ error: "filename is required." });
@@ -92,6 +92,12 @@ uploadsRouter.post("/init", (req, res) => {
     }
 
     const parsedQuality = parseConversionQuality(quality);
+    const existingModelSlug = typeof modelSlug === "string" ? modelSlug.trim() : "";
+    if (existingModelSlug && !getModelBySlug(existingModelSlug)) {
+      res.status(404).json({ error: "Model not found." });
+      return;
+    }
+    const revisionMetadata = parseRevisionMetadata(req.body, !existingModelSlug);
 
     const uploadId = crypto.randomUUID();
     const uploadDir = path.join(chunkedUploadsRoot, uploadId);
@@ -109,6 +115,11 @@ uploadsRouter.post("/init", (req, res) => {
       sizeBytes: size,
       projectId: parsedFolderId,
       quality: parsedQuality,
+      modelSlug: existingModelSlug || null,
+      revisionLabel: revisionMetadata.revisionLabel,
+      issuedDate: revisionMetadata.issuedDate,
+      makeCurrent: revisionMetadata.makeCurrent,
+      allowPublicSelectable: revisionMetadata.allowPublicSelectable,
       totalChunks,
       chunkSizeBytes: MAX_UPLOAD_CHUNK_BYTES,
       createdAt: new Date().toISOString()
@@ -238,21 +249,35 @@ uploadsRouter.post("/:uploadId/complete", async (req, res, next) => {
     });
 
     // Create normal model/job using the existing upload pipeline
-    const model = await registerModelAndJob({
-      sourceFilename: metadata.filename,
-      sourceExt: path.extname(metadata.filename).toLowerCase(),
-      quality: metadata.quality,
-      folderId: metadata.projectId,
-      originalSizeBytes: metadata.sizeBytes,
-      saveOriginalFile: (targetPath) => {
-        fs.renameSync(assembledPath, targetPath);
-      }
-    });
+    const model = metadata.modelSlug
+      ? await registerRevisionAndJob({
+          modelSlug: metadata.modelSlug,
+          sourceFilename: metadata.filename,
+          quality: metadata.quality,
+          originalSizeBytes: metadata.sizeBytes,
+          revisionLabel: metadata.revisionLabel,
+          issuedDate: metadata.issuedDate,
+          makeCurrent: metadata.makeCurrent,
+          allowPublicSelectable: metadata.allowPublicSelectable,
+          saveOriginalFile: (targetPath) => fs.renameSync(assembledPath, targetPath)
+        })
+      : await registerModelAndJob({
+          sourceFilename: metadata.filename,
+          sourceExt: path.extname(metadata.filename).toLowerCase(),
+          quality: metadata.quality,
+          folderId: metadata.projectId,
+          originalSizeBytes: metadata.sizeBytes,
+          revisionLabel: metadata.revisionLabel,
+          issuedDate: metadata.issuedDate,
+          makeCurrent: metadata.makeCurrent,
+          allowPublicSelectable: metadata.allowPublicSelectable,
+          saveOriginalFile: (targetPath) => fs.renameSync(assembledPath, targetPath)
+        });
 
     // Clean up all chunks and directory
     fs.rmSync(uploadDir, { recursive: true, force: true });
 
-    console.info("chunked_upload_complete", { uploadId, modelSlug: model.slug, sizeBytes: metadata.sizeBytes, totalChunks: metadata.totalChunks });
+    console.info("chunked_upload_complete", { uploadId, modelSlug: metadata.modelSlug || (model as any).slug, sizeBytes: metadata.sizeBytes, totalChunks: metadata.totalChunks });
 
     res.status(201).json(model);
   } catch (error) {
