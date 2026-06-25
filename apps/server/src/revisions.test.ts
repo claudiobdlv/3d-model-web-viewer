@@ -11,10 +11,10 @@ test("RevVault Revisions and Storage System Tests", async (t) => {
   process.env.DATA_DIR = dataDir;
 
   // Dynamically import db and storage
-  const { 
-    db, 
+  const {
+    db,
     initDb,
-    backfillModelRevisions, 
+    backfillModelRevisions,
     createRevisionForModel,
     getCurrentRevisionForModel,
     listRevisionsForModel,
@@ -131,7 +131,7 @@ test("RevVault Revisions and Storage System Tests", async (t) => {
   // Legacy paths
   assert.equal(getLegacyModelDir("test-slug").endsWith(path.join("models", "test-slug")), true);
   assert.equal(getLegacyUploadDir("test-slug").endsWith(path.join("uploads", "test-slug")), true);
-  
+
   // Revision-specific paths
   assert.equal(getRevisionModelDir("test-slug", 42).endsWith(path.join("models", "test-slug", "revisions", "42")), true);
   assert.equal(getRevisionUploadDir("test-slug", 42).endsWith(path.join("uploads", "test-slug", "revisions", "42")), true);

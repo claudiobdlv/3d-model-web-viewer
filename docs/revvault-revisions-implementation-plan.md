@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS model_revisions (
 );
 
 -- Indexes for model revisions
-CREATE INDEX IF NOT EXISTS model_revisions_model_active_idx 
+CREATE INDEX IF NOT EXISTS model_revisions_model_active_idx
   ON model_revisions (model_id, is_active);
 
 -- Link jobs to revisions
