@@ -316,7 +316,7 @@ Phase 4 exposes the existing revision foundation through the production-style ad
 
 - The model action menu now opens an **Upload new revision** dialog.
 - The dialog supports revision label, issued date, quality, file, make-current, and public-selectability controls.
-- It submits to `POST /api/models/:slug/revisions`, displays multipart upload progress, reports backend validation errors, and refreshes the model list after success.
+- It submits to `POST /api/models/:slug/revisions`, automatically uses the existing chunked revision-upload path above 80 MB, displays upload progress, reports backend validation errors, and refreshes the model list after success.
 - A blank label uses the next numeric revision. Disabling **Make this the current revision after processing** preserves the existing current revision while retaining the new entry in revision history.
 
 ### Replace revision workflow

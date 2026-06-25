@@ -219,7 +219,7 @@ export function initChunkedUpload(
   sizeBytes: number,
   projectId: number | null,
   quality: ConversionQuality = "medium",
-  revision: RevisionMetadata = {}
+  revision: RevisionMetadata & { modelSlug?: string } = {}
 ): Promise<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }> {
   return request<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }>(
     "/api/uploads/chunked/init",
@@ -274,8 +274,8 @@ export async function uploadChunk(
   });
 }
 
-export function completeChunkedUpload(uploadId: string): Promise<ModelRecord> {
-  return request<ModelRecord>(`/api/uploads/chunked/${encodeURIComponent(uploadId)}/complete`, {
+export function completeChunkedUpload<T = ModelRecord>(uploadId: string): Promise<T> {
+  return request<T>(`/api/uploads/chunked/${encodeURIComponent(uploadId)}/complete`, {
     method: "POST"
   }, 120_000);
 }
@@ -297,13 +297,36 @@ export function saveModelDefaultView(slug: string, defaultView: any | null): Pro
   });
 }
 
-export function uploadNewRevision(
+export async function uploadNewRevision(
   slug: string,
   file: File,
   quality: ConversionQuality,
   revision: RevisionMetadata,
   onProgress?: (percent: number) => void
 ): Promise<{ revision: ModelRevisionRecord; job: JobRecord }> {
+  if (file.size > 83886080) {
+    const { uploadId, chunkSizeBytes } = await initChunkedUpload(
+      file.name,
+      file.size,
+      null,
+      quality,
+      { ...revision, modelSlug: slug }
+    );
+    try {
+      const totalChunks = Math.ceil(file.size / chunkSizeBytes);
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const start = chunkIndex * chunkSizeBytes;
+        const end = Math.min(start + chunkSizeBytes, file.size);
+        await uploadChunk(uploadId, chunkIndex, totalChunks, file.slice(start, end), undefined, (chunkBytes) => {
+          onProgress?.(Math.round(((start + chunkBytes) / file.size) * 100));
+        });
+      }
+      return await completeChunkedUpload<{ revision: ModelRevisionRecord; job: JobRecord }>(uploadId);
+    } catch (error) {
+      await deleteChunkedUpload(uploadId).catch(() => undefined);
+      throw error;
+    }
+  }
   const form = new FormData();
   form.set("modelFile", file);
   form.set("quality", quality);
