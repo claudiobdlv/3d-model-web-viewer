@@ -453,3 +453,121 @@ The dedicated local manual workflow is at [`docs/revvault-phase6-qa-checklist.md
 - Chunked replacement uploads are deferred; replacement files over 80 MB are blocked in the current dialog.
 - Production copied-data rollout testing is deferred to Phase 7.
 - Production rollout and the final merge to `main` are not part of Phase 6.
+
+## Phase 7: Copied-data rollout validation and deployment planning
+
+Phase 7 was performed on `feature/revvault-revisions` from starting commit
+`ffc620a7ae8a430eba3c759154eb5c9e5bb4cf41`. It did not merge or deploy.
+
+### Isolated copied-data method
+
+- Production was inspected read-only at
+  `/home/claudio/projects/3d-model-web-viewer/data`.
+- The live SQLite database was in WAL mode, so a raw file copy was rejected.
+- Neither the host nor server container had the `sqlite3` CLI. The copy was made
+  with Node's SQLite online-backup API from the running server container, using
+  `/tmp` as the intermediate location.
+- The backup was downloaded to the ignored local path
+  `.tmp/revvault-copied-data/db/app.sqlite`.
+- Only three representative storage samples were copied:
+  - a recoverable active public-share model with original, GLB, log, manifest,
+    stats, material debug, and XCAF report;
+  - an older share-backed converted model;
+  - a small second converted model for foreign-revision checks.
+- No public token was printed or written to tracked files. The HTTP harness read
+  the token directly from the copied DB.
+- `.tmp/` and `data/` were already ignored. `git check-ignore` confirmed the
+  copied DB and GLB were excluded.
+
+### Migration and idempotency results
+
+The RevVault startup migration ran only against the copied DB and storage root.
+
+| Check | Result |
+| --- | ---: |
+| Existing models | 45 |
+| Rev 1 rows after migration | 45 |
+| Initial revision file-version rows | 45 |
+| Models without exactly one Rev 1 | 0 |
+| Models without `current_revision_id` | 0 |
+| Current-pointer/current-flag mismatches | 0 |
+| Existing jobs linked to Rev 1 | 59 / 59 |
+| Existing shares linked to Rev 1 | 14 / 14 |
+| Existing shares not `locked_revision` | 0 |
+| Existing shares with switching enabled | 0 |
+| Duplicate revision labels after second startup | 0 |
+| Foreign-key violations | 0 |
+| SQLite integrity check | `ok` |
+
+The first copied-data startup took approximately 2.50 seconds and the second
+took approximately 2.34 seconds on the Windows validation host. The second
+startup created no duplicate revisions or file-version rows. No SQLite lock or
+migration warning occurred; only Node's standard experimental `node:sqlite`
+warning was emitted.
+
+Hashes of every copied legacy source, display, log, and artifact were compared
+before and after migration. Zero files changed. Migration created DB rows only;
+it did not move, delete, rename, or overwrite storage.
+
+### Compatibility, workflow, and security results
+
+HTTP checks against the copied app passed for:
+
+- admin model list, existing slug details, and private viewer shell;
+- migrated Rev 1 metadata and legacy GLB resolution;
+- original and GLB downloads;
+- conversion log, `material-debug.json`, and `xcaf-report.json`;
+- a pre-existing public share resolving to the same model and Rev 1;
+- legacy/default public switching remaining disabled with no dropdown entries;
+- blank-label numeric revision creation and explicit normalized labels;
+- case/whitespace-insensitive duplicate rejection;
+- make-current true and false behavior;
+- public-selectability persistence;
+- immutable replacement file versions with previous files retained;
+- superseded replacement jobs being rejected before artifact publication;
+- private selected-revision source and GLB downloads;
+- explicitly enabled public switching showing only ready/public-selectable
+  revisions;
+- hidden, processing, malformed, and foreign revision guesses failing safely;
+- explicit latest/current links following current only after configuration;
+- locked links remaining on their locked revision after newer uploads;
+- no public original, log, or debug-artifact routes;
+- no internal storage paths in public shell or metadata responses.
+
+No RevVault implementation bug was found, so Phase 7 added no product code.
+
+### Performance and storage observations
+
+- Migration time is small for the copied 45-model production snapshot.
+- Startup output was clear and did not indicate DB contention.
+- Replacement history intentionally increases physical storage because old
+  source and display versions are immutable.
+- The existing admin quota display sums `models.original_size_bytes` and
+  `models.glb_size_bytes`. It represents current model summaries, not all
+  physical revision/version files, and therefore under-reports replacement
+  history growth.
+- Quota is currently informational rather than upload enforcement. A follow-up
+  should add revision-aware physical usage reporting and operational disk-space
+  alerting before replacement history becomes substantial.
+
+### Rollout, rollback, and recommendation
+
+The production procedure, exact online-backup commands, verification queries,
+stop/go gates, code rollback, and post-migration DB restore procedure are in
+[`docs/revvault-rollout-runbook.md`](./revvault-rollout-runbook.md).
+
+Remaining risks:
+
+- copied-data testing cannot reproduce production concurrency during the first
+  startup migration;
+- storage growth is not fully reflected in the current quota widget;
+- browser/device visual checks still need to be repeated in the production
+  maintenance window;
+- rollback by restoring the DB backup would discard writes made after backup,
+  so post-deploy writes must be controlled until sign-off.
+
+Recommendation: the RevVault migration and compatibility behavior are safe to
+merge and deploy using the runbook, provided a verified online DB backup is
+created immediately before deployment, the maintenance-window stop/go checks
+pass, and the first production startup is observed. Phase 7 itself did not
+merge, deploy, or modify production DB/storage.
