@@ -115,7 +115,34 @@ test("revision upload and replacement controllers preserve revision history", as
   assert.equal(modelDetailsResponse.status, 200);
   const modelDetails = await modelDetailsResponse.json() as any;
   assert.equal(modelDetails.currentRevision.id, explicit.body.revision.id);
+  assert.equal(modelDetails.activeRevision.id, explicit.body.revision.id);
   assert.equal(modelDetails.revisions.length, 3);
+  const selectedModelDetailsResponse = await fetch(
+    `${origin}/api/models/${model.slug}?revisionId=${firstRevision.id}`,
+    { headers }
+  );
+  assert.equal(selectedModelDetailsResponse.status, 200);
+  const selectedModelDetails = await selectedModelDetailsResponse.json() as any;
+  assert.equal(selectedModelDetails.activeRevision.id, firstRevision.id);
+  assert.match(selectedModelDetails.glb_url, new RegExp(`revisionId=${firstRevision.id}$`));
+  assert.equal(selectedModelDetails.invalidRevisionRequested, false);
+  const selectedGlb = await fetch(`${origin}${selectedModelDetails.glb_url}`, { headers });
+  assert.equal(await selectedGlb.text(), "first-glb");
+  const selectedDownload = await fetch(`${origin}${selectedModelDetails.glb_download_url}`, { headers });
+  assert.equal(await selectedDownload.text(), "first-glb");
+
+  const invalidModelDetailsResponse = await fetch(
+    `${origin}/api/models/${model.slug}?revisionId=999999`,
+    { headers }
+  );
+  assert.equal(invalidModelDetailsResponse.status, 200);
+  const invalidModelDetails = await invalidModelDetailsResponse.json() as any;
+  assert.equal(invalidModelDetails.activeRevision.id, explicit.body.revision.id);
+  assert.equal(invalidModelDetails.invalidRevisionRequested, true);
+  assert.equal(
+    (await fetch(`${origin}/model-files/${model.slug}/display.glb?revisionId=999999`, { headers })).status,
+    404
+  );
   const modelListResponse = await fetch(`${origin}/api/models`, { headers });
   const modelList = await modelListResponse.json() as any[];
   assert.equal(modelList.find((item) => item.id === model.id).current_revision_label, "A");

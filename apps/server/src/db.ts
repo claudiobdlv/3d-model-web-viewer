@@ -131,6 +131,7 @@ export type PublicShareRecord = {
   access_count: number;
   revision_id?: number | null;
   link_mode?: string | null;
+  allow_revision_switching?: number;
 };
 
 export type PublicShareModelRecord = ModelRecord & {
@@ -263,6 +264,7 @@ export function initDb(): void {
   ensureColumn("jobs", "revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
   ensureColumn("public_shares", "revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
   ensureColumn("public_shares", "link_mode", "TEXT DEFAULT 'locked_revision'");
+  ensureColumn("public_shares", "allow_revision_switching", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("models", "current_revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
 
   db.exec(`
@@ -499,6 +501,18 @@ export function revokePublicSharesForModel(modelId: number): number {
      WHERE model_id = ? AND revoked_at IS NULL`
   ).run(modelId);
   return Number(result.changes || 0);
+}
+
+export function updatePublicShareRevisionSwitching(
+  shareId: string,
+  allowRevisionSwitching: boolean
+): PublicShareRecord | undefined {
+  db.prepare(
+    `UPDATE public_shares
+     SET allow_revision_switching = ?
+     WHERE id = ? AND revoked_at IS NULL`
+  ).run(allowRevisionSwitching ? 1 : 0, shareId);
+  return db.prepare("SELECT * FROM public_shares WHERE id = ? AND revoked_at IS NULL").get(shareId) as PublicShareRecord | undefined;
 }
 
 export function getPublicShareModelByHash(tokenHash: string): PublicShareModelRecord | undefined {
@@ -1072,7 +1086,9 @@ export function getCurrentRevisionForModel(modelId: number): ModelRevisionRecord
 }
 
 export function listRevisionsForModel(modelId: number): ModelRevisionRecord[] {
-  return db.prepare("SELECT * FROM model_revisions WHERE model_id = ? ORDER BY revision_sort_order ASC").all(modelId) as ModelRevisionRecord[];
+  return db.prepare(
+    "SELECT * FROM model_revisions WHERE model_id = ? AND deleted_at IS NULL ORDER BY revision_sort_order ASC"
+  ).all(modelId) as ModelRevisionRecord[];
 }
 
 export function getNextNumericRevisionLabel(modelId: number): string {

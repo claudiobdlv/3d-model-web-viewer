@@ -357,3 +357,56 @@ Phase 4 exposes the existing revision foundation through the production-style ad
 - Admin historical-revision viewer route.
 - Change highlighting and geometric diff.
 - Chunked replacement uploads.
+
+---
+
+## 19. Phase 5: Admin/Public Viewer Revision Selection
+
+Phase 5 makes the existing viewer revision-aware while preserving the locked behaviour of every existing public QR/share link.
+
+### Viewer revision display and admin selection
+
+- The viewer header shows `Rev <label>` beneath the model title and appends a locally formatted issued date when available.
+- Admin/private model detail accepts `GET /api/models/:slug?revisionId=<id>`.
+- The response includes `activeRevision`, all non-deleted `revisions`, a revision-specific `glb_url`, selected-revision download URLs, and `invalidRevisionRequested`.
+- Without `revisionId`, the current revision remains the default.
+- A valid historical revision updates the viewer URL and loads that revision's display GLB.
+- An invalid or foreign revision ID falls back to the current revision in model metadata. Direct asset and download requests with an invalid revision ID return `404`.
+- The private viewer dropdown lists every non-deleted revision and marks the model's current revision.
+
+### Public locked semantics and revision switching
+
+- `public_shares.allow_revision_switching INTEGER NOT NULL DEFAULT 0` is added additively.
+- Existing and newly created shares therefore remain locked by default and do not expose a revision dropdown.
+- The linked revision remains the default even when a newer revision is current.
+- Public metadata and GLB routes accept an optional `revisionId`:
+  - `GET /public/:token/model.json?revisionId=<id>`
+  - `GET /public/:token/model.glb?revisionId=<id>`
+- With switching disabled, only the share's locked revision can resolve.
+- With switching enabled, the locked revision remains allowed and additional selectable revisions must belong to the same model, be non-deleted, be ready, and have `is_publicly_selectable = 1`.
+- Guessed hidden, foreign, malformed, or missing revision IDs never expose another artifact; the public route falls back to the locked revision and marks the metadata request invalid.
+- Public API responses expose display metadata and route URLs only, never internal storage paths.
+
+### Share setting API
+
+- `PATCH /api/models/:id/share` accepts `{ "allowRevisionSwitching": boolean }` for the active share.
+- There is no clean dedicated share-settings panel in the current admin UI, so Phase 5 intentionally leaves this as API support rather than placing the toggle in an unrelated dialog.
+
+### Revision-aware assets, downloads, and artifacts
+
+- Admin/private routes accept optional `revisionId` and enforce that it belongs to the requested model:
+  - `/model-files/:slug/:file`
+  - `/downloads/:slug/original`
+  - `/downloads/:slug/display.glb`
+  - `/admin/logs/:slug/conversion.log`
+  - `/admin/models/:slug/material-debug.json`
+  - `/admin/models/:slug/xcaf-report.json`
+- Existing URLs without a query parameter retain current-revision behaviour.
+- Public viewers still expose only the display GLB. No new public source, log, report, or artifact download route is introduced.
+
+### Deferred after Phase 5
+
+- Change highlighting and geometric diff.
+- Side-by-side revision comparison.
+- Chunked replacement uploads.
+- A dedicated share-settings UI for `allow_revision_switching`.

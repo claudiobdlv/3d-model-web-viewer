@@ -134,12 +134,14 @@ export function batchModels(action: BatchAction, slugs: string[], projectId?: nu
   });
 }
 
-export function getModel(slug: string): Promise<ModelRecord> {
-  return request<ModelRecord>(`/api/models/${encodeURIComponent(slug)}`);
+export function getModel(slug: string, revisionId?: number): Promise<ModelRecord> {
+  const query = revisionId ? `?revisionId=${revisionId}` : "";
+  return request<ModelRecord>(`/api/models/${encodeURIComponent(slug)}${query}`);
 }
 
-export function getPublicModel(token: string): Promise<PublicModel> {
-  return request<PublicModel>(`/public/${encodeURIComponent(token)}/model.json`);
+export function getPublicModel(token: string, revisionId?: number): Promise<PublicModel> {
+  const query = revisionId ? `?revisionId=${revisionId}` : "";
+  return request<PublicModel>(`/public/${encodeURIComponent(token)}/model.json${query}`);
 }
 
 export function createPublicShare(modelId: number): Promise<PublicShareResponse> {

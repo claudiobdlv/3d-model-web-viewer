@@ -25,7 +25,12 @@ export type ModelRecord = {
   current_revision_id?: number | null;
   current_revision_label?: string | null;
   currentRevision?: ModelRevisionRecord | null;
+  activeRevision?: ModelRevisionRecord | null;
   revisions?: ModelRevisionRecord[];
+  glb_url?: string;
+  original_download_url?: string;
+  glb_download_url?: string;
+  invalidRevisionRequested?: boolean;
 };
 
 export type ModelRevisionRecord = {
@@ -163,7 +168,16 @@ export type PublicModel = {
   slug: string;
   glb_url: string;
   default_view_json?: string | null;
+  activeRevision: PublicRevisionSummary | null;
+  revisions: PublicRevisionSummary[];
+  allowRevisionSwitching: boolean;
+  invalidRevisionRequested?: boolean;
 };
+
+export type PublicRevisionSummary = Pick<
+  ModelRevisionRecord,
+  "id" | "revision_label" | "issued_date" | "status" | "is_current" | "is_publicly_selectable"
+>;
 
 export type LargeStepChunkingSummary = {
   mode?: string;

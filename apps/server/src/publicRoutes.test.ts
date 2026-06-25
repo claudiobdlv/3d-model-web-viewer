@@ -33,7 +33,7 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
     body: form
   });
   assert.equal(upload.status, 201);
-  const model = await upload.json() as { id: number; slug: string };
+  const model = await upload.json() as { id: number; slug: string; current_revision_id: number };
 
   const legacyToken = "L".repeat(43);
   db.prepare(
@@ -41,6 +41,9 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
      VALUES (?, ?, ?, ?)`
   ).run(crypto.randomUUID(), model.id, crypto.createHash("sha256").update(legacyToken).digest("hex"), legacyToken.slice(0, 8));
   assert.equal((await fetch(`${origin}/public/${legacyToken}`)).status, 200);
+  const legacyMetadata = await fetch(`${origin}/public/${legacyToken}/model.json`);
+  assert.equal(legacyMetadata.status, 200);
+  assert.equal((await legacyMetadata.json() as any).activeRevision.id, model.current_revision_id);
 
   const create = await fetch(`${origin}/api/models/${model.id}/share`, {
     method: "POST",
@@ -78,7 +81,10 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   assert.equal((await fetch(`${origin}/public/${share.token}`)).status, 200);
   const metadata = await fetch(`${origin}/public/${share.token}/model.json`);
   assert.equal(metadata.status, 200);
-  assert.deepEqual(Object.keys(await metadata.json()).sort(), ["default_view_json", "glb_url", "name", "slug"]);
+  const lockedMetadata = await metadata.json() as any;
+  assert.equal(lockedMetadata.activeRevision.id, model.current_revision_id);
+  assert.equal(lockedMetadata.allowRevisionSwitching, false);
+  assert.deepEqual(lockedMetadata.revisions, []);
   assert.equal((await fetch(`${origin}/public/${share.token}/model.glb`)).status, 200);
   assert.equal((await fetch(`${origin}/public/${share.token}/original`)).status, 404);
   assert.equal((await fetch(`${origin}/api/models`)).status, 401);
@@ -86,6 +92,52 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   assert.equal((await fetch(`${origin}/3dviewer/${model.slug}`)).status, 401);
   assert.equal((await fetch(`${origin}/downloads/${model.slug}/original`)).status, 401);
   assert.equal((await fetch(`${origin}/admin/logs/${model.slug}/conversion.log`)).status, 401);
+
+  async function uploadRevision(filename: string, contents: string, allowPublicSelectable: boolean) {
+    const revisionForm = new FormData();
+    revisionForm.set("modelFile", new Blob([contents]), filename);
+    revisionForm.set("allowPublicSelectable", String(allowPublicSelectable));
+    revisionForm.set("makeCurrent", "false");
+    const response = await fetch(`${origin}/api/models/${model.slug}/revisions`, {
+      method: "POST",
+      headers: { authorization, accept: "application/json" },
+      body: revisionForm
+    });
+    assert.equal(response.status, 201);
+    return response.json() as Promise<{ revision: { id: number } }>;
+  }
+
+  const selectable = await uploadRevision("public-revision.glb", "public-revision", true);
+  const hidden = await uploadRevision("hidden-revision.glb", "hidden-revision", false);
+
+  const lockedGuess = await fetch(`${origin}/public/${share.token}/model.glb?revisionId=${selectable.revision.id}`);
+  assert.equal(await lockedGuess.text(), "test-glb");
+
+  const enableSwitching = await fetch(`${origin}/api/models/${model.id}/share`, {
+    method: "PATCH",
+    headers: { authorization, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ allowRevisionSwitching: true })
+  });
+  assert.equal(enableSwitching.status, 200);
+  assert.equal((await enableSwitching.json() as any).allowRevisionSwitching, true);
+
+  const switchableMetadata = await fetch(`${origin}/public/${share.token}/model.json`);
+  const switchableBody = await switchableMetadata.json() as any;
+  assert.equal(switchableBody.activeRevision.id, model.current_revision_id);
+  assert.equal(switchableBody.allowRevisionSwitching, true);
+  assert.deepEqual(switchableBody.revisions.map((revision: any) => revision.id), [model.current_revision_id, selectable.revision.id]);
+
+  const selectedPublic = await fetch(`${origin}/public/${share.token}/model.glb?revisionId=${selectable.revision.id}`);
+  assert.equal(await selectedPublic.text(), "public-revision");
+  const selectedMetadata = await fetch(`${origin}/public/${share.token}/model.json?revisionId=${selectable.revision.id}`);
+  assert.equal((await selectedMetadata.json() as any).activeRevision.id, selectable.revision.id);
+
+  const hiddenGuess = await fetch(`${origin}/public/${share.token}/model.glb?revisionId=${hidden.revision.id}`);
+  assert.equal(await hiddenGuess.text(), "test-glb");
+  const hiddenMetadata = await fetch(`${origin}/public/${share.token}/model.json?revisionId=${hidden.revision.id}`);
+  const hiddenBody = await hiddenMetadata.json() as any;
+  assert.equal(hiddenBody.activeRevision.id, model.current_revision_id);
+  assert.equal(hiddenBody.invalidRevisionRequested, true);
 
   const revoke = await fetch(`${origin}/api/models/${model.id}/share`, {
     method: "DELETE",

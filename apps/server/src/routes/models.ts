@@ -157,10 +157,22 @@ modelsRouter.get("/:slug", (req, res) => {
 
   const currentRevision = getCurrentRevisionForModel(model.id);
   const revisions = listRevisionsForModel(model.id);
+  const requestedRevisionId = parseRequestedRevisionId(req.query.revisionId);
+  const requestedRevision = requestedRevisionId ? getRevisionForModel(model.id, requestedRevisionId) : undefined;
+  const invalidRevisionRequested = req.query.revisionId !== undefined && !requestedRevision;
+  const activeRevision = requestedRevision || currentRevision || null;
+  const revisionQuery = activeRevision ? `?revisionId=${activeRevision.id}` : "";
   const modelWithRevisions = {
     ...model,
     currentRevision: currentRevision || null,
-    revisions: revisions || []
+    activeRevision,
+    revisions: revisions || [],
+    glb_url: activeRevision
+      ? `/model-files/${encodeURIComponent(slug)}/display.glb${revisionQuery}`
+      : `/model-files/${encodeURIComponent(slug)}/display.glb`,
+    original_download_url: `/downloads/${encodeURIComponent(slug)}/original${revisionQuery}`,
+    glb_download_url: `/downloads/${encodeURIComponent(slug)}/display.glb${revisionQuery}`,
+    invalidRevisionRequested
   };
 
   const summary = getLargeStepChunkingSummary(slug, true);
@@ -891,4 +903,11 @@ function parseListOptions(query: express.Request["query"]) {
     sortBy: sortBy as NonNullable<ModelListOptions["sortBy"]>,
     sortDir: sortDir as NonNullable<ModelListOptions["sortDir"]>
   };
+}
+
+function parseRequestedRevisionId(value: unknown): number | undefined {
+  const scalar = Array.isArray(value) ? value[0] : value;
+  if (typeof scalar !== "string" && typeof scalar !== "number") return undefined;
+  const revisionId = Number(scalar);
+  return Number.isInteger(revisionId) && revisionId > 0 ? revisionId : undefined;
 }

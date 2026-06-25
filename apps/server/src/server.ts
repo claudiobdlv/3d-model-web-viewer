@@ -8,12 +8,16 @@ import {
   getActivePublicShareForModel,
   getModelById,
   getCurrentRevisionForModel,
+  getRevisionForModel,
+  listRevisionsForModel,
   getActiveRevisionFileVersion,
   getStorageQuota,
   initDb,
   recordPublicShareAccess,
   revokePublicSharesForModel,
   resolvePublicShareRevision,
+  updatePublicShareRevisionSwitching,
+  type ModelRevisionRecord,
   type PublicShareRecord
 } from "./db.js";
 import {
@@ -150,6 +154,28 @@ app.delete("/api/models/:id/share", requireAdmin, (req, res) => {
   res.json({ ok: true, revoked: revokePublicSharesForModel(model.id) });
 });
 
+app.patch("/api/models/:id/share", requireAdmin, (req, res) => {
+  const modelId = Number(req.params.id);
+  const model = Number.isInteger(modelId) ? getModelById(modelId) : undefined;
+  if (!model) {
+    res.status(404).json({ error: "Model not found." });
+    return;
+  }
+  if (typeof req.body?.allowRevisionSwitching !== "boolean") {
+    res.status(400).json({ error: "allowRevisionSwitching must be true or false." });
+    return;
+  }
+  const share = getActivePublicShareForModel(model.id);
+  if (!share) {
+    res.status(404).json({ error: "Active public share not found." });
+    return;
+  }
+  const updated = updatePublicShareRevisionSwitching(share.id, req.body.allowRevisionSwitching);
+  res.json({
+    allowRevisionSwitching: Boolean(updated?.allow_revision_switching)
+  });
+});
+
 app.use("/api/models", requireAdmin, modelsRouter);
 app.use("/api/uploads/chunked", requireAdmin, uploadsRouter);
 app.use("/api/folders", requireAdmin, foldersRouter);
@@ -182,7 +208,12 @@ app.get("/model-files/:slug/:file", requireAdmin, (req, res) => {
   }
 
   const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
-  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
+  if (resolved.invalid) {
+    res.status(404).send("Not found");
+    return;
+  }
+  const revision = resolved.revision;
   const filePath = file === "display.glb"
     ? resolveDisplayGlbPath({ slug }, revision)
     : path.join(revision ? path.dirname(resolveDisplayGlbPath({ slug }, revision)) : getModelDir(slug), file);
@@ -206,7 +237,11 @@ app.get("/downloads/:slug/original", requireAdmin, (req, res) => {
     res.status(404).send("Not found");
     return;
   }
-  const revision = getCurrentRevisionForModel(model.id);
+  const { revision, invalid } = resolveAdminRevision(model.id, req.query.revisionId);
+  if (invalid) {
+    res.status(404).send("Revision not found.");
+    return;
+  }
   const sourcePath = resolveSourcePath(model, revision);
   if (!fs.existsSync(sourcePath)) {
     res.status(404).send("Not found");
@@ -223,7 +258,12 @@ app.get("/downloads/:slug/display.glb", requireAdmin, (req, res) => {
   }
 
   const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
-  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
+  if (resolved.invalid) {
+    res.status(404).send("Revision not found.");
+    return;
+  }
+  const revision = resolved.revision;
   const filePath = resolveDisplayGlbPath({ slug }, revision);
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
@@ -241,7 +281,12 @@ app.get("/admin/logs/:slug/conversion.log", requireAdmin, (req, res) => {
   }
 
   const model = db.prepare("SELECT id FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number } | undefined;
-  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
+  if (resolved.invalid) {
+    res.status(404).send("Revision not found.");
+    return;
+  }
+  const revision = resolved.revision;
   const fileVersion = revision ? getActiveRevisionFileVersion(revision.id) : undefined;
   const currentLogDir = revision
     ? fileVersion && fileVersion.file_version_number > 1
@@ -268,7 +313,12 @@ app.get("/admin/models/:slug/material-debug.json", requireAdmin, (req, res) => {
     return;
   }
 
-  const filePath = path.join(getCurrentArtifactDir(slug), "material-debug.json");
+  const artifactDir = getArtifactDir(slug, req.query.revisionId);
+  if (!artifactDir) {
+    res.status(404).send("Revision not found.");
+    return;
+  }
+  const filePath = path.join(artifactDir, "material-debug.json");
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;
@@ -284,7 +334,12 @@ app.get("/admin/models/:slug/xcaf-report.json", requireAdmin, (req, res) => {
     return;
   }
 
-  const filePath = path.join(getCurrentArtifactDir(slug), "xcaf-report.json");
+  const artifactDir = getArtifactDir(slug, req.query.revisionId);
+  if (!artifactDir) {
+    res.status(404).send("Revision not found.");
+    return;
+  }
+  const filePath = path.join(artifactDir, "xcaf-report.json");
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;
@@ -301,7 +356,7 @@ app.use("/public/assets", express.static(path.join(frontendRoot, "assets"), {
 
 app.get("/public/:token/model.json", (req, res) => {
   const token = String(req.params.token);
-  const share = resolvePublicShare(token);
+  const share = resolvePublicShare(token, req.query.revisionId);
   if (!share) {
     sendPublicNotFound(res, false);
     return;
@@ -311,13 +366,17 @@ app.get("/public/:token/model.json", (req, res) => {
   res.json({
     name: share.name,
     slug: share.slug,
-    glb_url: `/public/${encodeURIComponent(token)}/model.glb`,
-    default_view_json: share.default_view_json
+    glb_url: publicAssetUrl(token, "model.glb", share.activeRevision?.id),
+    default_view_json: share.default_view_json,
+    activeRevision: share.activeRevision ? publicRevisionSummary(share.activeRevision) : null,
+    revisions: share.revisions.map(publicRevisionSummary),
+    allowRevisionSwitching: share.allowRevisionSwitching,
+    invalidRevisionRequested: share.invalidRevisionRequested
   });
 });
 
 app.get("/public/:token/model.glb", (req, res) => {
-  const share = resolvePublicShare(String(req.params.token));
+  const share = resolvePublicShare(String(req.params.token), req.query.revisionId);
   if (!share) {
     sendPublicNotFound(res, false);
     return;
@@ -342,25 +401,38 @@ app.get("/public/:token", (req, res) => {
   res.type("html").send(shell);
 });
 
-function resolvePublicShare(token: string) {
+function resolvePublicShare(token: string, requestedRevisionId?: unknown) {
   if (!isValidPublicToken(token)) return undefined;
   const tokenHash = hashPublicToken(token);
   const share = db.prepare("SELECT * FROM public_shares WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1").get(tokenHash) as PublicShareRecord | undefined;
   if (!share) return undefined;
 
-  const rev = resolvePublicShareRevision(tokenHash);
-  if (rev) {
-    if (rev.status !== "ready") return undefined;
-    const model = getModelById(rev.model_id);
+  const linkedRevision = resolvePublicShareRevision(tokenHash);
+  if (linkedRevision) {
+    const model = getModelById(linkedRevision.model_id);
     if (!model) return undefined;
-    const glbPath = resolveDisplayGlbPath(model, rev);
+    const allowRevisionSwitching = Boolean(share.allow_revision_switching);
+    const publicSelectable = allowRevisionSwitching
+      ? listRevisionsForModel(model.id).filter((revision) => revision.is_publicly_selectable === 1 && revision.status === "ready")
+      : [];
+    const allowedRevisionIds = new Set([linkedRevision.id, ...publicSelectable.map((revision) => revision.id)]);
+    const parsedRevisionId = parseRevisionId(requestedRevisionId);
+    const requestedRevision = parsedRevisionId ? getRevisionForModel(model.id, parsedRevisionId) : undefined;
+    const requestedAllowed = requestedRevision && allowedRevisionIds.has(requestedRevision.id);
+    const activeRevision = requestedAllowed ? requestedRevision : linkedRevision;
+    if (activeRevision.status !== "ready") return undefined;
+    const glbPath = resolveDisplayGlbPath(model, activeRevision);
     if (!fs.existsSync(glbPath)) return undefined;
     return {
       share_id: share.id,
       name: model.name,
       slug: model.slug,
       default_view_json: model.default_view_json,
-      glbPath
+      glbPath,
+      activeRevision,
+      revisions: publicSelectable,
+      allowRevisionSwitching,
+      invalidRevisionRequested: requestedRevisionId !== undefined && !requestedAllowed
     };
   }
 
@@ -375,7 +447,11 @@ function resolvePublicShare(token: string) {
     name: model.name,
     slug: model.slug,
     default_view_json: model.default_view_json,
-    glbPath
+    glbPath,
+    activeRevision: null,
+    revisions: [],
+    allowRevisionSwitching: false,
+    invalidRevisionRequested: requestedRevisionId !== undefined
   };
 }
 
@@ -391,10 +467,48 @@ function sendPublicNotFound(res: express.Response, html: boolean): void {
   );
 }
 
-function getCurrentArtifactDir(slug: string): string {
+function getArtifactDir(slug: string, revisionIdValue?: unknown): string | undefined {
   const model = db.prepare("SELECT id, slug FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
-  const revision = model ? getCurrentRevisionForModel(model.id) : undefined;
+  const resolved = model ? resolveAdminRevision(model.id, revisionIdValue) : {};
+  if (resolved.invalid) return undefined;
+  const revision = resolved.revision;
   return revision ? path.dirname(resolveDisplayGlbPath({ slug }, revision)) : getModelDir(slug);
+}
+
+function resolveAdminRevision(modelId: number, revisionIdValue?: unknown): {
+  revision?: ModelRevisionRecord;
+  invalid?: boolean;
+} {
+  if (revisionIdValue === undefined || revisionIdValue === null || revisionIdValue === "") {
+    return { revision: getCurrentRevisionForModel(modelId) };
+  }
+  const revisionId = parseRevisionId(revisionIdValue);
+  if (!revisionId) return { invalid: true };
+  const revision = getRevisionForModel(modelId, revisionId);
+  return revision && !revision.deleted_at ? { revision } : { invalid: true };
+}
+
+function parseRevisionId(value: unknown): number | undefined {
+  const scalar = Array.isArray(value) ? value[0] : value;
+  if (typeof scalar !== "string" && typeof scalar !== "number") return undefined;
+  const parsed = Number(scalar);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function publicRevisionSummary(revision: ModelRevisionRecord) {
+  return {
+    id: revision.id,
+    revision_label: revision.revision_label,
+    issued_date: revision.issued_date,
+    status: revision.status,
+    is_current: revision.is_current,
+    is_publicly_selectable: revision.is_publicly_selectable
+  };
+}
+
+function publicAssetUrl(token: string, asset: string, revisionId?: number): string {
+  const base = `/public/${encodeURIComponent(token)}/${asset}`;
+  return revisionId ? `${base}?revisionId=${revisionId}` : base;
 }
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

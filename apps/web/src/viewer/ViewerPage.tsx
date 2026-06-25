@@ -5,7 +5,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { ArrowLeft, Box, Download, Home, Sun, Moon } from "lucide-react";
 import { getModel, getPublicModel, saveModelDefaultView } from "../api";
-import type { ModelRecord, PublicModel } from "../types";
+import type { ModelRecord, ModelRevisionRecord, PublicModel, PublicRevisionSummary } from "../types";
 
 type MetadataSource = { source: string; name: string; value: Record<string, unknown> };
 
@@ -104,6 +104,10 @@ function MarqueeText({ text }: { text: string }) {
 export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: string; theme?: "dark" | "light"; toggleTheme?: () => void }) {
   const isPublic = !!publicToken;
   const slug = useMemo(() => window.location.pathname.split("/").filter(Boolean).pop() ?? "", []);
+  const initialRevisionId = useMemo(() => {
+    const value = Number(new URLSearchParams(window.location.search).get("revisionId"));
+    return Number.isInteger(value) && value > 0 ? value : undefined;
+  }, []);
   const adminReturnPath = useMemo(() => { const candidate=new URLSearchParams(window.location.search).get("returnTo"); return candidate?.startsWith("/admin") ? candidate : "/admin"; }, []);
   const [model, setModel] = useState<ModelRecord | PublicModel | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -115,6 +119,7 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
   const saveViewRef = useRef<(() => Promise<void>) | null>(null);
   const clearViewRef = useRef<(() => Promise<void>) | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [requestedRevisionId, setRequestedRevisionId] = useState<number | undefined>(initialRevisionId);
 
   const showToast = (type: "success" | "error", message: string) => {
     setToast({ type, message });
@@ -156,15 +161,44 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
   }, [theme]);
 
   useEffect(() => {
-    void (publicToken ? getPublicModel(publicToken) : getModel(slug))
-      .then(setModel)
+    setError(null);
+    void (publicToken ? getPublicModel(publicToken, requestedRevisionId) : getModel(slug, requestedRevisionId))
+      .then((loadedModel) => {
+        setModel(loadedModel);
+        const activeRevision = loadedModel.activeRevision;
+        if (loadedModel.invalidRevisionRequested && activeRevision) {
+          setRequestedRevisionId(activeRevision.id);
+          updateRevisionUrl(activeRevision.id);
+        }
+      })
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Model not found."));
-  }, [publicToken, slug]);
+  }, [publicToken, requestedRevisionId, slug]);
 
-  const hasDisplayGlb = model ? ("glb_url" in model || Boolean(model.has_display_glb)) : false;
+  const activeRevision = model?.activeRevision ?? null;
+  const hasDisplayGlb = model
+    ? Boolean(model.glb_url) && (!activeRevision || activeRevision.status === undefined || activeRevision.status === "ready")
+    : false;
   const glbUrl = model
-    ? ("glb_url" in model ? model.glb_url : `/model-files/${encodeURIComponent(slug)}/display.glb`)
+    ? model.glb_url
     : "";
+  const availableRevisions = model?.revisions ?? [];
+  const activeRevisionIsSelectable = Boolean(
+    activeRevision && availableRevisions.some((revision) => revision.id === activeRevision.id)
+  );
+  const showRevisionDropdown = isPublic
+    ? Boolean(
+        model
+        && "allowRevisionSwitching" in model
+        && model.allowRevisionSwitching
+        && (availableRevisions.length > 1 || (!activeRevisionIsSelectable && availableRevisions.length > 0))
+      )
+    : availableRevisions.length > 1;
+
+  const selectRevision = (revisionId: number) => {
+    if (revisionId === activeRevision?.id) return;
+    setRequestedRevisionId(revisionId);
+    updateRevisionUrl(revisionId);
+  };
 
   useEffect(() => {
     if (!hasDisplayGlb || !glbUrl || !canvasHost.current) return undefined;
@@ -779,10 +813,35 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
           {!isPublic ? <><a className="secondary-button" href={adminReturnPath}><ArrowLeft size={16} /> Admin</a><div className="h-6 w-px" style={{ background: "var(--line)" }} /></> : null}
           <div className="min-w-0">
             <h1 className="truncate font-display text-lg font-bold text-[var(--accent)] leading-tight">{model?.name ?? "Model viewer"}</h1>
-
+            {activeRevision ? (
+              <div className="truncate text-[11px] font-medium leading-tight" style={{ color: "var(--subtle)" }}>
+                {formatRevisionLine(activeRevision)}
+              </div>
+            ) : null}
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {showRevisionDropdown ? (
+            <label className="flex items-center gap-2 text-xs font-semibold" style={{ color: "var(--muted)" }}>
+              <span className="hidden md:inline">Revision</span>
+              <select
+                className="h-9 max-w-[180px] rounded-lg border px-2 text-xs font-semibold"
+                style={{ borderColor: "var(--line)", background: "var(--panel-soft)", color: "var(--text)" }}
+                value={activeRevision?.id ?? ""}
+                onChange={(event) => selectRevision(Number(event.target.value))}
+                aria-label="Revision"
+              >
+                {activeRevision && !availableRevisions.some((revision) => revision.id === activeRevision.id) ? (
+                  <option value={activeRevision.id} disabled>{revisionOptionLabel(activeRevision, true)}</option>
+                ) : null}
+                {availableRevisions.map((revision) => (
+                  <option key={revision.id} value={revision.id}>
+                    {revisionOptionLabel(revision, false)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           {theme !== undefined && toggleTheme !== undefined ? (
             <button
               className="secondary-button"
@@ -794,8 +853,8 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
           ) : null}
-          {model && !publicToken && "source_filename" in model && model.has_display_glb ? (
-              <a className="secondary-button hidden sm:inline-flex" href={`/downloads/${encodeURIComponent(slug)}/display.glb`}><Download size={15} /> GLB</a>
+          {model && !publicToken && "source_filename" in model && hasDisplayGlb ? (
+              <a className="secondary-button hidden sm:inline-flex" href={model.glb_download_url ?? `/downloads/${encodeURIComponent(slug)}/display.glb`}><Download size={15} /> GLB</a>
           ) : null}
         </div>
       </header>
@@ -914,6 +973,29 @@ export function ViewerPage({ publicToken, theme, toggleTheme }: { publicToken?: 
       </main>
     </div>
   );
+}
+
+function updateRevisionUrl(revisionId: number): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set("revisionId", String(revisionId));
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function formatRevisionLine(revision: ModelRevisionRecord | PublicRevisionSummary): string {
+  const revisionText = `Rev ${revision.revision_label}`;
+  if (!revision.issued_date) return revisionText;
+  const issuedDate = new Date(`${revision.issued_date}T00:00:00`);
+  if (Number.isNaN(issuedDate.valueOf())) return revisionText;
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][issuedDate.getMonth()];
+  return `${revisionText} · Issued ${issuedDate.getDate()} ${month} ${issuedDate.getFullYear()}`;
+}
+
+function revisionOptionLabel(
+  revision: ModelRevisionRecord | PublicRevisionSummary,
+  linkedOnly: boolean
+): string {
+  if (linkedOnly) return `Rev ${revision.revision_label} — linked`;
+  return `Rev ${revision.revision_label}${revision.is_current ? " — current" : ""}`;
 }
 
 function isUsefulDisplayName(name: string): boolean {
