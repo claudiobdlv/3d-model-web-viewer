@@ -75,6 +75,20 @@ test("revision upload and replacement controllers preserve revision history", as
     revisionLabel: " A "
   });
   assert.equal(duplicate.response.status, 409);
+  const duplicateCase = await upload(`/api/models/${model.slug}/revisions`, "duplicate-case.step", Buffer.from("duplicate"), {
+    revisionLabel: "a"
+  });
+  assert.equal(duplicateCase.response.status, 409);
+  const spacedLabel = await upload(`/api/models/${model.slug}/revisions`, "spaced.step", Buffer.from("spaced"), {
+    revisionLabel: "Design   Issue",
+    makeCurrent: "false"
+  });
+  assert.equal(spacedLabel.response.status, 201);
+  assert.equal(spacedLabel.body.revision.revision_label, "Design Issue");
+  const duplicateWhitespace = await upload(`/api/models/${model.slug}/revisions`, "duplicate-whitespace.step", Buffer.from("duplicate"), {
+    revisionLabel: " design issue "
+  });
+  assert.equal(duplicateWhitespace.response.status, 409);
 
   const automatic = await upload(`/api/models/${model.slug}/revisions`, "automatic.step", Buffer.from("automatic"), {
     revisionLabel: " ",
@@ -116,7 +130,7 @@ test("revision upload and replacement controllers preserve revision history", as
   const modelDetails = await modelDetailsResponse.json() as any;
   assert.equal(modelDetails.currentRevision.id, explicit.body.revision.id);
   assert.equal(modelDetails.activeRevision.id, explicit.body.revision.id);
-  assert.equal(modelDetails.revisions.length, 3);
+  assert.equal(modelDetails.revisions.length, 4);
   const selectedModelDetailsResponse = await fetch(
     `${origin}/api/models/${model.slug}?revisionId=${firstRevision.id}`,
     { headers }
@@ -211,6 +225,14 @@ test("revision upload and replacement controllers preserve revision history", as
   const staleSource = await fetch(`${origin}/api/worker/jobs/${staleCandidate.body.job.id}/source`, { headers: workerHeaders });
   assert.ok([404, 409].includes(staleSource.status));
   assert.equal((db.prepare("SELECT status FROM jobs WHERE id = ?").get(staleCandidate.body.job.id) as any).status, "cancelled");
+  const staleCompleteForm = new FormData();
+  staleCompleteForm.set("display.glb", new Blob(["stale-result"]), "display.glb");
+  const staleComplete = await fetch(`${origin}/api/worker/jobs/${staleCandidate.body.job.id}/complete`, {
+    method: "POST",
+    headers: workerHeaders,
+    body: staleCompleteForm
+  });
+  assert.ok([404, 409].includes(staleComplete.status));
   const lockedAfterSupersedingReplacement = await fetch(`${origin}/public/${share.token}/model.glb`);
   assert.equal(await lockedAfterSupersedingReplacement.text(), "newest-glb");
 

@@ -3,16 +3,16 @@ import { createPortal } from "react-dom";
 import {
   ArchiveRestore, ArrowDown, ArrowUp, Box, Check, ChevronRight, Copy, Download, Folder,
   FolderOpen, HardDrive, History, List, Loader2, Moon, MoreVertical, Pencil, Plus, QrCode,
-  RefreshCw, Replace, Search, Sun, Trash2, Upload, X
+  RefreshCw, Replace, Search, Share2, Sun, Trash2, Upload, X
 } from "lucide-react";
 import {
-  batchModels, createProject, createPublicShare, deleteProject, getStorageQuota,
+  batchModels, createProject, createPublicShare, deleteProject, getPublicShareSettings, getStorageQuota,
   listLibraryModels, listProjects, renameModel, renameProject, uploadModel,
   initChunkedUpload, uploadChunk, completeChunkedUpload, deleteChunkedUpload,
   getModel, makeRevisionCurrent, replaceRevision, updateRevisionPublicSelectable, uploadNewRevision
 } from "../api";
 import { downloadPublicShareQr } from "../qr";
-import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, StorageQuota, UploadTask } from "../types";
+import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, PublicShareLinkMode, StorageQuota, UploadTask } from "../types";
 import { activeStatuses, formatDate, formatFileSize, statusKind, statusLabel } from "../utils";
 import { ResizableHeaderCell } from "./ResizableHeaderCell";
 
@@ -77,7 +77,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   const [stagedFile, setStagedFile] = useState<File | null>(null);
   const [uploadProjectId, setUploadProjectId] = useState<number | null>(null);
   const [uploadHint, setUploadHint] = useState<string | null>(null);
-  const [revisionDialog, setRevisionDialog] = useState<{ kind: "new" | "replace" | "manage"; model: ModelRecord; revisionId?: number } | null>(null);
+  const [revisionDialog, setRevisionDialog] = useState<{ kind: "new" | "replace" | "manage" | "share"; model: ModelRecord; revisionId?: number } | null>(null);
   const [dragState, setDragState] = useState<{ active: boolean; projectId: number | null; label: string; blocked: boolean }>({ active: false, projectId: null, label: "Unsorted", blocked: false });
   const polling = useRef<number | undefined>(undefined);
   const dragDepth = useRef(0);
@@ -247,6 +247,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
     {revisionDialog?.kind === "new" && <UploadRevisionDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
     {revisionDialog?.kind === "replace" && <ReplaceRevisionDialog model={revisionDialog.model} initialRevisionId={revisionDialog.revisionId} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
     {revisionDialog?.kind === "manage" && <ManageRevisionsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)} onReplace={(revisionId)=>setRevisionDialog({kind:"replace",model:revisionDialog.model,revisionId})} onChanged={async()=>refresh(false)}/>}
+    {revisionDialog?.kind === "share" && <ShareSettingsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)}/>}
   </div>;
 }
 
@@ -451,7 +452,7 @@ function ModelDetailsPanel({ summary }: { summary?: any }) {
   );
 }
 
-function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRevisionAction,onRefresh}:{models:ModelRecord[];uploadTasks:UploadTask[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRevisionAction:(kind:"new"|"replace"|"manage",model:ModelRecord,revisionId?:number)=>void;onRefresh:()=>void}) {
+function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRevisionAction,onRefresh}:{models:ModelRecord[];uploadTasks:UploadTask[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRevisionAction:(kind:"new"|"replace"|"manage"|"share",model:ModelRecord,revisionId?:number)=>void;onRefresh:()=>void}) {
   models=[...uploadTasks.map(task=>({id:-1,slug:`upload-${task.clientUploadId}`,name:task.filename.replace(/\.[^.]+$/,"") ,source_filename:task.filename,source_ext:"",status:`upload:${task.stage}:${task.percent}:${task.currentChunk}:${task.totalChunks}`,has_display_glb:0,glb_size_bytes:null,original_size_bytes:task.sizeBytes,folder_id:task.projectId,project_id:task.projectId,project_name:task.projectName,quality:task.quality,deleted_at:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString()} as ModelRecord)),...models];
   const rangeAnchor = useRef<string | null>(null);
   const [widths,setWidths]=useState<Record<ColumnKey,number>>(()=>{
@@ -531,14 +532,13 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
 
 function Status({status}:{status:string}){if(status.startsWith("upload:")){const[,stage,percent,current,total]=status.split(":");return <div className={`row-progress ${stage==="failed"||stage==="cancelled"?"failed":""}`}><strong>{stage==="uploading"?`Uploading ${percent}%`:stage[0].toUpperCase()+stage.slice(1)}</strong>{Number(total)>0&&stage==="uploading"&&<small>chunk {current} of {total}</small>}<span><i style={{width:`${percent}%`}}/></span></div>}if(status.startsWith("progress|")){const[,stage,percent,label,started]=status.split("|");const minutes=started?Math.floor(Math.max(0,Date.now()-new Date(`${started}Z`).getTime())/60000):0;return <div className="row-progress"><strong>{label} - {percent}%</strong><small>{minutes?`${minutes}m elapsed`:stage==="cancelling"?"Stopping worker process":"Stage-based progress"}</small><span><i style={{width:`${percent}%`}}/></span></div>}return <span className={`compact-status ${statusKind(status)}`}><span/>{statusLabel(status)}</span>}
 
-function RowMenu({model,trash,returnTo,onAction,onRevisionAction,onRefresh}:{model:ModelRecord;trash:boolean;returnTo:string;onAction:(m:ModelRecord,a:BatchAction)=>void;onRevisionAction:(kind:"new"|"replace"|"manage",model:ModelRecord,revisionId?:number)=>void;onRefresh:()=>void}) {
+function RowMenu({model,trash,returnTo,onAction,onRevisionAction,onRefresh}:{model:ModelRecord;trash:boolean;returnTo:string;onAction:(m:ModelRecord,a:BatchAction)=>void;onRevisionAction:(kind:"new"|"replace"|"manage"|"share",model:ModelRecord,revisionId?:number)=>void;onRefresh:()=>void}) {
   const [open,setOpen]=useState(false);
   const buttonRef=useRef<HTMLButtonElement>(null); const menuRef=useRef<HTMLDivElement>(null); const [position,setPosition]=useState({top:0,left:0});
   useEffect(()=>{if(!open)return;const place=()=>{const button=buttonRef.current;if(!button)return;const rect=button.getBoundingClientRect();const width=230;const height=menuRef.current?.offsetHeight??(trash?126:460);const gap=5;setPosition({left:Math.max(8,Math.min(window.innerWidth-width-8,rect.right-width)),top:rect.bottom+gap+height<=window.innerHeight-8?rect.bottom+gap:Math.max(8,rect.top-height-gap)});};place();const close=(event:PointerEvent)=>{const target=event.target as Node;if(!buttonRef.current?.contains(target)&&!menuRef.current?.contains(target))setOpen(false)};const escape=(event:KeyboardEvent)=>{if(event.key==="Escape")setOpen(false)};window.addEventListener("resize",place);window.addEventListener("scroll",place,true);document.addEventListener("pointerdown",close);document.addEventListener("keydown",escape);return()=>{window.removeEventListener("resize",place);window.removeEventListener("scroll",place,true);document.removeEventListener("pointerdown",close);document.removeEventListener("keydown",escape)}},[open,trash]);
   const menu=open?createPortal(<div ref={menuRef} className="menu-popover" style={position} onClick={event=>{if((event.target as Element).closest("a"))setOpen(false)}}>
     {!trash&&<><a href={viewerPath(model.slug,returnTo)}><Box/>Open viewer</a>
-      <button onClick={async()=>{const share=await createPublicShare(model.id);await copyText(share.url);setOpen(false)}}><Copy/>Copy/share link</button>
-      <button onClick={async()=>{const share=await createPublicShare(model.id);await downloadPublicShareQr(share.url,model.slug);setOpen(false)}}><QrCode/>Download QR</button>
+      <button onClick={()=>{onRevisionAction("share",model);setOpen(false)}}><Share2/>Share link and QR</button>
       <a href={`/downloads/${encodeURIComponent(model.slug)}/original`}><Download/>Download original</a>
       <a href={`/downloads/${encodeURIComponent(model.slug)}/display.glb`}><Download/>Download GLB</a>
       <button onClick={()=>{onRevisionAction("new",model);setOpen(false)}}><Upload/>Upload new revision</button>
@@ -837,6 +837,94 @@ function UploadRevisionDialog({model,onClose,onDone}:{model:ModelRecord;onClose:
   </form></Dialog>;
 }
 
+function ShareSettingsDialog({model,onClose}:{model:ModelRecord;onClose:()=>void}) {
+  const [detail,setDetail]=useState<ModelRecord|null>(null);
+  const [linkMode,setLinkMode]=useState<PublicShareLinkMode>("locked_revision");
+  const [revisionId,setRevisionId]=useState("");
+  const [allowRevisionSwitching,setAllowRevisionSwitching]=useState(false);
+  const [shareUrl,setShareUrl]=useState<string|null>(null);
+  const [busy,setBusy]=useState(false);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState<string|null>(null);
+  const [notice,setNotice]=useState<string|null>(null);
+
+  useEffect(()=>{
+    let cancelled=false;
+    void Promise.all([getModel(model.slug),getPublicShareSettings(model.id)])
+      .then(([nextDetail,settings])=>{
+        if(cancelled)return;
+        const revisions=nextDetail.revisions??[];
+        const currentId=nextDetail.currentRevision?.id??revisions.find(revision=>revision.is_current)?.id??revisions[0]?.id;
+        setDetail(nextDetail);
+        setLinkMode(settings.linkMode??"locked_revision");
+        setRevisionId(String(settings.revisionId??currentId??""));
+        setAllowRevisionSwitching(settings.allowRevisionSwitching??false);
+        setShareUrl(settings.url??null);
+      })
+      .catch(reason=>{if(!cancelled)setError(reason instanceof Error?reason.message:"Could not load share settings.")})
+      .finally(()=>{if(!cancelled)setLoading(false)});
+    return()=>{cancelled=true};
+  },[model.id,model.slug]);
+
+  const revisions=detail?.revisions??[];
+  const readyRevisions=revisions.filter(revision=>revision.status==="ready");
+  const selectableAlternatives=readyRevisions.filter(revision=>revision.is_publicly_selectable).length;
+  const selectedRevision=readyRevisions.find(revision=>String(revision.id)===revisionId);
+  const save=async(event:React.FormEvent)=>{
+    event.preventDefault();
+    if(linkMode==="locked_revision"&&!selectedRevision){setError("Choose a ready revision to lock this share to.");return}
+    setBusy(true);setError(null);setNotice(null);
+    try{
+      const share=await createPublicShare(model.id,{
+        linkMode,
+        revisionId:linkMode==="locked_revision"?Number(revisionId):null,
+        allowRevisionSwitching
+      });
+      setShareUrl(share.url);
+      setNotice("Share settings saved. The existing token was preserved when a share already existed.");
+    }catch(reason){setError(reason instanceof Error?reason.message:"Could not save share settings.")}
+    finally{setBusy(false)}
+  };
+  const copyShare=async()=>{if(!shareUrl)return;await copyText(shareUrl);setNotice("Share link copied.")};
+  const downloadQr=async()=>{if(!shareUrl)return;await downloadPublicShareQr(shareUrl,model.slug);setNotice("QR code downloaded.")};
+
+  return <Dialog title={`Share link and QR — ${model.name}`} onClose={busy?()=>{}:onClose}>
+    <form className="dialog-form share-settings-form" onSubmit={save}>
+      {loading&&<div className="revision-loading"><Loader2 className="animate-spin"/>Loading share settings…</div>}
+      {!loading&&<>
+        <fieldset disabled={busy}>
+          <legend>Share link mode</legend>
+          <label className={`share-mode-option ${linkMode==="locked_revision"?"selected":""}`}>
+            <input type="radio" name="shareMode" checked={linkMode==="locked_revision"} onChange={()=>setLinkMode("locked_revision")}/>
+            <span><strong>Locked to this revision</strong><small>Best for issued drawings and QR codes. Future revisions will not change this link.</small></span>
+          </label>
+          <label className={`share-mode-option ${linkMode==="latest_current"?"selected":""}`}>
+            <input type="radio" name="shareMode" checked={linkMode==="latest_current"} onChange={()=>setLinkMode("latest_current")}/>
+            <span><strong>Latest/current revision</strong><small>Best for internal live coordination. This link follows the model’s current revision.</small></span>
+          </label>
+        </fieldset>
+        {linkMode==="locked_revision"&&<label>Selected locked revision
+          <select className="field" value={revisionId} disabled={busy||readyRevisions.length<2} onChange={event=>setRevisionId(event.target.value)}>
+            <option value="">Choose a ready revision</option>
+            {readyRevisions.map(revision=><option key={revision.id} value={revision.id}>Rev {revision.revision_label}{revision.is_current?" — Current":""}</option>)}
+          </select>
+          <small>{readyRevisions.length===1?"This model has one ready revision, so the share will stay locked to it.":"Only ready revisions can be used for public shares."}</small>
+        </label>}
+        <label className="checkbox-field"><input type="checkbox" checked={allowRevisionSwitching} disabled={busy} onChange={event=>setAllowRevisionSwitching(event.target.checked)}/><span><strong>Allow public revision switching</strong><small>Public viewers can switch only to revisions marked available in the public revision dropdown.</small>{allowRevisionSwitching&&selectableAlternatives<2?<small>There are not currently multiple ready public-selectable revisions.</small>:null}</span></label>
+        <div className="share-download-note"><strong>Download permissions are unchanged.</strong><span>Original/source and GLB download access continues to follow the existing share behaviour.</span></div>
+        {shareUrl&&<div className="share-link-preview"><span>Current public link</span><code>{shareUrl}</code></div>}
+        {error&&<div className="alert error">{error}</div>}
+        {notice&&<div className="alert"><Check size={16}/>{notice}</div>}
+        <div className="dialog-actions share-dialog-actions">
+          {shareUrl&&<><button type="button" className="secondary-button" disabled={busy} onClick={()=>void copyShare()}><Copy/>Copy link</button><button type="button" className="secondary-button" disabled={busy} onClick={()=>void downloadQr()}><QrCode/>Download QR</button></>}
+          <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Close</button>
+          <button className="primary-button" disabled={busy||readyRevisions.length===0}>{busy?<Loader2 className="animate-spin"/>:<Share2/>}Save settings</button>
+        </div>
+      </>}
+    </form>
+  </Dialog>;
+}
+
 function ReplaceRevisionDialog({model,initialRevisionId,onClose,onDone}:{model:ModelRecord;initialRevisionId?:number;onClose:()=>void;onDone:(message:string)=>void}) {
   const [revisions,setRevisions]=useState<ModelRevisionRecord[]>([]);
   const [revisionId,setRevisionId]=useState(initialRevisionId?String(initialRevisionId):"");
@@ -846,6 +934,7 @@ function ReplaceRevisionDialog({model,initialRevisionId,onClose,onDone}:{model:M
   const [busy,setBusy]=useState(false);
   const [progress,setProgress]=useState(0);
   const [error,setError]=useState<string|null>(null);
+  const replacementTooLarge=Boolean(file&&file.size>83886080);
   useEffect(()=>{void getModel(model.slug).then(detail=>{const next=detail.revisions??[];setRevisions(next);setRevisionId(current=>current||String(detail.currentRevision?.id??next[0]?.id??""))}).catch(reason=>setError(reason instanceof Error?reason.message:"Could not load revisions."))},[model.slug]);
   const submit=async(event:React.FormEvent)=>{
     event.preventDefault();if(!file||!revisionId)return;
@@ -862,9 +951,10 @@ function ReplaceRevisionDialog({model,initialRevisionId,onClose,onDone}:{model:M
     <label>Replacement reason<textarea className="field textarea-field" value={reason} disabled={busy} maxLength={2000} onChange={e=>setReason(e.target.value)} placeholder="What was corrected?"/></label>
     <fieldset disabled={busy}><legend>Quality</legend><QualityOptions value={quality} onChange={setQuality}/></fieldset>
     <FilePicker file={file} busy={busy} onChange={setFile}/>
+    {replacementTooLarge&&<div className="alert error">This replacement is over 80 MB. Chunked replacement upload is deferred, so this screen cannot upload it safely yet. Use a smaller export or wait for chunked replacement support.</div>}
     {busy&&<UploadProgress percent={progress} text={progress<100?"Uploading replacement…":"Upload complete. Creating conversion job…"}/>}
     {error&&<div className="alert error">{error}</div>}
-    <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary-button" disabled={!file||!revisionId||busy}>{busy?<Loader2 className="animate-spin"/>:<Replace/>}Replace revision</button></div>
+    <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary-button" disabled={!file||!revisionId||busy||replacementTooLarge}>{busy?<Loader2 className="animate-spin"/>:<Replace/>}Replace revision</button></div>
   </form></Dialog>;
 }
 
@@ -880,7 +970,7 @@ function ManageRevisionsDialog({model,onClose,onReplace,onChanged}:{model:ModelR
     {error&&<div className="alert error">{error}</div>}
     {!detail&&!error&&<div className="revision-loading"><Loader2 className="animate-spin"/>Loading revisions…</div>}
     {detail&&<div className="revision-table-scroll"><table className="revision-table"><thead><tr><th>Revision</th><th>Issued date</th><th>Status</th><th>Current</th><th>Public selectable</th><th>Source size</th><th>GLB size</th><th>Uploaded date</th><th>Actions</th></tr></thead><tbody>
-      {revisions.map(revision=><tr key={revision.id}><td><strong>Rev {revision.revision_label}</strong></td><td>{formatDateOnly(revision.issued_date)}</td><td><Status status={revision.status}/></td><td>{revision.is_current?<span className="current-pill"><Check/>Current</span>:"—"}</td><td><label className="switch-field"><input type="checkbox" checked={Boolean(revision.is_publicly_selectable)} disabled={busyId===revision.id} onChange={e=>void mutate(revision.id,()=>updateRevisionPublicSelectable(model.slug,revision.id,e.target.checked))}/><span>{revision.is_publicly_selectable?"Available":"Hidden"}</span></label></td><td>{formatFileSize(revision.source_size_bytes)}</td><td>{formatFileSize(revision.glb_size_bytes)}</td><td>{formatDate(revision.uploaded_at)}</td><td><div className="revision-actions">{!revision.is_current&&<button disabled={busyId===revision.id} onClick={()=>void mutate(revision.id,()=>makeRevisionCurrent(model.slug,revision.id))}>Make current</button>}<button disabled={busyId===revision.id} onClick={()=>onReplace(revision.id)}>Replace</button></div></td></tr>)}
+      {revisions.map(revision=>{const active=busyId===revision.id;const ready=revision.status==="ready";return <tr key={revision.id}><td><strong>Rev {revision.revision_label}</strong></td><td>{formatDateOnly(revision.issued_date)}</td><td><Status status={revision.status}/></td><td>{revision.is_current?<span className="current-pill"><Check/>Current</span>:"—"}</td><td><label className="switch-field"><input type="checkbox" checked={Boolean(revision.is_publicly_selectable)} disabled={active} onChange={e=>void mutate(revision.id,()=>updateRevisionPublicSelectable(model.slug,revision.id,e.target.checked))}/><span>{active?"Updating…":revision.is_publicly_selectable?"Available":"Hidden"}</span></label></td><td>{formatFileSize(revision.source_size_bytes)}</td><td>{formatFileSize(revision.glb_size_bytes)}</td><td>{formatDate(revision.uploaded_at)}</td><td><div className="revision-actions">{!revision.is_current&&<button title={ready?"Set as the model's current revision":"Only ready revisions can be made current"} disabled={active||!ready} onClick={()=>void mutate(revision.id,()=>makeRevisionCurrent(model.slug,revision.id))}>{active?"Updating…":"Make current"}</button>}<button disabled={active} onClick={()=>onReplace(revision.id)}>Replace</button></div></td></tr>})}
     </tbody></table></div>}
     <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Close</button></div>
   </div></Dialog>;

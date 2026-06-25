@@ -134,6 +134,8 @@ export type PublicShareRecord = {
   allow_revision_switching?: number;
 };
 
+export type PublicShareLinkMode = "locked_revision" | "latest_current";
+
 export type PublicShareModelRecord = ModelRecord & {
   share_id: string;
   token_prefix: string;
@@ -477,12 +479,30 @@ export function createPublicShare(input: {
   tokenHash: string;
   tokenPrefix: string;
   publicToken: string;
+  revisionId?: number | null;
+  linkMode?: PublicShareLinkMode;
+  allowRevisionSwitching?: boolean;
 }): PublicShareRecord {
   const currentRevision = getCurrentRevisionForModel(input.modelId);
+  const linkMode = input.linkMode ?? "locked_revision";
+  const revisionId = linkMode === "locked_revision"
+    ? input.revisionId ?? currentRevision?.id ?? null
+    : null;
   db.prepare(
-    `INSERT INTO public_shares (id, model_id, token_hash, token_prefix, public_token, revision_id, link_mode)
-     VALUES (?, ?, ?, ?, ?, ?, 'locked_revision')`
-  ).run(input.id, input.modelId, input.tokenHash, input.tokenPrefix, input.publicToken, currentRevision?.id ?? null);
+    `INSERT INTO public_shares (
+       id, model_id, token_hash, token_prefix, public_token, revision_id, link_mode,
+       allow_revision_switching
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    input.id,
+    input.modelId,
+    input.tokenHash,
+    input.tokenPrefix,
+    input.publicToken,
+    revisionId,
+    linkMode,
+    input.allowRevisionSwitching ? 1 : 0
+  );
   return db.prepare("SELECT * FROM public_shares WHERE id = ?").get(input.id) as PublicShareRecord;
 }
 
@@ -503,15 +523,21 @@ export function revokePublicSharesForModel(modelId: number): number {
   return Number(result.changes || 0);
 }
 
-export function updatePublicShareRevisionSwitching(
+export function updatePublicShareSettings(
   shareId: string,
-  allowRevisionSwitching: boolean
+  input: {
+    linkMode: PublicShareLinkMode;
+    revisionId: number | null;
+    allowRevisionSwitching: boolean;
+  }
 ): PublicShareRecord | undefined {
   db.prepare(
     `UPDATE public_shares
-     SET allow_revision_switching = ?
+     SET link_mode = ?,
+         revision_id = ?,
+         allow_revision_switching = ?
      WHERE id = ? AND revoked_at IS NULL`
-  ).run(allowRevisionSwitching ? 1 : 0, shareId);
+  ).run(input.linkMode, input.revisionId, input.allowRevisionSwitching ? 1 : 0, shareId);
   return db.prepare("SELECT * FROM public_shares WHERE id = ? AND revoked_at IS NULL").get(shareId) as PublicShareRecord | undefined;
 }
 
@@ -1059,7 +1085,9 @@ export function getRevisionForModel(modelId: number, revisionId: number): ModelR
 }
 
 export function getRevisionByLabel(modelId: number, revisionLabel: string): ModelRevisionRecord | undefined {
-  return db.prepare("SELECT * FROM model_revisions WHERE model_id = ? AND revision_label = ?").get(modelId, revisionLabel) as ModelRevisionRecord | undefined;
+  return db.prepare(
+    "SELECT * FROM model_revisions WHERE model_id = ? AND revision_label = ? COLLATE NOCASE"
+  ).get(modelId, revisionLabel.trim().replace(/\s+/g, " ")) as ModelRevisionRecord | undefined;
 }
 
 export function listRevisionFileVersions(revisionId: number): RevisionFileVersionRecord[] {
@@ -1082,7 +1110,9 @@ export function getNextRevisionFileVersionNumber(revisionId: number): number {
 }
 
 export function getCurrentRevisionForModel(modelId: number): ModelRevisionRecord | undefined {
-  return db.prepare("SELECT * FROM model_revisions WHERE model_id = ? AND is_current = 1 LIMIT 1").get(modelId) as ModelRevisionRecord | undefined;
+  return db.prepare(
+    "SELECT * FROM model_revisions WHERE model_id = ? AND is_current = 1 AND deleted_at IS NULL LIMIT 1"
+  ).get(modelId) as ModelRevisionRecord | undefined;
 }
 
 export function listRevisionsForModel(modelId: number): ModelRevisionRecord[] {
@@ -1118,7 +1148,7 @@ export function createRevisionForModel(input: {
   isPubliclySelectable?: number;
 }): ModelRevisionRecord {
   const modelId = input.modelId;
-  const label = input.revisionLabel || getNextNumericRevisionLabel(modelId);
+  const label = input.revisionLabel?.trim().replace(/\s+/g, " ") || getNextNumericRevisionLabel(modelId);
 
   let issuedDate = input.issuedDate;
   if (!issuedDate) {
@@ -1369,7 +1399,8 @@ export function resolvePublicShareRevision(tokenHash: string): ModelRevisionReco
   const linkMode = share.link_mode || "locked_revision";
   if (linkMode === "locked_revision") {
     if (share.revision_id) {
-      return getRevisionById(share.revision_id);
+      const revision = getRevisionById(share.revision_id);
+      return revision && revision.model_id === share.model_id && !revision.deleted_at ? revision : undefined;
     }
     return getCurrentRevisionForModel(share.model_id);
   } else if (linkMode === "latest_current") {

@@ -10,7 +10,9 @@ import type {
   ModelRevisionRecord,
   ProjectRecord,
   PublicModel,
+  PublicShareLinkMode,
   PublicShareResponse,
+  PublicShareSettings,
   RevisionFileVersionRecord,
   RevisionMetadata,
   StorageQuota
@@ -144,8 +146,22 @@ export function getPublicModel(token: string, revisionId?: number): Promise<Publ
   return request<PublicModel>(`/public/${encodeURIComponent(token)}/model.json${query}`);
 }
 
-export function createPublicShare(modelId: number): Promise<PublicShareResponse> {
-  return request<PublicShareResponse>(`/api/models/${modelId}/share`, { method: "POST" });
+export function getPublicShareSettings(modelId: number): Promise<PublicShareSettings> {
+  return request<PublicShareSettings>(`/api/models/${modelId}/share`, { cache: "no-store" });
+}
+
+export function createPublicShare(
+  modelId: number,
+  settings?: {
+    linkMode: PublicShareLinkMode;
+    revisionId: number | null;
+    allowRevisionSwitching: boolean;
+  }
+): Promise<PublicShareResponse> {
+  return request<PublicShareResponse>(`/api/models/${modelId}/share`, {
+    method: "POST",
+    body: settings ? JSON.stringify(settings) : undefined
+  });
 }
 
 export async function revokePublicShare(modelId: number): Promise<number> {

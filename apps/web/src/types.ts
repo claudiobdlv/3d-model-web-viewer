@@ -161,6 +161,21 @@ export type PublicShareResponse = {
   url: string;
   model: Pick<ModelRecord, "id" | "slug" | "name">;
   reused: boolean;
+  active: true;
+  linkMode: PublicShareLinkMode;
+  revisionId: number | null;
+  allowRevisionSwitching: boolean;
+};
+
+export type PublicShareLinkMode = "locked_revision" | "latest_current";
+
+export type PublicShareSettings = {
+  active: boolean;
+  token?: string;
+  url?: string;
+  linkMode?: PublicShareLinkMode;
+  revisionId?: number | null;
+  allowRevisionSwitching?: boolean;
 };
 
 export type PublicModel = {

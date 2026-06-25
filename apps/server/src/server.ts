@@ -16,8 +16,9 @@ import {
   recordPublicShareAccess,
   revokePublicSharesForModel,
   resolvePublicShareRevision,
-  updatePublicShareRevisionSwitching,
+  updatePublicShareSettings,
   type ModelRevisionRecord,
+  type PublicShareLinkMode,
   type PublicShareRecord
 } from "./db.js";
 import {
@@ -110,6 +111,17 @@ app.get("/", (_req, res) => {
   res.redirect(302, "/admin");
 });
 
+app.get("/api/models/:id/share", requireAdmin, (req, res) => {
+  const modelId = Number(req.params.id);
+  const model = Number.isInteger(modelId) ? getModelById(modelId) : undefined;
+  if (!model) {
+    res.status(404).json({ error: "Model not found." });
+    return;
+  }
+  const share = getActivePublicShareForModel(model.id);
+  res.json(share ? publicShareSettingsResponse(share) : { active: false });
+});
+
 app.post("/api/models/:id/share", requireAdmin, (req, res) => {
   const modelId = Number(req.params.id);
   const model = Number.isInteger(modelId) ? getModelById(modelId) : undefined;
@@ -118,27 +130,49 @@ app.post("/api/models/:id/share", requireAdmin, (req, res) => {
     return;
   }
 
-  const currentRevision = getCurrentRevisionForModel(model.id);
-  const glbPath = resolveDisplayGlbPath(model, currentRevision);
-  if (!["ready", "viewer-ready"].includes(model.status) || !model.has_display_glb || !fs.existsSync(glbPath)) {
-    res.status(409).json({ error: "Only viewer-ready models can be shared." });
+  const activeShare = getActivePublicShareForModel(model.id);
+  let settings: ReturnType<typeof parsePublicShareSettings>;
+  try {
+    settings = parsePublicShareSettings(model.id, req.body, activeShare);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Invalid share settings." });
+    return;
+  }
+  const linkedRevision = settings.linkMode === "locked_revision"
+    ? getRevisionForModel(model.id, settings.revisionId!)
+    : getCurrentRevisionForModel(model.id);
+  if (!linkedRevision || linkedRevision.deleted_at || linkedRevision.status !== "ready") {
+    res.status(409).json({
+      error: settings.linkMode === "latest_current"
+        ? "A ready current revision is required for a latest/current share."
+        : "The selected locked revision must be ready."
+    });
+    return;
+  }
+  const glbPath = resolveDisplayGlbPath(model, linkedRevision);
+  if (!fs.existsSync(glbPath)) {
+    res.status(409).json({ error: "The selected revision does not have an available display GLB." });
     return;
   }
 
-  const activeShare = getActivePublicShareForModel(model.id);
   const token = activeShare?.public_token || generatePublicToken();
+  let share: PublicShareRecord;
   if (!activeShare) {
-    createPublicShare({
+    share = createPublicShare({
       id: crypto.randomUUID(),
       modelId: model.id,
       tokenHash: hashPublicToken(token),
       tokenPrefix: token.slice(0, 8),
-      publicToken: token
+      publicToken: token,
+      linkMode: settings.linkMode,
+      revisionId: settings.revisionId,
+      allowRevisionSwitching: settings.allowRevisionSwitching
     });
+  } else {
+    share = updatePublicShareSettings(activeShare.id, settings) ?? activeShare;
   }
   res.status(activeShare ? 200 : 201).json({
-    token,
-    url: publicShareUrl(token),
+    ...publicShareSettingsResponse(share),
     model: { id: model.id, slug: model.slug, name: model.name },
     reused: Boolean(activeShare)
   });
@@ -161,19 +195,29 @@ app.patch("/api/models/:id/share", requireAdmin, (req, res) => {
     res.status(404).json({ error: "Model not found." });
     return;
   }
-  if (typeof req.body?.allowRevisionSwitching !== "boolean") {
-    res.status(400).json({ error: "allowRevisionSwitching must be true or false." });
-    return;
-  }
   const share = getActivePublicShareForModel(model.id);
   if (!share) {
     res.status(404).json({ error: "Active public share not found." });
     return;
   }
-  const updated = updatePublicShareRevisionSwitching(share.id, req.body.allowRevisionSwitching);
-  res.json({
-    allowRevisionSwitching: Boolean(updated?.allow_revision_switching)
-  });
+  try {
+    const settings = parsePublicShareSettings(model.id, req.body, share);
+    const linkedRevision = settings.linkMode === "locked_revision"
+      ? getRevisionForModel(model.id, settings.revisionId!)
+      : getCurrentRevisionForModel(model.id);
+    if (!linkedRevision || linkedRevision.deleted_at || linkedRevision.status !== "ready") {
+      res.status(409).json({ error: "The share must resolve to a ready revision." });
+      return;
+    }
+    if (!fs.existsSync(resolveDisplayGlbPath(model, linkedRevision))) {
+      res.status(409).json({ error: "The selected revision does not have an available display GLB." });
+      return;
+    }
+    const updated = updatePublicShareSettings(share.id, settings);
+    res.json(publicShareSettingsResponse(updated ?? share));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Invalid share settings." });
+  }
 });
 
 app.use("/api/models", requireAdmin, modelsRouter);
@@ -509,6 +553,53 @@ function publicRevisionSummary(revision: ModelRevisionRecord) {
 function publicAssetUrl(token: string, asset: string, revisionId?: number): string {
   const base = `/public/${encodeURIComponent(token)}/${asset}`;
   return revisionId ? `${base}?revisionId=${revisionId}` : base;
+}
+
+function parsePublicShareSettings(
+  modelId: number,
+  body: Record<string, unknown> | undefined,
+  existing?: PublicShareRecord
+): {
+  linkMode: PublicShareLinkMode;
+  revisionId: number | null;
+  allowRevisionSwitching: boolean;
+} {
+  const requestedMode = body?.linkMode;
+  const existingMode = existing?.link_mode === "latest_current" ? "latest_current" : "locked_revision";
+  const linkMode = requestedMode === undefined
+    ? existingMode
+    : requestedMode === "locked_revision" || requestedMode === "latest_current"
+      ? requestedMode
+      : (() => { throw new Error("linkMode must be locked_revision or latest_current."); })();
+
+  const allowRevisionSwitching = body?.allowRevisionSwitching === undefined
+    ? Boolean(existing?.allow_revision_switching)
+    : typeof body.allowRevisionSwitching === "boolean"
+      ? body.allowRevisionSwitching
+      : (() => { throw new Error("allowRevisionSwitching must be true or false."); })();
+
+  if (linkMode === "latest_current") {
+    return { linkMode, revisionId: null, allowRevisionSwitching };
+  }
+
+  const requestedRevisionId = body?.revisionId === undefined
+    ? existing?.revision_id ?? getCurrentRevisionForModel(modelId)?.id
+    : parseRevisionId(body.revisionId);
+  if (!requestedRevisionId) throw new Error("A locked revision is required.");
+  const revision = getRevisionForModel(modelId, requestedRevisionId);
+  if (!revision || revision.deleted_at) throw new Error("Locked revision not found for this model.");
+  return { linkMode, revisionId: revision.id, allowRevisionSwitching };
+}
+
+function publicShareSettingsResponse(share: PublicShareRecord) {
+  return {
+    active: true,
+    token: share.public_token ?? undefined,
+    url: share.public_token ? publicShareUrl(share.public_token) : undefined,
+    linkMode: share.link_mode === "latest_current" ? "latest_current" : "locked_revision",
+    revisionId: share.revision_id ?? null,
+    allowRevisionSwitching: Boolean(share.allow_revision_switching)
+  };
 }
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

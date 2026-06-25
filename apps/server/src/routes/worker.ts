@@ -187,6 +187,10 @@ workerRouter.post(
     }
 
     const revision = job.revision_id ? getRevisionById(job.revision_id) : null;
+    if (revision && revision.conversion_job_id !== job.id) {
+      res.status(409).json({ error: "Worker job was superseded by a newer revision file version." });
+      return;
+    }
     const modelDir = revision
       ? path.dirname(resolveDisplayGlbPath({ slug: job.model_slug }, revision))
       : getModelDir(job.model_slug);

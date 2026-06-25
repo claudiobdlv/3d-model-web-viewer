@@ -410,3 +410,46 @@ Phase 5 makes the existing viewer revision-aware while preserving the locked beh
 - Side-by-side revision comparison.
 - Chunked replacement uploads.
 - A dedicated share-settings UI for `allow_revision_switching`.
+
+## Phase 6: Share settings UI, hardening, and pre-merge QA
+
+Phase 6 adds an admin-facing “Share link and QR” dialog to the existing model action menu. It is intended for non-developer use and keeps link configuration, copying, and QR download in one workflow.
+
+### Share defaults and link semantics
+
+- New shares default to `locked_revision`, using the selected revision or the model’s current revision.
+- Public revision switching defaults to off.
+- Existing shares keep their token and stored settings when edited.
+- “Locked to this revision” is the issued-drawing/QR mode. A later current revision does not change what the link displays.
+- “Latest/current revision” is the live-coordination mode. It resolves the model’s current ready revision on every request.
+- A latest/current share cannot be created or updated when the model has no ready current revision.
+- A locked share cannot target a missing, deleted, foreign, processing, or failed revision.
+- Existing source/GLB download behaviour and permissions are unchanged.
+
+### Public revision switching
+
+- `allow_revision_switching` remains false for legacy and newly created shares unless an administrator explicitly enables it.
+- When enabled, the public dropdown contains only ready, non-deleted revisions for the same model with `is_publicly_selectable = 1`.
+- The locked revision remains the fallback when a malformed, hidden, missing, deleted, or foreign revision ID is requested.
+- Public UI does not expose revision IDs or admin-only controls.
+
+### Hardening completed
+
+- Revision labels are normalized for repeated whitespace and checked case-insensitively for duplicates.
+- Deleted locked revisions and latest/current shares with no current revision fail closed.
+- Foreign or invalid locked revision settings are rejected.
+- Superseded replacement jobs are rejected before artifact writes.
+- Replacement uploads over 80 MB are clearly blocked while chunked replacement remains deferred.
+- Missing `currentRevision`, empty revision lists, one-revision share dialogs, and non-ready revision states are handled without unsafe assumptions.
+
+### QA
+
+The dedicated local manual workflow is at [`docs/revvault-phase6-qa-checklist.md`](./revvault-phase6-qa-checklist.md). The web package has no existing frontend test framework, so Phase 6 keeps frontend verification to TypeScript/build checks and focused manual interaction QA rather than adding a new heavy dependency.
+
+### Remaining known limitations
+
+- Geometric diff/change highlighting is deferred.
+- Side-by-side revision comparison is deferred.
+- Chunked replacement uploads are deferred; replacement files over 80 MB are blocked in the current dialog.
+- Production copied-data rollout testing is deferred to Phase 7.
+- Production rollout and the final merge to `main` are not part of Phase 6.

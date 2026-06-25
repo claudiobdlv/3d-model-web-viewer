@@ -65,6 +65,20 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   assert.equal(stored.token_prefix, share.token.slice(0, 8));
   assert.equal(stored.public_token, share.token);
 
+  const initialSettings = await fetch(`${origin}/api/models/${model.id}/share`, { headers: { authorization } });
+  assert.equal(initialSettings.status, 200);
+  assert.deepEqual(
+    ((await initialSettings.json()) as any),
+    {
+      active: true,
+      token: share.token,
+      url: share.url,
+      linkMode: "locked_revision",
+      revisionId: model.current_revision_id,
+      allowRevisionSwitching: false
+    }
+  );
+
   const repeatedCreate = await fetch(`${origin}/api/models/${model.id}/share`, {
     method: "POST",
     headers: { authorization, accept: "application/json" }
@@ -110,6 +124,50 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   const selectable = await uploadRevision("public-revision.glb", "public-revision", true);
   const hidden = await uploadRevision("hidden-revision.glb", "hidden-revision", false);
 
+  const otherForm = new FormData();
+  otherForm.set("modelFile", new Blob(["other-glb"]), "other-public.glb");
+  const otherUpload = await fetch(`${origin}/api/models`, {
+    method: "POST",
+    headers: { authorization, accept: "application/json" },
+    body: otherForm
+  });
+  const otherModel = await otherUpload.json() as { current_revision_id: number };
+
+  const invalidForeignSettings = await fetch(`${origin}/api/models/${model.id}/share`, {
+    method: "PATCH",
+    headers: { authorization, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ linkMode: "locked_revision", revisionId: otherModel.current_revision_id })
+  });
+  assert.equal(invalidForeignSettings.status, 400);
+
+  const latestSettings = await fetch(`${origin}/api/models/${model.id}/share`, {
+    method: "PATCH",
+    headers: { authorization, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ linkMode: "latest_current", allowRevisionSwitching: false })
+  });
+  assert.equal(latestSettings.status, 200);
+  assert.equal((await latestSettings.json() as any).revisionId, null);
+  assert.equal((await fetch(`${origin}/public/${share.token}/model.glb`).then((response) => response.text())), "test-glb");
+
+  const makeSelectableCurrent = await fetch(`${origin}/api/models/${model.slug}/revisions/${selectable.revision.id}/current`, {
+    method: "PATCH",
+    headers: { authorization, accept: "application/json" }
+  });
+  assert.equal(makeSelectableCurrent.status, 200);
+  assert.equal((await fetch(`${origin}/public/${share.token}/model.glb`).then((response) => response.text())), "public-revision");
+
+  const restoreLockedSettings = await fetch(`${origin}/api/models/${model.id}/share`, {
+    method: "PATCH",
+    headers: { authorization, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({
+      linkMode: "locked_revision",
+      revisionId: model.current_revision_id,
+      allowRevisionSwitching: false
+    })
+  });
+  assert.equal(restoreLockedSettings.status, 200);
+  assert.equal((await restoreLockedSettings.json() as any).revisionId, model.current_revision_id);
+
   const lockedGuess = await fetch(`${origin}/public/${share.token}/model.glb?revisionId=${selectable.revision.id}`);
   assert.equal(await lockedGuess.text(), "test-glb");
 
@@ -138,6 +196,45 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   const hiddenBody = await hiddenMetadata.json() as any;
   assert.equal(hiddenBody.activeRevision.id, model.current_revision_id);
   assert.equal(hiddenBody.invalidRevisionRequested, true);
+
+  const foreignGuess = await fetch(`${origin}/public/${share.token}/model.glb?revisionId=${otherModel.current_revision_id}`);
+  assert.equal(await foreignGuess.text(), "test-glb");
+  const malformedGuess = await fetch(`${origin}/public/${share.token}/model.json?revisionId=not-a-number`);
+  assert.equal((await malformedGuess.json() as any).invalidRevisionRequested, true);
+
+  db.prepare(
+    "UPDATE model_revisions SET status = 'processing', is_publicly_selectable = 1 WHERE id = ?"
+  ).run(hidden.revision.id);
+  const processingFiltered = await fetch(`${origin}/public/${share.token}/model.json`);
+  assert.equal(
+    (await processingFiltered.json() as any).revisions.some((revision: any) => revision.id === hidden.revision.id),
+    false
+  );
+
+  const lockDeleted = await fetch(`${origin}/api/models/${model.id}/share`, {
+    method: "PATCH",
+    headers: { authorization, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({
+      linkMode: "locked_revision",
+      revisionId: selectable.revision.id,
+      allowRevisionSwitching: false
+    })
+  });
+  assert.equal(lockDeleted.status, 200);
+  db.prepare("UPDATE model_revisions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(selectable.revision.id);
+  assert.equal((await fetch(`${origin}/public/${share.token}/model.glb`)).status, 404);
+  db.prepare("UPDATE model_revisions SET deleted_at = NULL WHERE id = ?").run(selectable.revision.id);
+
+  db.prepare("UPDATE model_revisions SET is_current = 0 WHERE model_id = ?").run(model.id);
+  db.prepare("UPDATE models SET current_revision_id = NULL WHERE id = ?").run(model.id);
+  const latestWithoutCurrent = await fetch(`${origin}/api/models/${model.id}/share`, {
+    method: "PATCH",
+    headers: { authorization, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ linkMode: "latest_current" })
+  });
+  assert.equal(latestWithoutCurrent.status, 409);
+  db.prepare("UPDATE model_revisions SET is_current = 1 WHERE id = ?").run(selectable.revision.id);
+  db.prepare("UPDATE models SET current_revision_id = ? WHERE id = ?").run(selectable.revision.id, model.id);
 
   const revoke = await fetch(`${origin}/api/models/${model.id}/share`, {
     method: "DELETE",

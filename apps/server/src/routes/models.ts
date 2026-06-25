@@ -787,7 +787,7 @@ export function parseRevisionMetadata(body: Record<string, unknown> | undefined,
   if (rawLabel !== undefined && typeof rawLabel !== "string") {
     throw new Error("revisionLabel must be a string.");
   }
-  const revisionLabel = typeof rawLabel === "string" ? rawLabel.trim() : "";
+  const revisionLabel = typeof rawLabel === "string" ? rawLabel.trim().replace(/\s+/g, " ") : "";
   if (revisionLabel.length > 100) throw new Error("revisionLabel must be 100 characters or fewer.");
 
   const rawIssuedDate = body?.issuedDate;
