@@ -1184,6 +1184,19 @@ Post-deploy verification:
 - No optional tiny upload was performed, to avoid unnecessary production storage mutation during a default-off deployment.
 - Rollback was not needed.
 
+Post-deploy monitoring check:
+
+- Date/time: 2026-06-26 20:37 Australia/Sydney.
+- Production commit remained `064239eeb771b0ab9c0cbdc9b1451aa9164d197e`.
+- GitHub `origin/main` was `c2a4b32900dd89bfa0b7a3fce741625ed23ba437`, a docs-only commit ahead of the deployed production commit, so no redeploy was required.
+- `MESHIQ_ADAPTIVE_MESH` and `MESHIQ_ADAPTIVE_MESH_PROFILE` remained absent from production `.env`; worker logs reported adaptive mesh off with the standard profile.
+- Server and worker containers were running; `/health` and `/api/health` returned 200.
+- No active, queued, or newly completed real production conversion was available after the default-off deploy, so the next real conversion still needs to be observed before closing the monitoring loop.
+- Latest ready baseline model route checks returned 200 for admin model API, admin viewer, GLB route, original/source download, GLB download, manifest, and token-scoped public metadata/GLB. The public root route was intentionally not fetched because it increments share access stats.
+- `mesh-report.json` routes returned safe 404 responses for the checked older model where that artifact is absent.
+- Counts remained sane at 43 active models, 45 active revisions, 59 jobs, 9 active public shares, 43 model directories, 45 upload directories, and 70 worker-output directories.
+- No production `.env` value, database row, uploaded STEP, generated GLB, public share, or QR URL was intentionally changed during this monitoring pass.
+
 Remaining risks:
 
 - This deployment only proves the default-off path in production. Selective adaptive-on rollout still requires a separate explicit environment change and conversion validation.
