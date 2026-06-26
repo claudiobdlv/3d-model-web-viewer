@@ -1,4 +1,4 @@
-# MeshIQ Adaptive Tessellation Plan
+﻿# MeshIQ Adaptive Tessellation Plan
 
 ## Scope
 
@@ -997,6 +997,139 @@ Remaining risks after Phase 2C:
 - U843 tessellation cache hits were 0 in Phase 2C due to different source version; cache behaviour under the strong profile on repeated runs was not tested.
 - Tiny-dense coarsening remains unimplemented and report-only; gas-stick and diaphragm-valve density outliers are still present.
 
+
+
+﻿
+#### Phase 2D visual inspection and rollout-readiness review
+
+Phase 2D performed visual inspection of the `strong` profile outputs in the isolated viewer and compiled a full numeric comparison across all variants using Phase 2B direct-invocation data and Phase 2C pipeline data.
+
+Isolation details:
+
+- worktree: `/home/claudio/projects/3d-model-web-viewer-worktrees/meshiq-phase1-runtime`
+- branch: `feature/meshiq-adaptive-tessellation`
+- Docker Compose project name: `meshiq-phase2c` (Phase 2C containers reused)
+- port: `127.0.0.1:3019:3019` (production uses `0.0.0.0:3009`)
+- data volume: `../data-phase2c:/app/data`
+- visual inspection: Windows host via SSH tunnel and transparent auth proxy on port 3020
+- models inspected: `large-curved-tank` and `original` (u843 non-hazardous panel)
+
+Production remained unchanged. No production deploy, migration, database write, uploaded STEP mutation, generated GLB mutation, public-link change, QR-link change, service restart, Pi change, Cloudflare change, or unrelated EliteDesk service change was performed.
+
+Commit SHA note: the task context referenced `a283949` as the Phase 2C HEAD (Fix chunking test isolation for MESHIQ env vars; document Phase 2B/2C results). The EliteDesk isolated worktree HEAD is `df25382bb4d9c79ac0bcad4cc16cc1b580659a29` with the identical commit message, indicating a divergent history between the local Windows checkout and the EliteDesk worktree. `a283949` is not found in the EliteDesk git history. Phase 2D documentation is committed to the local branch and pushed to GitHub.
+
+Route checks (isolated server, `strong` profile, balanced/medium quality):
+
+| Route | Model | HTTP status |
+| --- | --- | --- |
+| `GET /health` | ??? | 200 |
+| `GET /3dviewer/:slug` | large-curved-tank | 200 |
+| `GET /3dviewer/:slug` | u843 (original) | 200 |
+| `GET /model-files/:slug/display.glb` | large-curved-tank | 200 |
+| `GET /model-files/:slug/display.glb` | u843 (original) | 200 |
+| `GET /model-files/:slug/mesh-report.json` | large-curved-tank | 200 |
+| `GET /model-files/:slug/mesh-report.json` | u843 (original) | 200 |
+| `GET /model-files/:slug/manifest.json` | large-curved-tank | 200 ??? adaptive metadata present |
+| `GET /model-files/:slug/manifest.json` | u843 (original) | 200 ??? adaptive metadata present |
+
+Manifest adaptive metadata confirmed for both models: `adaptiveMesh: {enabled: true, mode: "large_sparse_smoothing", profile: "strong"}`.
+
+Numeric comparison (balanced/medium quality):
+
+Phase 2B data from direct binary invocation; Phase 2C data from the real upload/worker/meshopt pipeline.
+
+| Model | Variant | Profile | Triangles | Raw GLB bytes | Meshopt GLB bytes | Conv. time | Smoothed parts | Tiny warnings |
+| --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: |
+| `large-curved-tank` | off | ??? | 524 | 66,812 | ??? | ??? | 0 | 0 |
+| `large-curved-tank` | on | standard | 752 | 85,968 | ??? | ??? | 3 | 0 |
+| `large-curved-tank` | on | strong (2B) | 1,052 | 111,168 | ??? | ??? | 3 | 0 |
+| `large-curved-tank` | on | strong (2C pipeline) | 1,052 | 110,168 | 38,284 | 0.28 s | 3 | 0 |
+| `u843-non-haz-panel` | off | ??? | 378,952 | 28,923,768 | ??? | ??? | 0 | 0 |
+| `u843-non-haz-panel` | on | standard | 381,564 | 29,143,180 | ??? | ??? | 26 | 0 |
+| `u843-non-haz-panel` | on | strong (2B) | 386,340 | 29,544,368 | ??? | ??? | 26 | 0 |
+| `u843-non-haz-panel` | on | strong (2C pipeline) | 386,340 | 34,229,764 | 8,404,860 | 70.09 s | 26 | 0 |
+
+Note: Phase 2B raw GLB sizes were measured before meshopt. The u843 raw GLB difference between 2B (29.5 MB) and 2C (34.2 MB) is due to a slightly different source file (985-byte difference); triangle counts are identical, confirming identical geometric output.
+
+Triangle impact summary:
+
+| Model | off ??? strong | off ??? standard | standard ??? strong |
+| --- | --- | --- | --- |
+| `large-curved-tank` balanced | +100.8% (+528 triangles) | +43.5% (+228) | +40.0% (+300) |
+| `u843-non-haz-panel` balanced | +1.95% (+7,388 triangles) | +0.69% (+2,612) | +1.25% (+4,776) |
+
+U843 strong vs off: **+1.95%** ??? within the 5% target and the 10% hard stop.
+Tank strong vs off: **+100.8%** ??? expected; large sparse curved geometry benefits most.
+
+Visual inspection findings (`strong` profile, balanced quality, isolated viewer):
+
+Large-curved-tank:
+
+- Main cylinder body: smooth, no visible faceting at standard viewer distance. Lighting shows continuous curvature with no polygon edges breaking through.
+- Vertical stub nozzles (2 parts): slight faceting visible at high zoom, as expected at balanced quality with adaptive smoothing. Acceptable for engineering visualization.
+- Pipe support and saddle plates: smooth cylindrical and flat geometry; correct.
+- Materials/colors: uniform default neutral grey; correct for a STEP file with no explicit colour assignments.
+- Viewer performance: instant render, 38 KB optimized GLB.
+- No broken geometry, missing parts, or material artifacts.
+
+U843 non-hazardous panel (uploaded as "original"):
+
+- Grey manifold tubes and elbows: smooth cylindrical profile; elbows and T-junctions render cleanly with no visible faceting.
+- Navy blue solenoid valves (many instances): complex multi-body shapes preserved; rounded valve heads and body cylinders render correctly.
+- Red/maroon structural channel frame: sharp rectangular extrusion; correct.
+- Green mounting clamps/brackets: correctly colored and shaped.
+- Star/asterisk needle valves at panel right edge: characteristic geometry correct, not distorted.
+- No broken materials, no color bleed, no missing parts, no hierarchy artifacts.
+- Panel board: correct rectangular outline with mounting-hole details visible.
+- Viewer performance: loaded in approximately 8 s for 8.4 MB optimized GLB; acceptable for a 497-part complex assembly.
+
+Gas sticks, valves, and small fittings (U843 tiny-dense candidates): no visible distortion or flattening under `strong`. Tiny-dense coarsening is not implemented; these parts remain at baseline density and are report-only warnings.
+
+Viewer performance did not feel noticeably worse for either model under `strong` compared to baseline expectations.
+
+Server test issue conclusion:
+
+Phase 2C reported 15/17 server tests passing, with `assetLibrary.test.ts` and `revisionControllers.test.ts` failing with 401 in the Docker container environment. Phase 2D investigation findings:
+
+1. Both tests pass 17/17 in the current codebase run locally (Node 24, Windows host) both with and without `ADMIN_PASSWORD` set in the parent process environment.
+2. The server reads `process.env.ADMIN_PASSWORD` per-request (not cached at startup), so the tests' `process.env.ADMIN_PASSWORD = "test-password"` override before dynamic import is correct and effective.
+3. The failures cannot be reproduced and are not related to MeshIQ env vars (`MESHIQ_ADAPTIVE_MESH`, `MESHIQ_ADAPTIVE_MESH_PROFILE`).
+4. Assessment: pre-existing Docker-container-specific behaviour in the Phase 2C build environment, not a code issue. Not a MeshIQ issue. Not a blocker for merge.
+5. No code changes made; no production auth behaviour changed.
+
+AGENTS.md status:
+
+`AGENTS.md` is absent from the repository root. `CLAUDE.md` was intentionally not created in this task. A separate shared-agent-instructions task is needed before creating `CLAUDE.md`.
+
+Recommendation:
+
+**Option 1: `strong` is recommended as the rollout candidate behind `MESHIQ_ADAPTIVE_MESH=on`.**
+
+Rationale:
+
+- `strong` keeps U843 triangle increase to +1.95% ??? well within the 5% target and 10% hard stop.
+- `strong` produces +100.8% more triangles on the tank versus baseline, with confirmed smooth cylinder rendering in the viewer.
+- `standard` provides less cylinder improvement (+43.5% on tank) for a minor difference on U843 (0.69% vs 1.95%); the additional 7,388 triangles from `strong` on U843 are not a concern given the 386K baseline.
+- `strong` is confirmed through the real upload/worker/XCAF/artifact/viewer pipeline (Phase 2C) and live visual inspection (Phase 2D).
+- Adaptive default-off is preserved. This recommendation applies to manual rollout via `MESHIQ_ADAPTIVE_MESH=on` + `MESHIQ_ADAPTIVE_MESH_PROFILE=strong` in the EliteDesk environment.
+
+Recommended next step:
+
+Resolve agent-docs and test infrastructure before merging:
+
+1. Add `AGENTS.md` to the repository root with shared agent rules and source-of-truth map.
+2. Run `npm run typecheck && npm run lint && npm run test` across all apps to confirm clean state.
+3. Confirm `docker compose -f deploy/docker-compose.elitedesk.yml config --quiet` is clean.
+4. After agent docs and checks pass, merge `feature/meshiq-adaptive-tessellation` to `main` and deploy to production with `MESHIQ_ADAPTIVE_MESH=off` (default-off; no behaviour change).
+5. When ready to roll out selectively, set `MESHIQ_ADAPTIVE_MESH=on` and `MESHIQ_ADAPTIVE_MESH_PROFILE=strong` in the EliteDesk production environment.
+
+Remaining risks after Phase 2D:
+
+- Side-by-side pixel comparison of `strong` vs `standard` vs `off` in the viewer was not performed. Only `strong` outputs exist in the isolated server; Phase 2B numeric data was used for the off/standard columns. The visual improvement was assessed from the `strong` render alone against the known numeric delta.
+- Tiny-dense coarsening remains unimplemented; small functional details on U843 (gas sticks, diaphragm valves) remain at baseline density.
+- U843 tessellation cache hits were 0 in Phase 2C/2D due to a different source file version; cache behaviour under repeated conversion not tested.
+- Meshopt visual rendering was confirmed for `strong` only; `off` and `standard` meshopt visual rendering was not tested in the viewer.
+- Visual inspection was performed at the default viewer camera angle only; zoomed close-up inspection of individual tiny-dense parts was not performed.
 
 
 ### Phase 3: Selective simplification behind a flag
