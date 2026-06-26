@@ -1131,6 +1131,65 @@ Remaining risks after Phase 2D:
 - Meshopt visual rendering was confirmed for `strong` only; `off` and `standard` meshopt visual rendering was not tested in the viewer.
 - Visual inspection was performed at the default viewer camera angle only; zoomed close-up inspection of individual tiny-dense parts was not performed.
 
+## Phase 2E production merge and default-off deploy
+
+Date/time: 2026-06-26 20:16 Australia/Sydney.
+
+Production baseline before deploy:
+
+- Previous deployed commit: `d294769a5b2dfe28a8d9daf3acbb3ea58ddc7716`.
+- Merged/deployed commit: `064239eeb771b0ab9c0cbdc9b1451aa9164d197e`.
+- Merge result: `main` fast-forwarded to the reviewed MeshIQ branch tip.
+
+Default-off confirmation:
+
+- `MESHIQ_ADAPTIVE_MESH` was absent before deploy.
+- `MESHIQ_ADAPTIVE_MESH_PROFILE` was absent before deploy.
+- Both variables remained absent after deploy.
+- Worker startup logs reported `MeshIQ adaptive mesh: off` and `MeshIQ adaptive profile: standard`.
+- Adaptive meshing was not enabled in production.
+
+Backup:
+
+- Backup directory: `/home/claudio/backups/3d-model-web-viewer/meshiq-default-off-20260626-201459`.
+- Database backup: `app.sqlite`.
+- Backup verification: `PRAGMA integrity_check` returned `ok`; `PRAGMA foreign_key_check` returned zero rows.
+- Predeploy inventory recorded 45 models, 45 model revisions, 59 jobs, 14 public shares, 43 model directories, 45 upload directories, and 70 worker-output directories.
+
+Checks run:
+
+- Local `git diff --check`: passed.
+- Local `apps/server` typecheck, build, and tests: passed.
+- Local `apps/worker` typecheck, build, and tests: passed.
+- Local `apps/converter` smoke tests: passed.
+- Local `apps/web` TypeScript check and production build: passed.
+- Local Docker Compose config check was skipped because Docker is not installed on the Windows workstation.
+- EliteDesk Docker Compose config check: passed.
+- EliteDesk worker tests passed in the worker container with test-only `LARGE_STEP_*` and MeshIQ environment variables unset. An unsanitized in-container test run inherited the live `LARGE_STEP_CHUNKING_MODE=auto` runtime setting and failed the default-config assertion, so it was treated as an invalid default-env harness run rather than a code failure.
+
+Post-deploy verification:
+
+- Deployed HEAD on EliteDesk: `064239eeb771b0ab9c0cbdc9b1451aa9164d197e`.
+- Server container: running and healthy.
+- Worker container: running and polling; `/api/worker/jobs/next` returned 200 with no pending job.
+- `/health` and `/api/health`: 200.
+- Admin page and model list API: 200.
+- Existing model details included current and active RevVault revision data.
+- Existing admin viewer route and model GLB route: 200.
+- Existing public share route, metadata route, and public GLB route: 200; tested share was locked-revision with revision switching disabled.
+- Existing GLB and original/source download routes: 200.
+- `mesh-report.json` routes returned safe 404 responses for an older model without a report.
+- Postdeploy database integrity remained `ok` with zero foreign-key issues.
+- Production model, revision, job, and public-share counts matched the predeploy backup counts.
+- No optional tiny upload was performed, to avoid unnecessary production storage mutation during a default-off deployment.
+- Rollback was not needed.
+
+Remaining risks:
+
+- This deployment only proves the default-off path in production. Selective adaptive-on rollout still requires a separate explicit environment change and conversion validation.
+- Browser-level inspection was limited to route/API and artifact checks to avoid placing admin credentials or public-share tokens in browser URLs.
+- Existing large-model conversion behaviour should still be watched on the next real worker job because production chunking remains enabled independently of MeshIQ adaptive meshing.
+
 
 ### Phase 3: Selective simplification behind a flag
 
