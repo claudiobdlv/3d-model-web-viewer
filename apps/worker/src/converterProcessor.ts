@@ -14,23 +14,23 @@ import type { GlbOptimizationMode } from "./glbOptimizer.js";
 import { validateMergedGlb } from "./utils/mergeGlbs.js";
 import { decideLargeStepChunking } from "./utils/largeStepDecision.js";
 
-type MeshiqAdaptiveMeshMode = "off" | "on";
-type MeshiqAdaptiveMeshProfile = "conservative" | "standard" | "strong";
+export type MeshiqAdaptiveSmoothing = "off" | "standard" | "strong";
 
-function meshiqAdaptiveMeshMode(): MeshiqAdaptiveMeshMode {
-  const value = process.env.MESHIQ_ADAPTIVE_MESH ?? "off";
-  if (value !== "off" && value !== "on") {
-    throw new Error("MESHIQ_ADAPTIVE_MESH must be off or on.");
-  }
-  return value;
+function effectiveMeshiqAdaptiveSmoothing(value: MeshiqAdaptiveSmoothing | undefined | null): MeshiqAdaptiveSmoothing {
+  return value === "standard" || value === "strong" ? value : "off";
 }
 
-function meshiqAdaptiveMeshProfile(): MeshiqAdaptiveMeshProfile {
-  const value = process.env.MESHIQ_ADAPTIVE_MESH_PROFILE ?? "standard";
-  if (value !== "conservative" && value !== "standard" && value !== "strong") {
-    throw new Error("MESHIQ_ADAPTIVE_MESH_PROFILE must be conservative, standard, or strong.");
-  }
-  return value;
+function adaptiveMeshArgsForJob(value: MeshiqAdaptiveSmoothing | undefined | null): {
+  smoothing: MeshiqAdaptiveSmoothing;
+  enabled: boolean;
+  profile: "standard" | "strong";
+} {
+  const smoothing = effectiveMeshiqAdaptiveSmoothing(value);
+  return {
+    smoothing,
+    enabled: smoothing !== "off",
+    profile: smoothing === "strong" ? "strong" : "standard"
+  };
 }
 
 export type ConverterProcessorInput = {
@@ -42,6 +42,7 @@ export type ConverterProcessorInput = {
   xcafConverterBin: string;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
   quality: ConversionQuality;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   glbOptimizationMode: GlbOptimizationMode;
   signal?: AbortSignal;
   onProgress?: (percent: number, label: string) => void | Promise<void>;
@@ -368,11 +369,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
 
       const parallelMesh = process.env.XCAF_PARALLEL_MESH === "off" ? "off" : "on";
       args.push("--parallel-mesh", parallelMesh);
-      const adaptiveMesh = meshiqAdaptiveMeshMode();
-      const adaptiveProfile = meshiqAdaptiveMeshProfile();
-      if (adaptiveMesh === "on") {
+      const adaptiveMesh = adaptiveMeshArgsForJob(input.meshiqAdaptiveSmoothing);
+      if (adaptiveMesh.enabled) {
         args.push("--adaptive-mesh", "on");
-        args.push("--adaptive-mesh-profile", adaptiveProfile);
+        args.push("--adaptive-mesh-profile", adaptiveMesh.profile);
       }
       if (process.env.DEBUG_SUPER_COARSE_MESH === "true") args.push("--debug-super-coarse-mesh");
       if (process.env.DEBUG_SKIP_RAW_STEP_STYLES === "true") args.push("--debug-skip-raw-step-styles");
@@ -803,7 +803,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           materialDebugPath,
           sourcePath: input.sourcePath,
           displayGlbPath: rawGlbPath,
-          quality: input.quality
+          quality: input.quality,
+          meshiqAdaptiveSmoothing: input.meshiqAdaptiveSmoothing
         });
 
         let optimizationResult: any = null;
@@ -879,6 +880,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
         };
         chunkingStats.totalWallClockSeconds = Number(((Date.now() - jobStartTime) / 1000).toFixed(2));
         statsObj.largeStepChunking = chunkingStats;
+        statsObj.meshiqAdaptiveSmoothing = effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing);
         await fs.promises.writeFile(statsPath, JSON.stringify(statsObj, null, 2) + "\n");
 
         const now = new Date().toISOString();
@@ -902,8 +904,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
               adaptiveMesh: {
                 enabled: nativeQualityDetails.adaptiveEnabled,
                 mode: nativeQualityDetails.adaptiveMode,
-                profile: nativeQualityDetails.adaptiveProfile
+                profile: nativeQualityDetails.adaptiveProfile,
+                requestedSmoothing: effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing)
               },
+              meshiqAdaptiveSmoothing: effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing),
               converterBackend: input.converterBackend,
               artifacts: {
                 displayGlb: "display.glb",
@@ -961,6 +965,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       outputDir: jobDir,
       quality: input.quality,
       xcafColourMode: input.xcafColourMode,
+      meshiqAdaptiveSmoothing: input.meshiqAdaptiveSmoothing,
       signal: input.signal,
       onProgress: input.onProgress
     });
@@ -997,7 +1002,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       materialDebugPath,
       sourcePath: input.sourcePath,
       displayGlbPath,
-      quality: input.quality
+      quality: input.quality,
+      meshiqAdaptiveSmoothing: input.meshiqAdaptiveSmoothing
     });
   }
   const hasMeshReport = input.converterBackend === "xcaf-baseline" && (await fileExists(meshReportPath));
@@ -1085,6 +1091,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   };
   chunkingStats.totalWallClockSeconds = Number(((Date.now() - jobStartTime) / 1000).toFixed(2));
   statsObj.largeStepChunking = chunkingStats;
+  statsObj.meshiqAdaptiveSmoothing = effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing);
   await fs.promises.writeFile(statsPath, JSON.stringify(statsObj, null, 2) + "\n");
 
   const now = new Date().toISOString();
@@ -1108,8 +1115,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
         adaptiveMesh: {
           enabled: nativeQualityDetails.adaptiveEnabled,
           mode: nativeQualityDetails.adaptiveMode,
-          profile: nativeQualityDetails.adaptiveProfile
+          profile: nativeQualityDetails.adaptiveProfile,
+          requestedSmoothing: effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing)
         },
+        meshiqAdaptiveSmoothing: effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing),
         converterBackend: input.converterBackend,
         artifacts: {
           displayGlb: "display.glb",
@@ -1185,6 +1194,7 @@ async function runXcafBaselineConverter(input: {
   outputDir: string;
   quality: ConversionQuality;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   signal?: AbortSignal;
   onProgress?: (percent: number, label: string) => void | Promise<void>;
 }): Promise<void> {
@@ -1202,10 +1212,10 @@ async function runXcafBaselineConverter(input: {
   console.log(`Semantic quality: ${input.quality}`);
   console.log(`Native XCAF quality: ${nativeQuality}`);
   console.log(`Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`);
-  const adaptiveMesh = meshiqAdaptiveMeshMode();
-  const adaptiveProfile = meshiqAdaptiveMeshProfile();
-  console.log(`MeshIQ adaptive mesh: ${adaptiveMesh}`);
-  console.log(`MeshIQ adaptive profile: ${adaptiveMesh === "on" ? adaptiveProfile : "standard"}`);
+  const adaptiveMesh = adaptiveMeshArgsForJob(input.meshiqAdaptiveSmoothing);
+  console.log(`MeshIQ adaptive smoothing: ${adaptiveMesh.smoothing}`);
+  console.log(`MeshIQ adaptive mesh: ${adaptiveMesh.enabled ? "on" : "off"}`);
+  console.log(`MeshIQ adaptive profile: ${adaptiveMesh.profile}`);
 
   const args = [
     input.sourcePath,
@@ -1220,9 +1230,9 @@ async function runXcafBaselineConverter(input: {
   // Read environment flags and push them to args
   const parallelMesh = process.env.XCAF_PARALLEL_MESH === "off" ? "off" : "on";
   args.push("--parallel-mesh", parallelMesh);
-  if (adaptiveMesh === "on") {
+  if (adaptiveMesh.enabled) {
     args.push("--adaptive-mesh", "on");
-    args.push("--adaptive-mesh-profile", adaptiveProfile);
+    args.push("--adaptive-mesh-profile", adaptiveMesh.profile);
   }
 
   if (process.env.DEBUG_SUPER_COARSE_MESH === "true") {
@@ -1260,8 +1270,9 @@ async function runXcafBaselineConverter(input: {
     `Semantic quality: ${input.quality}`,
     `Native preset: ${nativeQuality}`,
     `Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`,
-    `MeshIQ adaptive mesh: ${adaptiveMesh}`,
-    `MeshIQ adaptive profile: ${adaptiveMesh === "on" ? adaptiveProfile : "standard"}`,
+    `MeshIQ adaptive smoothing: ${adaptiveMesh.smoothing}`,
+    `MeshIQ adaptive mesh: ${adaptiveMesh.enabled ? "on" : "off"}`,
+    `MeshIQ adaptive profile: ${adaptiveMesh.profile}`,
     `XCAF colour mode: ${input.xcafColourMode}`,
     `Colour space: raw`,
     `Mesh reuse: ${meshReuseMode}`,
@@ -1369,6 +1380,7 @@ async function writeXcafCompatibilityFiles(input: {
   sourcePath: string;
   displayGlbPath: string;
   quality: ConversionQuality;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
 }): Promise<NativeQualityDetails> {
   const report = JSON.parse(await fs.promises.readFile(input.reportPath, "utf8")) as {
     openCascadeVersion?: string;
@@ -1407,8 +1419,10 @@ async function writeXcafCompatibilityFiles(input: {
     adaptiveMesh: {
       enabled: report.quality?.adaptiveEnabled ?? false,
       mode: report.quality?.adaptiveMode ?? "off",
-      profile: report.quality?.adaptiveProfile ?? "standard"
+      profile: report.quality?.adaptiveProfile ?? "standard",
+      requestedSmoothing: effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing)
     },
+    meshiqAdaptiveSmoothing: effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing),
     openCascadeVersion: report.openCascadeVersion,
     colourMode: report.colourMode?.mode,
     colourSpace: report.colourSpace?.mode,
@@ -1443,6 +1457,7 @@ async function writeXcafCompatibilityFiles(input: {
   };
 
   await fs.promises.writeFile(input.statsPath, `${JSON.stringify(stats, null, 2)}\n`);
+  await annotateMeshReport(path.join(path.dirname(input.reportPath), "mesh-report.json"), input.meshiqAdaptiveSmoothing);
   await fs.promises.writeFile(input.materialDebugPath, `${JSON.stringify(materialDebug, null, 2)}\n`);
 
   const fallbackPreset = nativeQualityPreset(input.quality);
@@ -1455,6 +1470,24 @@ async function writeXcafCompatibilityFiles(input: {
     adaptiveMode: report.quality?.adaptiveMode ?? "off",
     adaptiveProfile: report.quality?.adaptiveProfile ?? "standard"
   };
+}
+
+async function annotateMeshReport(
+  meshReportPath: string,
+  meshiqAdaptiveSmoothing: MeshiqAdaptiveSmoothing | undefined | null
+): Promise<void> {
+  const reportText = await fs.promises.readFile(meshReportPath, "utf8").catch(() => null);
+  if (!reportText) return;
+  try {
+    const report = JSON.parse(reportText);
+    report.quality = {
+      ...(report.quality ?? {}),
+      meshiqAdaptiveSmoothing: effectiveMeshiqAdaptiveSmoothing(meshiqAdaptiveSmoothing)
+    };
+    await fs.promises.writeFile(meshReportPath, `${JSON.stringify(report, null, 2)}\n`);
+  } catch {
+    return;
+  }
 }
 
 type NativeQualityDetails = {

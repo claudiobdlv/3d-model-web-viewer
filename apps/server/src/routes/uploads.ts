@@ -7,6 +7,7 @@ import { getFolderById, getModelBySlug } from "../db.js";
 import { chunkedUploadsRoot } from "../storage.js";
 import { parseRevisionMetadata, registerModelAndJob, registerRevisionAndJob } from "./models.js";
 import { parseConversionQuality } from "../quality.js";
+import { parseMeshiqAdaptiveSmoothing } from "../meshiq.js";
 
 const MAX_UPLOAD_BYTES = 524288000;       // 500 MB
 const MAX_UPLOAD_CHUNK_BYTES = 52428800; // 50 MB
@@ -46,7 +47,7 @@ function parseProjectId(value: unknown): number | null {
 // Initialize a chunked upload
 uploadsRouter.post("/init", (req, res) => {
   try {
-    const { filename, sizeBytes, projectId, quality, modelSlug } = req.body || {};
+    const { filename, sizeBytes, projectId, quality, meshiqAdaptiveSmoothing, modelSlug } = req.body || {};
 
     if (typeof filename !== "string" || !filename) {
       res.status(400).json({ error: "filename is required." });
@@ -91,7 +92,15 @@ uploadsRouter.post("/init", (req, res) => {
       return;
     }
 
-    const parsedQuality = parseConversionQuality(quality);
+    let parsedQuality: ReturnType<typeof parseConversionQuality>;
+    let parsedMeshiqAdaptiveSmoothing: ReturnType<typeof parseMeshiqAdaptiveSmoothing>;
+    try {
+      parsedQuality = parseConversionQuality(quality);
+      parsedMeshiqAdaptiveSmoothing = parseMeshiqAdaptiveSmoothing(meshiqAdaptiveSmoothing);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : "Invalid upload options." });
+      return;
+    }
     const existingModelSlug = typeof modelSlug === "string" ? modelSlug.trim() : "";
     if (existingModelSlug && !getModelBySlug(existingModelSlug)) {
       res.status(404).json({ error: "Model not found." });
@@ -115,6 +124,7 @@ uploadsRouter.post("/init", (req, res) => {
       sizeBytes: size,
       projectId: parsedFolderId,
       quality: parsedQuality,
+      meshiqAdaptiveSmoothing: parsedMeshiqAdaptiveSmoothing,
       modelSlug: existingModelSlug || null,
       revisionLabel: revisionMetadata.revisionLabel,
       issuedDate: revisionMetadata.issuedDate,
@@ -127,7 +137,14 @@ uploadsRouter.post("/init", (req, res) => {
 
     fs.writeFileSync(path.join(uploadDir, "metadata.json"), JSON.stringify(metadata, null, 2));
 
-    console.info("chunked_upload_init", { uploadId, sizeBytes: size, totalChunks, projectId: parsedFolderId, quality: parsedQuality });
+    console.info("chunked_upload_init", {
+      uploadId,
+      sizeBytes: size,
+      totalChunks,
+      projectId: parsedFolderId,
+      quality: parsedQuality,
+      meshiqAdaptiveSmoothing: parsedMeshiqAdaptiveSmoothing
+    });
 
     res.status(201).json({
       uploadId,
@@ -254,6 +271,7 @@ uploadsRouter.post("/:uploadId/complete", async (req, res, next) => {
           modelSlug: metadata.modelSlug,
           sourceFilename: metadata.filename,
           quality: metadata.quality,
+          meshiqAdaptiveSmoothing: metadata.meshiqAdaptiveSmoothing,
           originalSizeBytes: metadata.sizeBytes,
           revisionLabel: metadata.revisionLabel,
           issuedDate: metadata.issuedDate,
@@ -265,6 +283,7 @@ uploadsRouter.post("/:uploadId/complete", async (req, res, next) => {
           sourceFilename: metadata.filename,
           sourceExt: path.extname(metadata.filename).toLowerCase(),
           quality: metadata.quality,
+          meshiqAdaptiveSmoothing: metadata.meshiqAdaptiveSmoothing,
           folderId: metadata.projectId,
           originalSizeBytes: metadata.sizeBytes,
           revisionLabel: metadata.revisionLabel,

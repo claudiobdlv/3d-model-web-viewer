@@ -12,7 +12,7 @@ import {
   getModel, makeRevisionCurrent, replaceRevision, updateRevisionPublicSelectable, uploadNewRevision
 } from "../api";
 import { downloadPublicShareQr } from "../qr";
-import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, PublicShareLinkMode, StorageQuota, UploadTask } from "../types";
+import type { BatchAction, ConversionQuality, MeshiqAdaptiveSmoothing, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, PublicShareLinkMode, StorageQuota, UploadTask } from "../types";
 import { activeStatuses, formatDate, formatFileSize, statusKind, statusLabel } from "../utils";
 import { ResizableHeaderCell } from "./ResizableHeaderCell";
 
@@ -588,6 +588,7 @@ function UploadDialog({
   const [file, setFile] = useState<File | null>(initialFile);
   const [projectId, setProjectId] = useState(defaultProjectId ? String(defaultProjectId) : "");
   const [quality, setQuality] = useState<ConversionQuality>("medium");
+  const [meshiqAdaptiveSmoothing, setMeshiqAdaptiveSmoothing] = useState<MeshiqAdaptiveSmoothing>("off");
   const [revisionLabel, setRevisionLabel] = useState("");
   const [issuedDate, setIssuedDate] = useState(todayLocal());
   const [allowPublicSelectable, setAllowPublicSelectable] = useState(true);
@@ -631,7 +632,7 @@ function UploadDialog({
 
     const isStep = /\.(step|stp)$/i.test(file.name);
     const isGlb = /\.(glb|gltf)$/i.test(file.name);
-    taskRef.current={clientUploadId:crypto.randomUUID(),uploadId:null,filename:file.name,sizeBytes:file.size,uploadedBytes:0,percent:0,currentChunk:0,totalChunks:0,stage:"initializing",projectId:projectId?Number(projectId):null,projectName:projects.find(p=>p.id===Number(projectId))?.name??null,quality};
+    taskRef.current={clientUploadId:crypto.randomUUID(),uploadId:null,filename:file.name,sizeBytes:file.size,uploadedBytes:0,percent:0,currentChunk:0,totalChunks:0,stage:"initializing",projectId:projectId?Number(projectId):null,projectName:projects.find(p=>p.id===Number(projectId))?.name??null,quality,meshiqAdaptiveSmoothing};
     onTask(taskRef.current);
 
     if (isGlb && file.size > 262144000) {
@@ -660,7 +661,8 @@ function UploadDialog({
           file.size,
           projectId ? Number(projectId) : null,
           quality,
-          { revisionLabel, issuedDate, allowPublicSelectable }
+          { revisionLabel, issuedDate, allowPublicSelectable },
+          meshiqAdaptiveSmoothing
         );
         uploadIdRef.current = uploadId;
 
@@ -715,7 +717,8 @@ function UploadDialog({
           projectId ? Number(projectId) : null,
           quality,
           abortControllerRef.current.signal,
-          { revisionLabel, issuedDate, allowPublicSelectable }
+          { revisionLabel, issuedDate, allowPublicSelectable },
+          meshiqAdaptiveSmoothing
         );
         updateTask({ stage:"queued", modelSlug:model.slug, uploadedBytes:file.size, percent:100 });
       }
@@ -780,6 +783,11 @@ function UploadDialog({
           <legend>Quality</legend>
           <QualityOptions value={quality} onChange={setQuality}/>
         </fieldset>
+        <fieldset disabled={busy}>
+          <legend>Advanced / Experimental</legend>
+          <MeshIqSmoothingOptions value={meshiqAdaptiveSmoothing} onChange={setMeshiqAdaptiveSmoothing}/>
+          <p className="field-help">Experimental. Smooths large curved parts such as tanks and long tubes. Off is safest.</p>
+        </fieldset>
         <label className="checkbox-field"><input type="checkbox" checked={allowPublicSelectable} disabled={busy} onChange={e=>setAllowPublicSelectable(e.target.checked)}/><span><strong>Allow public revision selection</strong><small>Available in the public revision dropdown when that viewer feature is enabled.</small></span></label>
         {progress && (
           <div className="upload-progress" role="status" aria-live="polite">
@@ -809,6 +817,7 @@ function UploadRevisionDialog({model,onClose,onDone}:{model:ModelRecord;onClose:
   const [revisionLabel,setRevisionLabel]=useState("");
   const [issuedDate,setIssuedDate]=useState(todayLocal());
   const [quality,setQuality]=useState<ConversionQuality>((model.quality as ConversionQuality)||"medium");
+  const [meshiqAdaptiveSmoothing,setMeshiqAdaptiveSmoothing]=useState<MeshiqAdaptiveSmoothing>("off");
   const [makeCurrent,setMakeCurrent]=useState(true);
   const [allowPublicSelectable,setAllowPublicSelectable]=useState(true);
   const [busy,setBusy]=useState(false);
@@ -818,7 +827,7 @@ function UploadRevisionDialog({model,onClose,onDone}:{model:ModelRecord;onClose:
     event.preventDefault(); if(!file)return;
     setBusy(true);setError(null);
     try{
-      const result=await uploadNewRevision(model.slug,file,quality,{revisionLabel,issuedDate,makeCurrent,allowPublicSelectable},setProgress);
+      const result=await uploadNewRevision(model.slug,file,quality,{revisionLabel,issuedDate,makeCurrent,allowPublicSelectable,meshiqAdaptiveSmoothing},setProgress);
       onDone(`Rev ${result.revision.revision_label} uploaded${makeCurrent?" and set as current":""}.`);
     }catch(reason){setError(reason instanceof Error?reason.message:"Revision upload failed.");setBusy(false)}
   };
@@ -829,6 +838,7 @@ function UploadRevisionDialog({model,onClose,onDone}:{model:ModelRecord;onClose:
       <label>Date issued<input className="field" type="date" value={issuedDate} disabled={busy} onChange={e=>setIssuedDate(e.target.value)}/></label>
     </div>
     <fieldset disabled={busy}><legend>Quality</legend><QualityOptions value={quality} onChange={setQuality}/></fieldset>
+    <fieldset disabled={busy}><legend>Advanced / Experimental</legend><MeshIqSmoothingOptions value={meshiqAdaptiveSmoothing} onChange={setMeshiqAdaptiveSmoothing}/><p className="field-help">Experimental. Smooths large curved parts such as tanks and long tubes. Off is safest.</p></fieldset>
     <label className="checkbox-field"><input type="checkbox" checked={makeCurrent} disabled={busy} onChange={e=>setMakeCurrent(e.target.checked)}/><span><strong>Make this the current revision after processing</strong></span></label>
     <label className="checkbox-field"><input type="checkbox" checked={allowPublicSelectable} disabled={busy} onChange={e=>setAllowPublicSelectable(e.target.checked)}/><span><strong>Available in public revision dropdown</strong></span></label>
     {busy&&<UploadProgress percent={progress} text={progress<100?"Uploading revision…":"Upload complete. Creating revision…"}/>}
@@ -982,6 +992,11 @@ function FilePicker({file,busy,onChange}:{file:File|null;busy:boolean;onChange:(
 
 function QualityOptions({value,onChange}:{value:ConversionQuality;onChange:(quality:ConversionQuality)=>void}) {
   return <div className="quality-options">{(["low","medium","high"] as const).map(quality=><button type="button" className={value===quality?"active":""} onClick={()=>onChange(quality)} key={quality}>{quality}</button>)}</div>;
+}
+
+function MeshIqSmoothingOptions({value,onChange}:{value:MeshiqAdaptiveSmoothing;onChange:(value:MeshiqAdaptiveSmoothing)=>void}) {
+  const labels: Record<MeshiqAdaptiveSmoothing, string> = { off: "Off", standard: "Standard", strong: "Strong" };
+  return <div className="quality-options">{(["off","standard","strong"] as const).map(option=><button type="button" className={value===option?"active":""} onClick={()=>onChange(option)} key={option}>{labels[option]}</button>)}</div>;
 }
 
 function UploadProgress({percent,text}:{percent:number;text:string}) {

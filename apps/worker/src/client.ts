@@ -7,6 +7,7 @@ export type WorkerJob = {
   modelSlug: string;
   sourceFilename: string;
   quality?: "low" | "medium" | "high";
+  meshiqAdaptiveSmoothing?: "off" | "standard" | "strong";
   revisionId?: number | null;
   downloadUrl: string;
 };

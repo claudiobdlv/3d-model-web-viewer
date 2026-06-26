@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { dbRoot, getModelDir, getUploadDir } from "./storage.js";
 import { parseConversionQuality, type ConversionQuality } from "./quality.js";
+import { normalizeMeshiqAdaptiveSmoothing, parseMeshiqAdaptiveSmoothing, type MeshiqAdaptiveSmoothing } from "./meshiq.js";
 
 export type ModelRecord = {
   id: number;
@@ -18,6 +19,7 @@ export type ModelRecord = {
   project_id: number | null;
   project_name?: string | null;
   quality?: ConversionQuality | null;
+  meshiq_adaptive_smoothing?: MeshiqAdaptiveSmoothing | null;
   deleted_at: string | null;
   pending_delete_at?: string | null;
   progress_percent?: number | null;
@@ -38,6 +40,7 @@ export type ModelRevisionRecord = {
   revision_sort_order: number;
   issued_date: string;
   quality_preset: string;
+  meshiq_adaptive_smoothing: MeshiqAdaptiveSmoothing;
   status: string;
   is_current: number;
   is_publicly_selectable: number;
@@ -60,6 +63,7 @@ export type RevisionFileVersionRecord = {
   source_path: string;
   display_glb_path: string;
   quality_preset: string;
+  meshiq_adaptive_smoothing: MeshiqAdaptiveSmoothing;
   replacement_reason: string | null;
   is_active: number;
   uploaded_at: string;
@@ -106,6 +110,7 @@ export type JobRecord = {
   status: string;
   message: string | null;
   quality: ConversionQuality;
+  meshiq_adaptive_smoothing: MeshiqAdaptiveSmoothing | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -185,6 +190,7 @@ export function initDb(): void {
       status TEXT NOT NULL,
       message TEXT,
       quality TEXT NOT NULL DEFAULT 'medium' CHECK (quality IN ('low', 'medium', 'high')),
+      meshiq_adaptive_smoothing TEXT NOT NULL DEFAULT 'off' CHECK (meshiq_adaptive_smoothing IN ('off', 'standard', 'strong')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       started_at TEXT,
@@ -212,6 +218,7 @@ export function initDb(): void {
       revision_sort_order INTEGER NOT NULL,
       issued_date TEXT NOT NULL,
       quality_preset TEXT NOT NULL,
+      meshiq_adaptive_smoothing TEXT NOT NULL DEFAULT 'off' CHECK (meshiq_adaptive_smoothing IN ('off', 'standard', 'strong')),
       status TEXT NOT NULL,
       is_current INTEGER NOT NULL DEFAULT 0,
       is_publicly_selectable INTEGER NOT NULL DEFAULT 1,
@@ -236,6 +243,7 @@ export function initDb(): void {
       source_path TEXT NOT NULL,
       display_glb_path TEXT NOT NULL,
       quality_preset TEXT NOT NULL,
+      meshiq_adaptive_smoothing TEXT NOT NULL DEFAULT 'off' CHECK (meshiq_adaptive_smoothing IN ('off', 'standard', 'strong')),
       replacement_reason TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
       uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -251,6 +259,7 @@ export function initDb(): void {
   ensureColumn("jobs", "completed_at", "TEXT");
   ensureColumn("jobs", "failed_at", "TEXT");
   ensureColumn("jobs", "quality", "TEXT NOT NULL DEFAULT 'medium'");
+  ensureColumn("jobs", "meshiq_adaptive_smoothing", "TEXT NOT NULL DEFAULT 'off'");
   ensureColumn("jobs", "cancellation_requested_at", "TEXT");
   ensureColumn("jobs", "worker_claimed_at", "TEXT");
   ensureColumn("jobs", "progress_percent", "INTEGER");
@@ -268,6 +277,8 @@ export function initDb(): void {
   ensureColumn("public_shares", "link_mode", "TEXT DEFAULT 'locked_revision'");
   ensureColumn("public_shares", "allow_revision_switching", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("models", "current_revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
+  ensureColumn("model_revisions", "meshiq_adaptive_smoothing", "TEXT NOT NULL DEFAULT 'off'");
+  ensureColumn("revision_file_versions", "meshiq_adaptive_smoothing", "TEXT NOT NULL DEFAULT 'off'");
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS models_deleted_at_idx
@@ -332,8 +343,9 @@ export function backfillModelRevisions(): void {
 
     db.exec("BEGIN TRANSACTION");
     try {
-      const lastJob = db.prepare("SELECT id, quality FROM jobs WHERE model_id = ? ORDER BY id DESC LIMIT 1").get(model.id) as { id: number; quality: string } | undefined;
+      const lastJob = db.prepare("SELECT id, quality, meshiq_adaptive_smoothing FROM jobs WHERE model_id = ? ORDER BY id DESC LIMIT 1").get(model.id) as { id: number; quality: string; meshiq_adaptive_smoothing?: string | null } | undefined;
       const qualityPreset = lastJob?.quality || "medium";
+      const meshiqAdaptiveSmoothing = normalizeMeshiqAdaptiveSmoothing(lastJob?.meshiq_adaptive_smoothing);
 
       let issuedDate = new Date().toISOString().slice(0, 10);
       if (model.created_at) {
@@ -349,15 +361,16 @@ export function backfillModelRevisions(): void {
 
       const revisionRes = db.prepare(`
         INSERT INTO model_revisions (
-          model_id, revision_label, revision_sort_order, issued_date, quality_preset,
+          model_id, revision_label, revision_sort_order, issued_date, quality_preset, meshiq_adaptive_smoothing,
           status, is_current, is_publicly_selectable, source_filename, source_path,
           display_glb_path, source_size_bytes, glb_size_bytes, conversion_job_id,
           uploaded_at, updated_at
-        ) VALUES (?, '1', 1, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, '1', 1, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         model.id,
         issuedDate,
         qualityPreset,
+        meshiqAdaptiveSmoothing,
         model.status,
         model.source_filename,
         sourcePath,
@@ -374,14 +387,15 @@ export function backfillModelRevisions(): void {
       db.prepare(`
         INSERT INTO revision_file_versions (
           revision_id, file_version_number, source_filename, source_path,
-          display_glb_path, quality_preset, is_active, uploaded_at
-        ) VALUES (?, 1, ?, ?, ?, ?, 1, ?)
+          display_glb_path, quality_preset, meshiq_adaptive_smoothing, is_active, uploaded_at
+        ) VALUES (?, 1, ?, ?, ?, ?, ?, 1, ?)
       `).run(
         revisionId,
         model.source_filename,
         sourcePath,
         displayGlbPath,
         qualityPreset,
+        meshiqAdaptiveSmoothing,
         model.created_at
       );
 
@@ -613,15 +627,17 @@ export function createJob(input: {
   status: string;
   message?: string;
   quality?: ConversionQuality;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   revisionId?: number | null;
 }): JobRecord {
   const quality = parseConversionQuality(input.quality);
+  const meshiqAdaptiveSmoothing = parseMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing);
   const result = db
     .prepare(
-      `INSERT INTO jobs (model_id, model_slug, type, status, message, quality, revision_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO jobs (model_id, model_slug, type, status, message, quality, meshiq_adaptive_smoothing, revision_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(input.modelId, input.modelSlug, input.type, input.status, input.message ?? null, quality, input.revisionId ?? null);
+    .run(input.modelId, input.modelSlug, input.type, input.status, input.message ?? null, quality, meshiqAdaptiveSmoothing, input.revisionId ?? null);
 
   return db.prepare("SELECT * FROM jobs WHERE id = ?").get(result.lastInsertRowid) as JobRecord;
 }
@@ -1137,6 +1153,7 @@ export function createRevisionForModel(input: {
   revisionLabel?: string;
   issuedDate?: string;
   qualityPreset: string;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   status: string;
   sourceFilename: string;
   sourcePath: string | ((revisionId: number) => string);
@@ -1168,16 +1185,17 @@ export function createRevisionForModel(input: {
 
     const res = db.prepare(`
       INSERT INTO model_revisions (
-        model_id, revision_label, revision_sort_order, issued_date, quality_preset,
+        model_id, revision_label, revision_sort_order, issued_date, quality_preset, meshiq_adaptive_smoothing,
         status, is_current, is_publicly_selectable, source_filename, source_path,
         display_glb_path, source_size_bytes, glb_size_bytes, conversion_job_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       modelId,
       label,
       sortOrder,
       issuedDate,
       input.qualityPreset,
+      parseMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing),
       input.status,
       isCurrent,
       isPubliclySelectable,
@@ -1202,14 +1220,15 @@ export function createRevisionForModel(input: {
     db.prepare(`
       INSERT INTO revision_file_versions (
         revision_id, file_version_number, source_filename, source_path,
-        display_glb_path, quality_preset, is_active
-      ) VALUES (?, 1, ?, ?, ?, ?, 1)
+        display_glb_path, quality_preset, meshiq_adaptive_smoothing, is_active
+      ) VALUES (?, 1, ?, ?, ?, ?, ?, 1)
     `).run(
       revisionId,
       input.sourceFilename,
       sourcePath,
       displayGlbPath,
-      input.qualityPreset
+      input.qualityPreset,
+      parseMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing)
     );
 
     if (isCurrent === 1) {
@@ -1318,6 +1337,7 @@ export function replaceRevisionFileVersion(input: {
   sourcePath: (fileVersionNumber: number) => string;
   displayGlbPath: (fileVersionNumber: number) => string;
   qualityPreset: string;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   replacementReason?: string | null;
   sourceSizeBytes: number;
   fileVersionNumber?: number;
@@ -1348,8 +1368,8 @@ export function replaceRevisionFileVersion(input: {
     const inserted = db.prepare(
       `INSERT INTO revision_file_versions (
          revision_id, file_version_number, source_filename, source_path,
-         display_glb_path, quality_preset, replacement_reason, is_active
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
+         display_glb_path, quality_preset, meshiq_adaptive_smoothing, replacement_reason, is_active
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
     ).run(
       input.revisionId,
       fileVersionNumber,
@@ -1357,12 +1377,13 @@ export function replaceRevisionFileVersion(input: {
       sourcePath,
       displayGlbPath,
       input.qualityPreset,
+      parseMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing),
       input.replacementReason || null
     );
     db.prepare(
       `UPDATE model_revisions
        SET source_filename = ?, source_path = ?, display_glb_path = ?,
-           quality_preset = ?, source_size_bytes = ?, glb_size_bytes = NULL,
+           quality_preset = ?, meshiq_adaptive_smoothing = ?, source_size_bytes = ?, glb_size_bytes = NULL,
            status = 'uploaded', conversion_job_id = NULL, updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     ).run(
@@ -1370,6 +1391,7 @@ export function replaceRevisionFileVersion(input: {
       sourcePath,
       displayGlbPath,
       input.qualityPreset,
+      parseMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing),
       input.sourceSizeBytes,
       input.revisionId
     );

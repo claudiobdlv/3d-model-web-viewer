@@ -2,6 +2,7 @@ import type {
   BatchAction,
   BatchResult,
   ConversionQuality,
+  MeshiqAdaptiveSmoothing,
   FolderRecord,
   FolderSelection,
   JobRecord,
@@ -210,12 +211,14 @@ export async function uploadModel(
   folderId: number | null,
   quality: ConversionQuality = "medium",
   signal?: AbortSignal,
-  revision: RevisionMetadata = {}
+  revision: RevisionMetadata = {},
+  meshiqAdaptiveSmoothing: MeshiqAdaptiveSmoothing = "off"
 ): Promise<ModelRecord> {
   const form = new FormData();
   form.set("modelFile", file);
   if (folderId) form.set("folderId", String(folderId));
   form.set("quality", quality);
+  form.set("meshiqAdaptiveSmoothing", meshiqAdaptiveSmoothing);
   appendRevisionMetadata(form, revision);
 
   const response = await fetch("/api/models", {
@@ -237,13 +240,14 @@ export function initChunkedUpload(
   sizeBytes: number,
   projectId: number | null,
   quality: ConversionQuality = "medium",
-  revision: RevisionMetadata & { modelSlug?: string } = {}
+  revision: RevisionMetadata & { modelSlug?: string } = {},
+  meshiqAdaptiveSmoothing: MeshiqAdaptiveSmoothing = "off"
 ): Promise<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }> {
   return request<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }>(
     "/api/uploads/chunked/init",
     {
       method: "POST",
-      body: JSON.stringify({ filename, sizeBytes, projectId, quality, ...revision })
+      body: JSON.stringify({ filename, sizeBytes, projectId, quality, ...revision, meshiqAdaptiveSmoothing })
     },
     30_000
   );
@@ -322,13 +326,15 @@ export async function uploadNewRevision(
   revision: RevisionMetadata,
   onProgress?: (percent: number) => void
 ): Promise<{ revision: ModelRevisionRecord; job: JobRecord }> {
+  const meshiqAdaptiveSmoothing = revision.meshiqAdaptiveSmoothing ?? "off";
   if (file.size > 83886080) {
     const { uploadId, chunkSizeBytes } = await initChunkedUpload(
       file.name,
       file.size,
       null,
       quality,
-      { ...revision, modelSlug: slug }
+      { ...revision, modelSlug: slug },
+      meshiqAdaptiveSmoothing
     );
     try {
       const totalChunks = Math.ceil(file.size / chunkSizeBytes);
@@ -348,6 +354,7 @@ export async function uploadNewRevision(
   const form = new FormData();
   form.set("modelFile", file);
   form.set("quality", quality);
+  form.set("meshiqAdaptiveSmoothing", meshiqAdaptiveSmoothing);
   appendRevisionMetadata(form, revision);
   return uploadMultipart(`/api/models/${encodeURIComponent(slug)}/revisions`, form, onProgress);
 }
@@ -358,11 +365,13 @@ export function replaceRevision(
   file: File,
   quality: ConversionQuality,
   replacementReason: string,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  meshiqAdaptiveSmoothing: MeshiqAdaptiveSmoothing = "off"
 ): Promise<{ revision: ModelRevisionRecord; fileVersion: RevisionFileVersionRecord; job: JobRecord }> {
   const form = new FormData();
   form.set("modelFile", file);
   form.set("quality", quality);
+  form.set("meshiqAdaptiveSmoothing", meshiqAdaptiveSmoothing);
   if (replacementReason.trim()) form.set("replacementReason", replacementReason.trim());
   return uploadMultipart(`/api/models/${encodeURIComponent(slug)}/revisions/${revisionId}/replace`, form, onProgress);
 }

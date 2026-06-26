@@ -1204,6 +1204,44 @@ Remaining risks:
 - Existing large-model conversion behaviour should still be watched on the next real worker job because production chunking remains enabled independently of MeshIQ adaptive meshing.
 
 
+### Phase 3A: Admin per-upload adaptive smoothing option
+
+Phase 3A adds an admin-only per-upload selector without enabling MeshIQ globally in production.
+
+Design:
+
+- Allowed upload values are `off`, `standard`, and `strong`.
+- The default is `off` whenever the field is omitted, empty, null, or missing from an older row.
+- The selected value is stored on `jobs.meshiq_adaptive_smoothing` because the worker consumes jobs as immutable conversion requests.
+- The same value is mirrored to `model_revisions.meshiq_adaptive_smoothing` and `revision_file_versions.meshiq_adaptive_smoothing`, matching the existing quality-preset metadata pattern for durable revision history.
+- Existing rows are backward-compatible through default-off schema columns and worker payload normalization.
+- The worker receives the option in `/api/worker/jobs/next` as `meshiqAdaptiveSmoothing`.
+- The worker treats the job value as authoritative for Phase 3A. `off` passes no adaptive flags even if `MESHIQ_ADAPTIVE_MESH=on` is present in the worker environment.
+- `standard` maps to `--adaptive-mesh on --adaptive-mesh-profile standard`.
+- `strong` maps to `--adaptive-mesh on --adaptive-mesh-profile strong`.
+- `manifest.json`, `stats.json`, and `mesh-report.json` record the effective per-upload selection; native XCAF report fields still record the converter's actual adaptive result.
+
+Admin UI:
+
+- The normal Low/Medium/High conversion quality selector stays unchanged.
+- Upload and new-revision dialogs add an Advanced / Experimental MeshIQ adaptive smoothing selector with Off, Standard, and Strong.
+- Off is selected by default on page load.
+- The control is not shown on public viewer pages.
+- Single-request and chunked upload paths both send and preserve the selected value.
+
+Validation and tests:
+
+- Server-side validation rejects values outside `off`, `standard`, and `strong`.
+- Tests cover omitted/default Off, Standard accepted, Strong accepted, invalid value rejection, old/null worker payload fallback to Off, and chunked upload preservation.
+- Worker tests cover no adaptive flags for Off, Standard flags, Strong flags, and Off suppressing adaptive flags even if the old global env is `on`.
+
+Rollout recommendation:
+
+- Do not deploy Phase 3A until local server, worker, converter, web, diff, and compose checks pass.
+- Keep production `.env` without `MESHIQ_ADAPTIVE_MESH` and `MESHIQ_ADAPTIVE_MESH_PROFILE`.
+- First production validation should use a tiny non-sensitive test model with Off, then Standard, then Strong, confirming worker logs, manifest, stats, `mesh-report.json`, admin route, and viewer route.
+- Do not mutate existing public/QR URL structure, production uploaded STEP files, generated GLBs, or SQLite rows without a backup and explicit rollout prompt.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.

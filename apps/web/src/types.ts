@@ -12,6 +12,7 @@ export type ModelRecord = {
   project_id: number | null;
   project_name?: string | null;
   quality?: ConversionQuality | null;
+  meshiq_adaptive_smoothing?: MeshiqAdaptiveSmoothing | null;
   deleted_at: string | null;
   pending_delete_at?: string | null;
   progress_percent?: number | null;
@@ -40,6 +41,7 @@ export type ModelRevisionRecord = {
   revision_sort_order: number;
   issued_date: string;
   quality_preset: string;
+  meshiq_adaptive_smoothing?: MeshiqAdaptiveSmoothing | null;
   status: "uploaded" | "queued" | "processing" | "ready" | "failed" | string;
   is_current: number;
   is_publicly_selectable: number;
@@ -62,6 +64,7 @@ export type RevisionFileVersionRecord = {
   source_path: string;
   display_glb_path: string;
   quality_preset: string;
+  meshiq_adaptive_smoothing?: MeshiqAdaptiveSmoothing | null;
   replacement_reason: string | null;
   is_active: number;
   uploaded_at: string;
@@ -120,6 +123,7 @@ export type JobRecord = {
   status: string;
   message: string | null;
   quality: ConversionQuality;
+  meshiq_adaptive_smoothing?: MeshiqAdaptiveSmoothing | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -129,12 +133,14 @@ export type JobRecord = {
 };
 
 export type ConversionQuality = "low" | "medium" | "high";
+export type MeshiqAdaptiveSmoothing = "off" | "standard" | "strong";
 
 export type RevisionMetadata = {
   revisionLabel?: string;
   issuedDate?: string;
   makeCurrent?: boolean;
   allowPublicSelectable?: boolean;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing;
 };
 
 export type UploadTask = {
@@ -151,6 +157,7 @@ export type UploadTask = {
   projectId: number | null;
   projectName: string | null;
   quality: ConversionQuality;
+  meshiqAdaptiveSmoothing: MeshiqAdaptiveSmoothing;
   modelSlug?: string;
 };
 

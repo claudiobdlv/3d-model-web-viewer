@@ -95,8 +95,10 @@ function requestShutdown(): void {
 async function processJob(job: WorkerJob): Promise<void> {
   const quality = resolveSemanticQuality(job.quality, config.quality);
   const nativePreset = nativeQualityPreset(quality);
+  const meshiqAdaptiveSmoothing = job.meshiqAdaptiveSmoothing ?? "off";
   console.log(`Processing claimed job ${job.id} for ${job.modelSlug}`);
   console.log(`Job quality: ${quality}; native XCAF preset: ${nativePreset}`);
+  console.log(`Job MeshIQ adaptive smoothing: ${meshiqAdaptiveSmoothing}`);
   const controller = new AbortController();
   let monitorStopped = false;
   const monitor = monitorCancellation(job.id, controller, () => monitorStopped);
@@ -116,6 +118,7 @@ async function processJob(job: WorkerJob): Promise<void> {
       xcafConverterBin: config.xcafConverterBin,
       xcafColourMode: config.xcafColourMode,
       quality,
+      meshiqAdaptiveSmoothing,
       glbOptimizationMode: config.glbOptimizationMode,
       signal: controller.signal,
       onProgress: (percent, label) => client.updateProgress(job.id, percent, label),

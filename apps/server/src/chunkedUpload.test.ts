@@ -109,7 +109,8 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
       filename: "box.step",
       sizeBytes: 300, // 300 bytes
       projectId: project.id,
-      quality: "high"
+      quality: "high",
+      meshiqAdaptiveSmoothing: "strong"
     })
   });
   assert.equal(initSuccess.response.status, 201);
@@ -147,6 +148,8 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
   // Verify DB entries exist
   const dbModel = db.prepare("SELECT * FROM models WHERE id = ?").get(model.id) as { slug: string };
   assert.equal(dbModel.slug, model.slug);
+  const dbJob = db.prepare("SELECT * FROM jobs WHERE model_id = ?").get(model.id) as { meshiq_adaptive_smoothing: string };
+  assert.equal(dbJob.meshiq_adaptive_smoothing, "strong");
 
   // 9. Chunked upload can add a revision to an existing model.
   const initRevision = await jsonRequest(`${origin}/api/uploads/chunked/init`, {
@@ -159,6 +162,7 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
       revisionLabel: "B",
       issuedDate: "2026-06-25",
       quality: "low",
+      meshiqAdaptiveSmoothing: "standard",
       makeCurrent: false,
       allowPublicSelectable: false
     })
@@ -181,6 +185,7 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
   assert.equal(revisionComplete.body.revision.is_current, 0);
   assert.equal(revisionComplete.body.revision.is_publicly_selectable, 0);
   assert.equal(revisionComplete.body.job.revision_id, revisionComplete.body.revision.id);
+  assert.equal(revisionComplete.body.job.meshiq_adaptive_smoothing, "standard");
 
   // 10. Test cancellation
   const initCancel = await jsonRequest(`${origin}/api/uploads/chunked/init`, {
