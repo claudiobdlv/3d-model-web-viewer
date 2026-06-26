@@ -88,6 +88,11 @@ async function setupTestDir(dir: string) {
 }
 
 test("config parsing and defaults", () => {
+  const previousAdaptive = process.env.MESHIQ_ADAPTIVE_MESH;
+  const previousProfile = process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
+  delete process.env.MESHIQ_ADAPTIVE_MESH;
+  delete process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
+  try {
   const config = loadConfig([]);
   assert.equal(config.largeStepChunkingMode, "disabled");
   assert.equal(config.largeStepFileSizeThresholdMb, 80);
@@ -98,6 +103,18 @@ test("config parsing and defaults", () => {
   assert.equal(config.largeStepChunkFallbackMode, "fail");
   assert.equal(config.meshiqAdaptiveMesh, "off");
   assert.equal(config.meshiqAdaptiveMeshProfile, "standard");
+  } finally {
+    if (previousAdaptive === undefined) {
+      delete process.env.MESHIQ_ADAPTIVE_MESH;
+    } else {
+      process.env.MESHIQ_ADAPTIVE_MESH = previousAdaptive;
+    }
+    if (previousProfile === undefined) {
+      delete process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
+    } else {
+      process.env.MESHIQ_ADAPTIVE_MESH_PROFILE = previousProfile;
+    }
+  }
 });
 
 test("config validates MeshIQ adaptive mesh mode", () => {
@@ -135,6 +152,10 @@ test("config validates MeshIQ adaptive mesh profile", () => {
 test("disabled mode does not run planner/chunks", async (t) => {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "modelbase-chunk-disabled-"));
   const spawnMock = t.mock.method(child_process, "spawn");
+  const previousAdaptive = process.env.MESHIQ_ADAPTIVE_MESH;
+  const previousProfile = process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
+  process.env.MESHIQ_ADAPTIVE_MESH = "off";
+  delete process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
   
   try {
     const { xcafConverterBin } = await setupTestDir(dir);
@@ -227,6 +248,16 @@ test("disabled mode does not run planner/chunks", async (t) => {
     assert.equal(manifest.adaptiveMesh.profile, "standard");
   } finally {
     await fs.promises.rm(dir, { recursive: true, force: true });
+    if (previousAdaptive === undefined) {
+      delete process.env.MESHIQ_ADAPTIVE_MESH;
+    } else {
+      process.env.MESHIQ_ADAPTIVE_MESH = previousAdaptive;
+    }
+    if (previousProfile === undefined) {
+      delete process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
+    } else {
+      process.env.MESHIQ_ADAPTIVE_MESH_PROFILE = previousProfile;
+    }
   }
 });
 

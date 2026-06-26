@@ -873,6 +873,132 @@ Required comparison matrix:
 
 Validation should capture triangles, vertices, GLB bytes, conversion time, mesh time, smoothed part count, top large-sparse candidates, top tiny-dense warnings, and per-part deflection profile/reason values. Strong is acceptable only if the U843 triangle increase stays below the 10 percent hard stop and ideally below the 5 percent target for both balanced and high. The expected rollout posture after Phase 2B is that `standard` remains the safer candidate for future rollout unless visual validation proves `strong` is materially better without exceeding the U843 budget.
 
+#### Phase 2B validation results
+
+Phase 2B was validated on the EliteDesk in the same isolated worktree using direct binary invocation (not the full application pipeline):
+
+- worktree: `/home/claudio/projects/3d-model-web-viewer-worktrees/meshiq-phase1-runtime`
+- image: `meshiq-phase2b-xcaf:validation`
+- output root: `.tmp/meshiq-runtime-validation-phase2b/`
+- models: `large-curved-tank` and `u843-non-haz-panel`
+
+Production remained unchanged. No production deploy, migration, database write, uploaded STEP mutation, generated GLB mutation, public-link change, QR-link change, service restart, Pi change, Cloudflare change, or unrelated EliteDesk service change was performed.
+
+Validation totals:
+
+| Model | Quality | Adaptive | Profile | Triangles | GLB bytes | Smoothed parts |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| `large-curved-tank` | `balanced` | off | standard | 524 | 66,812 | 0 |
+| `large-curved-tank` | `balanced` | on | standard | 752 | 85,968 | 3 |
+| `large-curved-tank` | `balanced` | on | strong | 1,052 | 111,168 | 3 |
+| `large-curved-tank` | `high` | off | standard | 1,164 | 120,576 | 0 |
+| `large-curved-tank` | `high` | on | standard | 1,548 | 152,860 | 3 |
+| `large-curved-tank` | `high` | on | strong | 2,148 | 203,264 | 3 |
+| `u843-non-haz-panel` | `balanced` | off | standard | 378,952 | 28,923,768 | 0 |
+| `u843-non-haz-panel` | `balanced` | on | standard | 381,564 | 29,143,180 | 26 |
+| `u843-non-haz-panel` | `balanced` | on | strong | 386,340 | 29,544,368 | 26 |
+| `u843-non-haz-panel` | `high` | off | standard | 1,011,054 | 77,932,772 | 0 |
+| `u843-non-haz-panel` | `high` | on | standard | 1,016,882 | 78,422,444 | 26 |
+| `u843-non-haz-panel` | `high` | on | strong | 1,027,628 | 79,325,112 | 26 |
+
+U843 budget assessment:
+
+- `balanced` off to strong: (386,340 - 378,952) / 378,952 = +1.95%. Within the 5 percent target and 10 percent hard stop.
+- `high` off to strong: (1,027,628 - 1,011,054) / 1,011,054 = +1.64%. Within budget.
+
+Both `standard` and `strong` pass the U843 hard stop. The `strong` profile produces meaningfully more triangles on large curved-tank geometry (balanced +100.8 percent, high +84.5 percent) while leaving U843 well within budget. This confirms `strong` provides more value on large sparse curved geometry without over-inflating complex assemblies.
+
+Remaining Phase 2B limitations observed:
+
+- Large-curved-tank results are still not perfectly smooth at `balanced`; cylinder faceting improved but remains visible.
+- Phase 2B used direct binary invocation, not the real upload/worker application pipeline. The full pipeline path (HTTP upload, job queue, worker env, XCAF flags, artifact upload, manifest, admin routes) was not tested until Phase 2C.
+
+#### Phase 2C isolated real pipeline validation
+
+Phase 2C validated the full application pipeline end-to-end in an isolated Docker Compose environment with `MESHIQ_ADAPTIVE_MESH=on` and `MESHIQ_ADAPTIVE_MESH_PROFILE=strong`.
+
+Isolation details:
+
+- worktree: `/home/claudio/projects/3d-model-web-viewer-worktrees/meshiq-phase1-runtime`
+- branch: `feature/meshiq-adaptive-tessellation` at HEAD `7d3e4a34f8ca2c58b88015b4ec301e50d2a682a6`
+- Docker Compose project name: `meshiq-phase2c`
+- compose file: `deploy/docker-compose.phase2c.yml` (standalone, not an override)
+- port: `127.0.0.1:3019:3019` (production uses 3009)
+- data volume: `../data-phase2c:/app/data`
+- key environment variables:
+  - `MESHIQ_ADAPTIVE_MESH=on`
+  - `MESHIQ_ADAPTIVE_MESH_PROFILE=strong`
+  - `CONVERTER_BACKEND=xcaf-baseline`
+  - `GLB_OPTIMIZATION_MODE=meshopt`
+  - `CONVERTER_QUALITY=high`
+
+Production remained unchanged: production main worktree at `/home/claudio/projects/3d-model-web-viewer` on `main` at `d294769a5b2dfe28a8d9daf3acbb3ea58ddc7716`. No production deploy, migration, database write, uploaded STEP mutation, generated GLB mutation, public-link change, QR-link change, service restart, Pi change, Cloudflare change, or unrelated EliteDesk service change was performed.
+
+Pipeline path validated:
+
+1. `POST /api/models` ? HTTP upload accepted, job created, slug assigned
+2. Worker polling ? worker picked up the job, constructed XCAF CLI with `--adaptive-mesh on --adaptive-mesh-profile strong`
+3. Native XCAF conversion ? binary ran with `strong` profile, wrote `display.glb`, `mesh-report.json`, `xcaf-report.json`, `stats.json`, `material-debug.json`
+4. Artifact upload ? worker uploaded all artifacts to the server
+5. `GET /model-files/:slug/mesh-report.json` ? artifact served from storage
+6. `GET /admin/models/:slug/mesh-report.json` ? admin route served the report (requires `Authorization: Basic` against `ADMIN_PASSWORD`)
+7. `GET /3dviewer/:slug` ? viewer route responded and GLB loaded
+8. Manifest adaptive metadata ? both models showed `adaptiveMesh: {enabled: true, mode: "large_sparse_smoothing", profile: "strong"}`
+
+Phase 2C validation totals:
+
+| Model | Input bytes | Quality | Adaptive | Profile | Triangles | Vertices | Parts | Primitives | Smoothed | Raw GLB bytes | Optimized GLB bytes | Meshopt reduction | Conv. time |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `large-curved-tank` | 62,986 | `medium` (balanced) | on | strong | 1,052 | 3,156 | 7 | 7 | 3 | 110,168 | 38,284 | 65.25% | 0.28 s |
+| `u843-non-haz-panel` | 53,241,156 | `medium` (balanced) | on | strong | 386,340 | 1,159,020 | 497 | 497 | 26 | 34,229,764 | 8,404,860 | 75.45% | 70.09 s |
+
+Comparison against Phase 2B direct invocation:
+
+- Triangle counts match exactly for both models: 1,052 and 386,340.
+- Smoothed part counts match exactly: 3 and 26.
+- The real upload/worker pipeline constructs the same XCAF command as Phase 2B direct runs, confirming env-to-CLI flag mapping is correct.
+
+U843 primitive count difference: Phase 2B used a 53,242,141-byte source file, Phase 2C used a 53,241,156-byte source file (985 bytes different, different version). Phase 2B had 202 primitives and Phase 2C had 497. Triangle counts are identical at 386,340, confirming identical geometric quality across the different primitive-split groupings.
+
+Test isolation fix (code change):
+
+Two tests in `apps/worker/src/chunking.test.ts` assumed `MESHIQ_ADAPTIVE_MESH` was unset in the process environment. With `MESHIQ_ADAPTIVE_MESH=on` in the container env, both failed:
+
+- `"config parsing and defaults"`: `assert.equal(config.meshiqAdaptiveMesh, "off")` failed because the env var was inherited.
+- `"disabled mode does not run planner/chunks"`: the spawn mock check expected no `--adaptive-mesh` flag in the command.
+
+Fix: added `process.env` save/restore using try/finally around both tests so they explicitly control the env var regardless of what is set in the container. All 40 worker tests pass after the fix.
+
+Checks completed inside the isolated containers (all against the `meshiq-phase2c` project, not production):
+
+| Check | Result |
+| --- | --- |
+| Worker typecheck | pass (no errors) |
+| Worker build | pass (no errors) |
+| Worker tests | 40/40 pass |
+| Server typecheck | pass (no errors) |
+| Server build | pass (no errors) |
+| Server tests | 15/17 pass (2 pre-existing failures in `assetLibrary.test.ts` and `revisionControllers.test.ts` ? confirmed same in production container) |
+| Converter tests | 0 tests (no test suite for converter binary) |
+
+`strong` profile rollout assessment:
+
+- The `strong` profile is validated through the real upload/worker/XCAF/artifact pipeline.
+- U843 triangle budget impact is 1.95 percent above baseline at `balanced` and 1.64 percent at `high`, both well within the 5 percent target.
+- Large sparse curved parts (tank, long tubes) show meaningful triangle improvement under `strong` versus `standard` without triggering assembly budget concerns.
+- `standard` remains the safer default rollout candidate because it was validated first and has a lighter impact on large assemblies.
+- `strong` is the preferred option for models where large sparse curved geometry (tanks, long pipes, panels) is the dominant visual element and file-size headroom exists.
+- Recommended Phase 2D path: visual inspection of `strong` versus `standard` GLBs in the 3D viewer for both models, followed by a decision on whether to set `strong` as the default or keep `standard` as the conservative rollout default.
+
+Remaining risks after Phase 2C:
+
+- Visual quality comparison between `standard` and `strong` has not been performed in the viewer; GLB numerical correctness was confirmed but visual rendering was not reviewed.
+- Meshopt compression validates structure and reduces size, but visual rendering of the optimized GLB in a real device has not been tested.
+- U843 tessellation cache hits were 0 in Phase 2C due to different source version; cache behaviour under the strong profile on repeated runs was not tested.
+- Tiny-dense coarsening remains unimplemented and report-only; gas-stick and diaphragm-valve density outliers are still present.
+
+
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.
