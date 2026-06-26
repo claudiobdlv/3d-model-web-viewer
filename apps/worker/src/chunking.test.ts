@@ -112,6 +112,36 @@ test("disabled mode does not run planner/chunks", async (t) => {
       summary: { triangles: 10, nodeCount: 5, meshesPrimitivesExported: 1, primitiveCount: 1, materialCount: 1 },
       quality: { preset: "balanced" }
     };
+    const meshReport = {
+      schemaVersion: 1,
+      converterBackend: "xcaf-baseline",
+      sourceFileName: "model.step",
+      quality: {
+        semantic: "medium",
+        nativePreset: "balanced",
+        adaptiveEnabled: false,
+        simplificationEnabled: false,
+        baseLinearDeflection: 0.45,
+        baseAngularDeflection: 0.5,
+        relative: true,
+        parallelMesh: true
+      },
+      assemblyBoundingBox: { min: [0, 0, 0], max: [1, 1, 1], diagonal: 1.732 },
+      totals: {
+        trianglesBeforeSimplification: 10,
+        trianglesAfterSimplification: 10,
+        verticesBeforeSimplification: 30,
+        verticesAfterSimplification: 30,
+        primitiveCount: 1,
+        partCount: 1,
+        meshingTimeMs: 2,
+        simplificationTimeMs: 0
+      },
+      parts: [],
+      rankings: { topTinyDenseParts: [], topLargeSparseParts: [], topSlowMeshParts: [] },
+      warnings: [],
+      recommendations: []
+    };
     
     spawnMock.mock.mockImplementation((cmd: any, args: any) => {
       const child = new MockChildProcess();
@@ -122,6 +152,7 @@ test("disabled mode does not run planner/chunks", async (t) => {
         fs.mkdirSync(outDir, { recursive: true });
         await io.write(glbPath, createChunkFixture("normal"));
         fs.writeFileSync(path.join(outDir, "xcaf-report.json"), JSON.stringify(xcafReport));
+        fs.writeFileSync(path.join(outDir, "mesh-report.json"), JSON.stringify(meshReport));
         fs.writeFileSync(path.join(outDir, "conversion.log"), "normal conversion log");
         child.emit("exit", 0);
       });
@@ -142,6 +173,12 @@ test("disabled mode does not run planner/chunks", async (t) => {
     });
 
     assert.ok(result.displayGlbPath);
+    assert.equal(result.meshReportPath, path.join(dir, "test-model", "mesh-report.json"));
+    const writtenMeshReport = JSON.parse(await fs.promises.readFile(result.meshReportPath!, "utf8"));
+    assert.equal(writtenMeshReport.schemaVersion, 1);
+    assert.equal(writtenMeshReport.converterBackend, "xcaf-baseline");
+    assert.equal(writtenMeshReport.quality.adaptiveEnabled, false);
+    assert.equal(writtenMeshReport.quality.simplificationEnabled, false);
     const calls = spawnMock.mock.calls;
     assert.equal(calls.length, 1);
     assert.ok(!calls[0]!.arguments[0].includes("xcaf-step-planner"));
@@ -149,6 +186,7 @@ test("disabled mode does not run planner/chunks", async (t) => {
     const manifest = JSON.parse(await fs.promises.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.largeStepChunking.mode, "disabled");
     assert.equal(manifest.largeStepChunking.status, "disabled");
+    assert.equal(manifest.artifacts.meshReport, "mesh-report.json");
   } finally {
     await fs.promises.rm(dir, { recursive: true, force: true });
   }
@@ -202,6 +240,8 @@ test("non-STEP does not run chunking", async (t) => {
     const manifest = JSON.parse(await fs.promises.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.largeStepChunking.status, "skipped");
     assert.equal(manifest.largeStepChunking.skipReason, "non-step");
+    assert.equal(manifest.artifacts.meshReport, null);
+    assert.equal(result.meshReportPath, undefined);
   } finally {
     await fs.promises.rm(dir, { recursive: true, force: true });
   }

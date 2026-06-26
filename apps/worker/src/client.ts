@@ -50,6 +50,7 @@ export class WorkerClient {
     materialDebugPath: string;
     conversionLogPath: string;
     xcafReportPath?: string;
+    meshReportPath?: string;
   }): Promise<void> {
     const displayGlbBytes = (await fs.promises.stat(output.displayGlbPath)).size;
     if (displayGlbBytes > this.config.maxModelArtifactBytes) {
@@ -67,6 +68,9 @@ export class WorkerClient {
     form.set("conversion.log", await fileBlob(output.conversionLogPath), "conversion.log");
     if (output.xcafReportPath) {
       form.set("xcaf-report.json", await fileBlob(output.xcafReportPath), "xcaf-report.json");
+    }
+    if (output.meshReportPath) {
+      form.set("mesh-report.json", await fileBlob(output.meshReportPath), "mesh-report.json");
     }
 
     await this.request(`/api/worker/jobs/${jobId}/complete`, {

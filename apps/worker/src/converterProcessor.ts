@@ -62,6 +62,7 @@ export type ConverterProcessorOutput = {
   materialDebugPath: string;
   conversionLogPath: string;
   xcafReportPath?: string;
+  meshReportPath?: string;
 };
 
 export async function convertStepJob(input: ConverterProcessorInput): Promise<ConverterProcessorOutput> {
@@ -752,6 +753,20 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
         const sortedChunkReportPaths = chunks.map((c: any) => path.join(jobDir, `chunk-${c.chunk_index}`, "xcaf-report.json"));
         const rawGlbPath = path.join(jobDir, "display.raw.glb");
         await aggregateReports(sortedChunkReportPaths, aggregatedReportPath, rawGlbPath);
+        const aggregatedMeshReportPath = path.join(jobDir, "mesh-report.json");
+        const sortedChunkMeshReportPaths: string[] = [];
+        for (const chunk of chunks) {
+          const candidate = path.join(jobDir, `chunk-${chunk.chunk_index}`, "mesh-report.json");
+          if (await fileExists(candidate)) {
+            sortedChunkMeshReportPaths.push(candidate);
+          }
+        }
+        let meshReportPath: string | undefined;
+        if (sortedChunkMeshReportPaths.length > 0) {
+          await preserveChunkMeshReports(sortedChunkMeshReportPaths, jobDir);
+          await aggregateMeshReports(sortedChunkMeshReportPaths, aggregatedMeshReportPath);
+          meshReportPath = aggregatedMeshReportPath;
+        }
 
         const displayGlbPath = path.join(jobDir, "display.glb");
         const statsPath = path.join(jobDir, "stats.json");
@@ -860,6 +875,15 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
                 relative: nativeQualityDetails.relative
               },
               converterBackend: input.converterBackend,
+              artifacts: {
+                displayGlb: "display.glb",
+                manifest: "manifest.json",
+                stats: "stats.json",
+                materialDebug: "material-debug.json",
+                xcafReport: "xcaf-report.json",
+                meshReport: meshReportPath ? "mesh-report.json" : null,
+                conversionLog: "conversion.log"
+              },
               optimization: statsObj.optimization,
               largeStepChunking: chunkingStats
             },
@@ -876,7 +900,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           statsPath,
           materialDebugPath,
           conversionLogPath,
-          xcafReportPath: aggregatedReportPath
+          xcafReportPath: aggregatedReportPath,
+          meshReportPath
         };
       }
     }
@@ -916,6 +941,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   const statsPath = path.join(jobDir, "stats.json");
   const materialDebugPath = path.join(jobDir, "material-debug.json");
   const xcafReportPath = path.join(jobDir, "xcaf-report.json");
+  const meshReportPath = path.join(jobDir, "mesh-report.json");
   throwIfAborted(input.signal);
   await input.onProgress?.(70, "Converting - writing raw GLB");
 
@@ -941,6 +967,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       quality: input.quality
     });
   }
+  const hasMeshReport = input.converterBackend === "xcaf-baseline" && (await fileExists(meshReportPath));
 
   await assertFile(statsPath, "converter did not produce stats.json");
   await assertFile(conversionLogPath, "converter did not produce conversion.log");
@@ -1046,6 +1073,15 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           relative: nativeQualityDetails.relative
         },
         converterBackend: input.converterBackend,
+        artifacts: {
+          displayGlb: "display.glb",
+          manifest: "manifest.json",
+          stats: "stats.json",
+          materialDebug: "material-debug.json",
+          xcafReport: input.converterBackend === "xcaf-baseline" ? "xcaf-report.json" : null,
+          meshReport: hasMeshReport ? "mesh-report.json" : null,
+          conversionLog: "conversion.log"
+        },
         optimization: statsObj.optimization,
         largeStepChunking: chunkingStats
       },
@@ -1060,7 +1096,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     statsPath,
     materialDebugPath,
     conversionLogPath,
-    xcafReportPath: input.converterBackend === "xcaf-baseline" ? xcafReportPath : undefined
+    xcafReportPath: input.converterBackend === "xcaf-baseline" ? xcafReportPath : undefined,
+    meshReportPath: hasMeshReport ? meshReportPath : undefined
   };
 }
 
@@ -1375,6 +1412,11 @@ async function assertFile(filePath: string, message: string): Promise<void> {
   }
 }
 
+async function fileExists(filePath: string): Promise<boolean> {
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  return Boolean(stat && stat.isFile() && stat.size > 0);
+}
+
 async function runPlanner(input: {
   plannerBin: string;
   sourcePath: string;
@@ -1510,6 +1552,134 @@ async function aggregateReports(
   }
 
   await fs.promises.writeFile(mergedReportPath, JSON.stringify(merged, null, 2) + "\n");
+}
+
+async function preserveChunkMeshReports(chunkMeshReportPaths: string[], jobDir: string): Promise<void> {
+  const reportsDir = path.join(jobDir, "chunk-mesh-reports");
+  await fs.promises.mkdir(reportsDir, { recursive: true });
+  for (const reportPath of chunkMeshReportPaths) {
+    const match = reportPath.match(/chunk-(\d+)[\\/]+mesh-report\.json$/);
+    const chunkIndex = match ? match[1] : String(chunkMeshReportPaths.indexOf(reportPath));
+    await fs.promises.copyFile(reportPath, path.join(reportsDir, `chunk-${chunkIndex}-mesh-report.json`));
+  }
+}
+
+async function aggregateMeshReports(
+  chunkMeshReportPaths: string[],
+  mergedMeshReportPath: string
+): Promise<void> {
+  const reports = await Promise.all(
+    chunkMeshReportPaths.map(async (reportPath) => JSON.parse(await fs.promises.readFile(reportPath, "utf8")))
+  );
+  const first = reports[0] || {};
+  const parts = reports.flatMap((report) => Array.isArray(report.parts) ? report.parts : []);
+  const totals = {
+    trianglesBeforeSimplification: 0,
+    trianglesAfterSimplification: 0,
+    verticesBeforeSimplification: 0,
+    verticesAfterSimplification: 0,
+    primitiveCount: 0,
+    partCount: 0,
+    meshingTimeMs: 0,
+    simplificationTimeMs: 0
+  };
+  for (const report of reports) {
+    for (const key of Object.keys(totals) as Array<keyof typeof totals>) {
+      totals[key] += Number(report.totals?.[key] ?? 0);
+    }
+  }
+
+  let globalMin = [Infinity, Infinity, Infinity];
+  let globalMax = [-Infinity, -Infinity, -Infinity];
+  let hasBounds = false;
+  for (const part of parts) {
+    const min = part.boundingBox?.min;
+    const max = part.boundingBox?.max;
+    if (Array.isArray(min) && Array.isArray(max) && min.length === 3 && max.length === 3) {
+      for (let i = 0; i < 3; i++) {
+        globalMin[i] = Math.min(globalMin[i], Number(min[i]));
+        globalMax[i] = Math.max(globalMax[i], Number(max[i]));
+      }
+      hasBounds = true;
+    }
+  }
+  const diagonal = hasBounds
+    ? Math.sqrt(
+        Math.pow(globalMax[0] - globalMin[0], 2) +
+        Math.pow(globalMax[1] - globalMin[1], 2) +
+        Math.pow(globalMax[2] - globalMin[2], 2)
+      )
+    : 0;
+  if (!hasBounds) {
+    globalMin = [0, 0, 0];
+    globalMax = [0, 0, 0];
+  }
+
+  const rankPart = (part: any) => ({
+    stableObjectId: part.stableObjectId,
+    displayName: part.displayName,
+    labelPath: part.labelPath,
+    instancePath: part.instancePath,
+    bboxDiagonal: Number(part.boundingBox?.diagonal ?? 0),
+    sizeRatio: Number(part.sizeRatio ?? 0),
+    triangleCount: Number(part.trianglesBeforeSimplification ?? 0),
+    vertexCount: Number(part.verticesBeforeSimplification ?? 0),
+    densityScore: Number(part.densityScore ?? 0),
+    meshingTimeMs: part.meshingTimeMs ?? null
+  });
+  const topTinyDenseParts = [...parts]
+    .sort((a, b) => {
+      const scoreA = (1 / Math.max(Number(a.sizeRatio ?? 0), 0.000001)) *
+        Math.max(Number(a.densityScore ?? 0), 0) *
+        Math.log1p(Number(a.trianglesBeforeSimplification ?? 0));
+      const scoreB = (1 / Math.max(Number(b.sizeRatio ?? 0), 0.000001)) *
+        Math.max(Number(b.densityScore ?? 0), 0) *
+        Math.log1p(Number(b.trianglesBeforeSimplification ?? 0));
+      return scoreB - scoreA;
+    })
+    .slice(0, 20)
+    .map(rankPart);
+  const topLargeSparseParts = [...parts]
+    .sort((a, b) => {
+      const scoreA = Number(a.sizeRatio ?? 0) /
+        Math.max(Number(a.densityScore ?? 0), 0.000001) /
+        Math.max(1, Math.log1p(Number(a.trianglesBeforeSimplification ?? 0)));
+      const scoreB = Number(b.sizeRatio ?? 0) /
+        Math.max(Number(b.densityScore ?? 0), 0.000001) /
+        Math.max(1, Math.log1p(Number(b.trianglesBeforeSimplification ?? 0)));
+      return scoreB - scoreA;
+    })
+    .slice(0, 20)
+    .map(rankPart);
+  const topSlowMeshParts = [...parts]
+    .sort((a, b) => Number(b.meshingTimeMs ?? -1) - Number(a.meshingTimeMs ?? -1))
+    .slice(0, 20)
+    .map(rankPart);
+
+  const merged = {
+    schemaVersion: 1,
+    converterBackend: first.converterBackend ?? "xcaf-baseline",
+    sourceFileName: first.sourceFileName,
+    quality: first.quality,
+    assemblyBoundingBox: {
+      min: globalMin,
+      max: globalMax,
+      diagonal
+    },
+    totals,
+    parts,
+    rankings: {
+      topTinyDenseParts,
+      topLargeSparseParts,
+      topSlowMeshParts
+    },
+    warnings: [
+      "Aggregated from chunk-level mesh-report.json files; chunk reports are preserved under chunk-mesh-reports/.",
+      ...reports.flatMap((report) => Array.isArray(report.warnings) ? report.warnings : [])
+    ],
+    recommendations: first.recommendations ?? []
+  };
+  await fs.promises.writeFile(mergedMeshReportPath, JSON.stringify(merged, null, 2) + "\n");
 }
 
 async function cleanUpChunks(chunks: any[], jobDir: string): Promise<void> {

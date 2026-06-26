@@ -34,6 +34,16 @@ test("public shares expose only the token-scoped ready GLB and revoke safely", a
   });
   assert.equal(upload.status, 201);
   const model = await upload.json() as { id: number; slug: string; current_revision_id: number };
+  const meshReportPath = path.join(dataDir, "models", model.slug, "revisions", String(model.current_revision_id), "mesh-report.json");
+  fs.mkdirSync(path.dirname(meshReportPath), { recursive: true });
+  fs.writeFileSync(meshReportPath, JSON.stringify({ schemaVersion: 1, converterBackend: "xcaf-baseline" }));
+  const meshReport = await fetch(`${origin}/admin/models/${model.slug}/mesh-report.json`, { headers: { authorization } });
+  assert.equal(meshReport.status, 200);
+  assert.equal((await meshReport.json() as any).schemaVersion, 1);
+  assert.equal(
+    (await fetch(`${origin}/model-files/${model.slug}/mesh-report.json`, { headers: { authorization } })).status,
+    200
+  );
 
   const legacyToken = "L".repeat(43);
   db.prepare(

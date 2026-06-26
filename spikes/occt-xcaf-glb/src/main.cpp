@@ -210,6 +210,7 @@ struct MeshPrimitive {
   std::vector<float> positions;
   std::vector<float> normals;
   std::vector<std::uint32_t> indices;
+  double meshingTimeMs = -1.0;
   bool isReused = false;
   void* tshapePtr = nullptr;
   gp_Trsf transform;
@@ -243,6 +244,7 @@ struct CachedGeometry {
   std::array<float, 3> min;
   std::array<float, 3> max;
   int faceCount = 0;
+  double meshBuildTimeMs = -1.0;
 };
 
 static std::map<ReuseKey, CachedGeometry> reuseCache;
@@ -376,6 +378,12 @@ struct RepeatedComponentGroup {
   std::uint64_t triangles = 0;
   bool keywordMatch = false;
   std::vector<std::size_t> primitiveIndices;
+};
+
+struct MeshReportRankingEntry {
+  std::size_t index = 0;
+  double sizeRatio = 0.0;
+  double densityScore = 0.0;
 };
 
 
@@ -3039,14 +3047,15 @@ void tessellateLabel(
         cached.indices = localPrim.indices;
         cached.min = localPrim.min;
         cached.max = localPrim.max;
+        const auto meshFinished = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(meshFinished - meshStarted).count();
+        cached.meshBuildTimeMs = ms;
         
         reuseCache[key] = cached;
         hasCached = true;
         stats.shapesTessellated++;
         stats.uniqueStoredTriangles += cached.indices.size() / 3;
-        
-        const auto meshFinished = std::chrono::steady_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(meshFinished - meshStarted).count();
+
         logLine("[Mesh Cache Build] Meshed shape in local coordinates: elapsedMs=" + std::to_string(ms));
       } catch (const Standard_Failure& failure) {
         logLine("[Mesh Cache Build] Local tessellation failed for " + labelPath + ": " + failure.GetMessageString());
@@ -3056,6 +3065,7 @@ void tessellateLabel(
     }
   }
 
+  double meshingTimeMs = -1.0;
   if (!reuseSafe) {
     meshedCount++;
     logLine("Meshing shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
@@ -3071,6 +3081,7 @@ void tessellateLabel(
       mesh.Perform();
       const auto meshFinished = std::chrono::steady_clock::now();
       double ms = std::chrono::duration<double, std::milli>(meshFinished - meshStarted).count();
+      meshingTimeMs = ms;
       
       logLine("Meshed shape " + std::to_string(meshedCount) + " / " + std::to_string(totalShapesToMesh) +
               ": elapsedMs=" + std::to_string(ms));
@@ -3318,6 +3329,9 @@ void tessellateLabel(
       primitive.stableObjectId = selectableId + "/material/" + colourKey(colour) +
           stableTopologySuffix;
       primitive.colour = colour;
+      if (!reuseSafe) {
+        primitive.meshingTimeMs = meshingTimeMs;
+      }
       primitives.push_back(std::move(primitive));
       const std::size_t index = primitives.size() - 1;
       primitiveByKey[key] = index;
@@ -3354,6 +3368,7 @@ void tessellateLabel(
       primitive.min = cached.min;
       primitive.max = cached.max;
       primitive.faceCount = cached.faceCount;
+      primitive.meshingTimeMs = -1.0;
       computeWorldBounds(primitive.min, primitive.max, primitive.transform, primitive.worldMin, primitive.worldMax);
 
       // Perform transform audit for the first 50 instances
@@ -4209,6 +4224,234 @@ std::vector<FinalColourAudit> buildFinalColourAudit(
   return result;
 }
 
+std::string semanticQualityForNativePreset(const Quality& quality) {
+  if (quality.name == "preview") return "low";
+  if (quality.name == "balanced") return "medium";
+  if (quality.name == "high") return "high";
+  return quality.name;
+}
+
+std::uint64_t primitiveTriangleCount(const MeshPrimitive& primitive) {
+  return primitive.indices.size() / 3;
+}
+
+std::uint64_t primitiveVertexCount(const MeshPrimitive& primitive) {
+  return primitive.positions.size() / 3;
+}
+
+double safeAssemblyDiagonal(const std::array<float, 3>& min, const std::array<float, 3>& max) {
+  if (min[0] == std::numeric_limits<float>::max() || max[0] == std::numeric_limits<float>::lowest()) {
+    return 0.0;
+  }
+  const double dx = static_cast<double>(max[0]) - min[0];
+  const double dy = static_cast<double>(max[1]) - min[1];
+  const double dz = static_cast<double>(max[2]) - min[2];
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+void writeNullableMs(std::ostream& out, double value) {
+  if (value >= 0.0) {
+    out << value;
+  } else {
+    out << "null";
+  }
+}
+
+void writeMeshReportRankingEntry(
+    std::ostream& out,
+    const MeshPrimitive& primitive,
+    const double sizeRatio,
+    const double densityScore,
+    const bool includeMeshingTime) {
+  out << "{";
+  out << "\"stableObjectId\": "; writeString(out, primitive.stableObjectId); out << ", ";
+  out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+  out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
+  out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+  out << "\"bboxDiagonal\": " << worldBboxDiagonal(primitive) << ", ";
+  out << "\"sizeRatio\": " << sizeRatio << ", ";
+  out << "\"triangleCount\": " << primitiveTriangleCount(primitive) << ", ";
+  out << "\"vertexCount\": " << primitiveVertexCount(primitive) << ", ";
+  out << "\"densityScore\": " << densityScore;
+  if (includeMeshingTime) {
+    out << ", \"meshingTimeMs\": ";
+    writeNullableMs(out, primitive.meshingTimeMs);
+  }
+  out << "}";
+}
+
+void writeMeshReport(
+    const std::filesystem::path& outputPath,
+    const std::string& inputPath,
+    const Quality& quality,
+    const CliOptions& cliOptions,
+    const Stats& stats,
+    const std::vector<MeshPrimitive>& primitives) {
+  std::ofstream out(outputPath);
+  if (!out) {
+    throw std::runtime_error("Could not open mesh report path for writing: " + outputPath.string());
+  }
+
+  out << std::fixed << std::setprecision(6);
+  std::array<float, 3> globalMin = emptyMinBounds();
+  std::array<float, 3> globalMax = emptyMaxBounds();
+  for (const auto& primitive : primitives) {
+    for (int axis = 0; axis < 3; ++axis) {
+      globalMin[axis] = std::min(globalMin[axis], primitive.worldMin[axis]);
+      globalMax[axis] = std::max(globalMax[axis], primitive.worldMax[axis]);
+    }
+  }
+  const double assemblyDiagonal = safeAssemblyDiagonal(globalMin, globalMax);
+  const double densityEpsilon = 1e-9;
+
+  std::uint64_t vertexTotal = 0;
+  std::uint64_t triangleTotal = 0;
+  double meshingTimeTotalMs = 0.0;
+  bool hasNullMeshingTime = false;
+  std::vector<MeshReportRankingEntry> rankingEntries;
+  rankingEntries.reserve(primitives.size());
+
+  for (std::size_t i = 0; i < primitives.size(); ++i) {
+    const auto& primitive = primitives[i];
+    const auto triangles = primitiveTriangleCount(primitive);
+    const auto vertices = primitiveVertexCount(primitive);
+    const double bboxDiag = worldBboxDiagonal(primitive);
+    const double sizeRatio = assemblyDiagonal > densityEpsilon ? bboxDiag / assemblyDiagonal : 0.0;
+    const double densityScore = static_cast<double>(triangles) / std::max(bboxDiag, densityEpsilon);
+    triangleTotal += triangles;
+    vertexTotal += vertices;
+    if (primitive.meshingTimeMs >= 0.0) {
+      meshingTimeTotalMs += primitive.meshingTimeMs;
+    } else {
+      hasNullMeshingTime = true;
+    }
+    rankingEntries.push_back({i, sizeRatio, densityScore});
+  }
+
+  auto tinyDense = rankingEntries;
+  std::sort(tinyDense.begin(), tinyDense.end(), [&](const auto& a, const auto& b) {
+    const auto& pa = primitives[a.index];
+    const auto& pb = primitives[b.index];
+    const double scoreA = (1.0 / std::max(a.sizeRatio, 0.000001)) * std::max(a.densityScore, 0.0) * std::log1p(static_cast<double>(primitiveTriangleCount(pa)));
+    const double scoreB = (1.0 / std::max(b.sizeRatio, 0.000001)) * std::max(b.densityScore, 0.0) * std::log1p(static_cast<double>(primitiveTriangleCount(pb)));
+    return scoreA > scoreB;
+  });
+
+  auto largeSparse = rankingEntries;
+  std::sort(largeSparse.begin(), largeSparse.end(), [&](const auto& a, const auto& b) {
+    const auto& pa = primitives[a.index];
+    const auto& pb = primitives[b.index];
+    const double scoreA = a.sizeRatio / std::max(a.densityScore, 0.000001) / std::max(1.0, std::log1p(static_cast<double>(primitiveTriangleCount(pa))));
+    const double scoreB = b.sizeRatio / std::max(b.densityScore, 0.000001) / std::max(1.0, std::log1p(static_cast<double>(primitiveTriangleCount(pb))));
+    return scoreA > scoreB;
+  });
+
+  auto slowMesh = rankingEntries;
+  std::sort(slowMesh.begin(), slowMesh.end(), [&](const auto& a, const auto& b) {
+    return primitives[a.index].meshingTimeMs > primitives[b.index].meshingTimeMs;
+  });
+
+  out << "{\n";
+  out << "  \"schemaVersion\": 1,\n";
+  out << "  \"converterBackend\": \"xcaf-baseline\",\n";
+  out << "  \"sourceFileName\": "; writeString(out, std::filesystem::path(inputPath).filename().string()); out << ",\n";
+  out << "  \"quality\": {\n";
+  out << "    \"semantic\": "; writeString(out, semanticQualityForNativePreset(quality)); out << ",\n";
+  out << "    \"nativePreset\": "; writeString(out, quality.name); out << ",\n";
+  out << "    \"adaptiveEnabled\": false,\n";
+  out << "    \"simplificationEnabled\": false,\n";
+  out << "    \"baseLinearDeflection\": " << quality.linearDeflection << ",\n";
+  out << "    \"baseAngularDeflection\": " << quality.angularDeflection << ",\n";
+  out << "    \"relative\": " << (quality.relative ? "true" : "false") << ",\n";
+  out << "    \"parallelMesh\": " << (cliOptions.parallelMesh ? "true" : "false") << "\n";
+  out << "  },\n";
+  out << "  \"assemblyBoundingBox\": {\"min\": ";
+  writeVec3(out, assemblyDiagonal > 0.0 ? globalMin : std::array<float, 3>{0, 0, 0});
+  out << ", \"max\": ";
+  writeVec3(out, assemblyDiagonal > 0.0 ? globalMax : std::array<float, 3>{0, 0, 0});
+  out << ", \"diagonal\": " << assemblyDiagonal << "},\n";
+  out << "  \"totals\": {\n";
+  out << "    \"trianglesBeforeSimplification\": " << triangleTotal << ",\n";
+  out << "    \"trianglesAfterSimplification\": " << triangleTotal << ",\n";
+  out << "    \"verticesBeforeSimplification\": " << vertexTotal << ",\n";
+  out << "    \"verticesAfterSimplification\": " << vertexTotal << ",\n";
+  out << "    \"primitiveCount\": " << primitives.size() << ",\n";
+  out << "    \"partCount\": " << primitives.size() << ",\n";
+  out << "    \"meshingTimeMs\": " << meshingTimeTotalMs << ",\n";
+  out << "    \"simplificationTimeMs\": 0\n";
+  out << "  },\n";
+  out << "  \"parts\": [\n";
+  for (std::size_t i = 0; i < primitives.size(); ++i) {
+    const auto& primitive = primitives[i];
+    const double bboxDiag = worldBboxDiagonal(primitive);
+    const double sizeRatio = assemblyDiagonal > densityEpsilon ? bboxDiag / assemblyDiagonal : 0.0;
+    const double densityScore = static_cast<double>(primitiveTriangleCount(primitive)) / std::max(bboxDiag, densityEpsilon);
+    out << "    {";
+    out << "\"stableObjectId\": "; writeString(out, primitive.stableObjectId); out << ", ";
+    out << "\"labelPath\": "; writeString(out, primitive.labelPath); out << ", ";
+    out << "\"instancePath\": "; writeString(out, primitive.instancePath); out << ", ";
+    out << "\"displayName\": "; writeString(out, primitive.displayName); out << ", ";
+    out << "\"materialSource\": "; writeString(out, primitive.materialSource); out << ", ";
+    out << "\"colourSource\": "; writeString(out, primitive.colourSource); out << ", ";
+    out << "\"boundingBox\": {\"min\": "; writeVec3(out, primitive.worldMin); out << ", \"max\": "; writeVec3(out, primitive.worldMax); out << ", \"diagonal\": " << bboxDiag << "}, ";
+    out << "\"sizeRatio\": " << sizeRatio << ", ";
+    out << "\"faceCount\": " << primitive.faceCount << ", ";
+    out << "\"primitiveCount\": 1, ";
+    out << "\"trianglesBeforeSimplification\": " << primitiveTriangleCount(primitive) << ", ";
+    out << "\"trianglesAfterSimplification\": " << primitiveTriangleCount(primitive) << ", ";
+    out << "\"verticesBeforeSimplification\": " << primitiveVertexCount(primitive) << ", ";
+    out << "\"verticesAfterSimplification\": " << primitiveVertexCount(primitive) << ", ";
+    out << "\"densityScore\": " << densityScore << ", ";
+    out << "\"meshingTimeMs\": "; writeNullableMs(out, primitive.meshingTimeMs); out << ", ";
+    out << "\"simplificationRatio\": 0, ";
+    out << "\"deflection\": {\"linear\": " << quality.linearDeflection << ", \"angular\": " << quality.angularDeflection << ", \"relative\": " << (quality.relative ? "true" : "false") << ", \"reason\": \"baseline_global_preset\"}, ";
+    out << "\"warnings\": [";
+    bool firstWarning = true;
+    if (primitive.isReused) {
+      writeString(out, "meshingTimeMs is null because this primitive reused cached prototype geometry");
+      firstWarning = false;
+    }
+    if (bboxDiag <= densityEpsilon) {
+      if (!firstWarning) out << ", ";
+      writeString(out, "zero_or_near_zero_bounding_box_diagonal");
+    }
+    out << "]";
+    out << "}" << (i + 1 < primitives.size() ? "," : "") << "\n";
+  }
+  out << "  ],\n";
+  out << "  \"rankings\": {\n";
+  auto writeRanking = [&](const std::vector<MeshReportRankingEntry>& entries, const bool includeMeshingTime) {
+    const std::size_t limit = std::min<std::size_t>(20, entries.size());
+    out << "[\n";
+    for (std::size_t i = 0; i < limit; ++i) {
+      const auto& entry = entries[i];
+      out << "      ";
+      writeMeshReportRankingEntry(out, primitives[entry.index], entry.sizeRatio, entry.densityScore, includeMeshingTime);
+      out << (i + 1 < limit ? "," : "") << "\n";
+    }
+    out << "    ]";
+  };
+  out << "    \"topTinyDenseParts\": "; writeRanking(tinyDense, false); out << ",\n";
+  out << "    \"topLargeSparseParts\": "; writeRanking(largeSparse, false); out << ",\n";
+  out << "    \"topSlowMeshParts\": "; writeRanking(slowMesh, true); out << "\n";
+  out << "  },\n";
+  out << "  \"warnings\": [";
+  bool firstWarning = true;
+  if (hasNullMeshingTime) {
+    writeString(out, "Some per-part meshingTimeMs values are null because mesh-reuse cache timing cannot be attributed reliably to each reused instance.");
+    firstWarning = false;
+  }
+  if (stats.failedShapes > 0) {
+    if (!firstWarning) out << ", ";
+    writeString(out, "One or more shapes failed tessellation; see conversion.log for details.");
+  }
+  out << "],\n";
+  out << "  \"recommendations\": [";
+  writeString(out, "Use topTinyDenseParts and topLargeSparseParts as diagnostic candidates only; Phase 1 does not change tessellation.");
+  out << "]\n";
+  out << "}\n";
+}
+
 void writeReport(
     const std::filesystem::path& outputPath,
     const std::string& inputPath,
@@ -4268,6 +4511,7 @@ void writeReport(
   out << "  \"outputs\": {\n";
   out << "    \"glb\": \"display.glb\",\n";
   out << "    \"report\": \"xcaf-report.json\",\n";
+  out << "    \"meshReport\": \"mesh-report.json\",\n";
   out << "    \"log\": \"conversion.log\"\n";
   out << "  },\n";
   out << "  \"quality\": {\n";
@@ -5764,6 +6008,9 @@ int main(int argc, char** argv) {
 
     logLine("Writing xcaf-report.json");
     writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, colourMode, cliOptions, stats, rawStepStyles.colourAudit(), primitives, glbSize);
+
+    logLine("Writing mesh-report.json");
+    writeMeshReport(outputDir / "mesh-report.json", inputPath, quality, cliOptions, stats, primitives);
 
     logLine("Writing material-style-profile.json");
     writeMaterialStyleProfile(outputDir / "material-style-profile.json", rawStepStyles, stats);

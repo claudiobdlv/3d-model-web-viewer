@@ -164,6 +164,8 @@ workerRouter.post(
     { name: "materialDebug", maxCount: 1 },
     { name: "xcaf-report.json", maxCount: 1 },
     { name: "xcafReport", maxCount: 1 },
+    { name: "mesh-report.json", maxCount: 1 },
+    { name: "meshReport", maxCount: 1 },
     { name: "conversion.log", maxCount: 1 },
     { name: "conversionLog", maxCount: 1 }
   ]),
@@ -215,6 +217,11 @@ workerRouter.post(
     const xcafReport = firstFile(files, "xcaf-report.json", "xcafReport");
     if (xcafReport) {
       fs.writeFileSync(path.join(modelDir, "xcaf-report.json"), xcafReport.buffer);
+    }
+
+    const meshReport = firstFile(files, "mesh-report.json", "meshReport");
+    if (meshReport) {
+      fs.writeFileSync(path.join(modelDir, "mesh-report.json"), meshReport.buffer);
     }
 
     const conversionLog = firstFile(files, "conversion.log", "conversionLog");

@@ -529,6 +529,41 @@ For each model and quality:
 - Add tests for schema shape and existence.
 - Do not change tessellation behavior.
 
+#### Phase 1 implementation
+
+The native XCAF converter now writes `mesh-report.json` beside `display.glb`, `xcaf-report.json`, `conversion-profile.json`, and `conversion.log`. The report is schema-versioned with `schemaVersion: 1` and `converterBackend: "xcaf-baseline"`.
+
+The Phase 1 quality block records the current baseline preset only:
+
+- semantic quality inferred from the native preset
+- native preset name
+- `adaptiveEnabled: false`
+- `simplificationEnabled: false`
+- base linear and angular deflection
+- relative deflection mode
+- parallel mesh mode
+
+Per-part entries are generated from the same `MeshPrimitive` objects already used to write `display.glb`; no extra expensive geometry scan is introduced. Each part includes stable object id, label path, instance path, display name, material source, colour source, world bounding box, size ratio against the assembly diagonal, face count, primitive count, triangles and vertices before/after simplification, density score, optional meshing time, simplification ratio `0`, baseline deflection details, and warnings.
+
+The report produces three diagnostic rankings capped at 20 entries each:
+
+- `topTinyDenseParts`: candidates with small size ratio and high triangle/density score
+- `topLargeSparseParts`: candidates with large size ratio and low density relative to their bounds
+- `topSlowMeshParts`: highest structured meshing times where timing can be attributed
+
+Structured meshing time is recorded for fresh render-shape meshing. For reused prototype/cache instances, per-part `meshingTimeMs` is `null` because the cache build time cannot be attributed reliably to every reused instance.
+
+The worker treats `mesh-report.json` as an optional native artifact. It is returned from the processor, listed in `manifest.json` under `artifacts.meshReport` when present, uploaded by the worker client, received by the server worker completion route, and exposed through:
+
+- `/model-files/:slug/mesh-report.json`
+- `/admin/models/:slug/mesh-report.json`
+
+Older native outputs and the `occt-js` path still succeed when `mesh-report.json` is absent.
+
+For chunked conversion, chunk-level `mesh-report.json` files are preserved under `chunk-mesh-reports/` before chunk cleanup. When chunk reports exist, the worker also writes an aggregate top-level `mesh-report.json` by summing totals, concatenating parts, recomputing assembly bounds, and rebuilding the three rankings. The aggregate is diagnostic only; it does not alter merged GLB generation.
+
+Deferred work remains unchanged: adaptive tessellation, direct `IMeshTools_Parameters` use, simplification, admin visual summaries, benchmark tuning, and production rollout are Phase 2+ tasks.
+
 ### Phase 2: Adaptive OCCT tessellation behind a flag
 
 - Add CLI flag such as `--adaptive-mesh on|off`.
