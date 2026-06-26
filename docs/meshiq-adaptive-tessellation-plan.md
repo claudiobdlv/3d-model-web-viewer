@@ -564,6 +564,57 @@ For chunked conversion, chunk-level `mesh-report.json` files are preserved under
 
 Deferred work remains unchanged: adaptive tessellation, direct `IMeshTools_Parameters` use, simplification, admin visual summaries, benchmark tuning, and production rollout are Phase 2+ tasks.
 
+#### Phase 1B native validation
+
+Phase 1B was validated on the EliteDesk in an isolated worktree:
+
+- worktree: `/home/claudio/projects/3d-model-web-viewer-worktrees/meshiq-phase1-runtime`
+- commit: `4a7f41c6423553b33bd357575e192087050e203d`
+- native image: `meshiq-phase1-xcaf:validation`, built from `spikes/occt-xcaf-glb` in the isolated worktree
+- output root: `.tmp/meshiq-runtime-validation/`
+
+Production stayed on `main` at `d294769a5b2dfe28a8d9daf3acbb3ea58ddc7716`; no production deploy, migration, database write, uploaded STEP mutation, generated GLB mutation, public-link change, QR-link change, or service restart was performed.
+
+Validated models were read by reference from existing EliteDesk storage and written only to isolated temporary output folders:
+
+| Model | Input size | Qualities | Output artifacts |
+| --- | ---: | --- | --- |
+| `test1` tube sample | 63,673 bytes | `balanced`, `high` | `display.glb`, `xcaf-report.json`, `mesh-report.json`, `conversion-profile.json`, `conversion.log` |
+| `screw` small fastener | 83,057 bytes | `balanced`, `high` | `display.glb`, `xcaf-report.json`, `mesh-report.json`, `conversion-profile.json`, `conversion.log` |
+| `u843_cda_panel` small assembly | 3,598,666 bytes | `balanced`, `high` | `display.glb`, `xcaf-report.json`, `mesh-report.json`, `conversion-profile.json`, `conversion.log` |
+
+Baseline totals:
+
+| Model | Quality | Triangles | Vertices | Parts | Primitives | Assembly bbox diagonal | Mesh time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `test1` | `balanced` | 628 | 1,884 | 2 | 2 | 858.859 | 16.675 ms |
+| `test1` | `high` | 1,700 | 5,100 | 2 | 2 | 859.042 | 26.883 ms |
+| `screw` | `balanced` | 794 | 2,382 | 1 | 1 | 57.746 | 15.171 ms |
+| `screw` | `high` | 2,582 | 7,746 | 1 | 1 | 57.756 | 23.082 ms |
+| `u843_cda_panel` | `balanced` | 36,630 | 109,890 | 35 | 35 | 341.638 | 1,027.185 ms |
+| `u843_cda_panel` | `high` | 96,534 | 289,602 | 35 | 35 | 341.638 | 1,235.097 ms |
+
+`mesh-report.json` parsed successfully for every run. `display.glb` was present and non-empty for every run. `mesh-report.json` matched `xcaf-report.json` for triangles, vertices, primitive count, and global/assembly bounding box in every run. The only practical count difference is expected: `xcaf-report.json` also records `shapesTessellated`, while `mesh-report.json` reports emitted part/primitive rows after material/subshape splitting.
+
+The report rankings are useful on the 35-part U843 CDA panel. At `balanced`, the highest tiny-dense candidates were the Festo regulator subshapes and 3D printed brackets. At `high`, the 3D printed brackets rose to the top tiny-dense positions at 4,096 triangles each with size ratio around `0.132`, while Festo regulator subshapes remained heavy. The largest sparse candidates were the large unnamed panel/body, the two-regulator SS bracket, and larger bracket bodies; these are plausible candidates for tighter large-shape angular control rather than simplification. The slowest mesh candidates were the Festo regulator subshapes, especially the two regulator instances, with structured per-shape timings around `125-182 ms`.
+
+The simple one-part and two-part samples are useful for smoke validation but noisy for ranking logic because every part necessarily appears in every ranking. The `test1` tube sample shows names and paths are identifiable enough (`COPPER TUBE - 1/2"` and `COPPER TUBE - 3"`). The screw sample proves the report works on a one-part model but is not useful for threshold tuning by itself.
+
+Limitations observed:
+
+- Reused or split primitives can share the same meshing time attribution, so slow rankings should be treated as shape-level diagnostics, not exact per-material primitive timings.
+- `topLargeSparseParts` needs a minimum size-ratio gate in Phase 2 tuning; otherwise small smoke models naturally classify their only part as both tiny-dense and large-sparse.
+- No simplification was enabled, so before/after triangle and vertex counts intentionally match and simplification ratio remains `0`.
+- No adaptive meshing was enabled, so all deflection reasons remain `baseline_global_preset`.
+
+Phase 2 threshold guidance from the validation set:
+
+- For `medium`/`balanced`, start adaptive tightening for large sparse parts at `sizeRatio >= 0.40`, with a watch band from `0.25` to `0.40`. The U843 large unnamed body (`sizeRatio 0.934`, 556 triangles) and SS bracket (`sizeRatio 0.444`, 772 triangles) are good proof cases.
+- Treat tiny-dense candidates as simplification or coarsening candidates only when `sizeRatio <= 0.16` and `triangles >= 1,200` for medium. This catches Festo regulator subshapes and printed brackets while avoiding trivial tube/screw smoke noise.
+- For `high`, raise the tiny-dense triangle threshold to about `3,000` and keep the size-ratio cutoff near `0.16`. This catches 4,096-triangle printed brackets and 3,712-triangle regulator subshapes without overreacting to ordinary small hardware.
+- Treat slow-mesh warnings as useful above about `100 ms` per structured meshing event on this hardware. The Festo regulator entries are clear outliers; most other parts were below `50 ms`.
+- Keep adaptive and simplification flags off until the same report comparison is repeated on a larger U843 PCW skid or U843 Non-Haz Panel and at least one large curved cylinder/tube model.
+
 ### Phase 2: Adaptive OCCT tessellation behind a flag
 
 - Add CLI flag such as `--adaptive-mesh on|off`.
