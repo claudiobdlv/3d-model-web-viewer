@@ -615,6 +615,77 @@ Phase 2 threshold guidance from the validation set:
 - Treat slow-mesh warnings as useful above about `100 ms` per structured meshing event on this hardware. The Festo regulator entries are clear outliers; most other parts were below `50 ms`.
 - Keep adaptive and simplification flags off until the same report comparison is repeated on a larger U843 PCW skid or U843 Non-Haz Panel and at least one large curved cylinder/tube model.
 
+#### Phase 1C larger-model and curved-surface validation
+
+Phase 1C was validated on the EliteDesk in the same isolated worktree, without changing production conversion behavior:
+
+- worktree: `/home/claudio/projects/3d-model-web-viewer-worktrees/meshiq-phase1-runtime`
+- commit: `a6ee3528051c5ee4dd9efdf10092d88d1c3506b1`
+- native image: `meshiq-phase1c-xcaf:validation`, built from the isolated worktree and labelled with the same commit revision
+- output root: `.tmp/meshiq-runtime-validation-phase1c/`
+
+Production remained on `main` at `d294769a5b2dfe28a8d9daf3acbb3ea58ddc7716`. No production deploy, migration, database write, uploaded STEP mutation, generated GLB mutation, public-link change, QR-link change, service restart, Pi change, Cloudflare change, or unrelated EliteDesk service change was performed.
+
+Validated inputs:
+
+| Model | Source | Input size | Qualities | Output artifacts |
+| --- | --- | ---: | --- | --- |
+| `u843-non-haz-panel` | Existing EliteDesk production upload, read-only bind mount; full path redacted | 53,241,156 bytes | `balanced`, `high` | `display.glb`, `xcaf-report.json`, `mesh-report.json`, `conversion-profile.json`, `conversion.log` |
+| `large-curved-tank` | Synthetic non-sensitive STEP generated under the isolated `.tmp` output tree with OpenCascade primitives: one large horizontal tank, long pipes, vertical nozzles, and support blocks | 62,986 bytes | `balanced`, `high` | `display.glb`, `xcaf-report.json`, `mesh-report.json`, `conversion-profile.json`, `conversion.log` |
+
+Baseline totals:
+
+| Model | Quality | Triangles | Vertices | Parts | Primitives | Assembly bbox diagonal | GLB size | Conversion time | Mesh time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `u843-non-haz-panel` | `balanced` | 378,952 | 1,136,856 | 202 | 202 | 1,108.913 | 32,423,364 bytes | 69.214 s | 8,532.354 ms |
+| `u843-non-haz-panel` | `high` | 1,011,048 | 3,033,144 | 202 | 202 | 1,108.913 | 85,519,972 bytes | 71.192 s | 11,064.101 ms |
+| `large-curved-tank` | `balanced` | 524 | 1,572 | 7 | 7 | 6,847.025 | 65,868 bytes | 0.071 s | 15.052 ms |
+| `large-curved-tank` | `high` | 1,164 | 3,492 | 7 | 7 | 6,847.792 | 119,632 bytes | 0.075 s | 20.167 ms |
+
+`display.glb` was present and non-empty for every run, and every `mesh-report.json` parsed successfully. `mesh-report.json` agreed with `xcaf-report.json` for triangle count, vertex count, primitive count, and GLB byte count in all four runs.
+
+Tiny-dense findings:
+
+- On `u843-non-haz-panel`, the rankings are useful and stable. The top tiny-dense entries are gas sticks and diaphragm valves rather than random small hardware. In `balanced`, the largest outlier was `GTC UHP MINI GAS STICK, MGS-02-30 + 1/4" MALE VCR X 1/4" FEMALE VCR` at `sizeRatio 0.176`, `47,970` triangles, and density `245.911`. In `high`, the same part rose to `126,928` triangles and density `650.677`.
+- Other repeated U843 valve candidates include `GTC K30 DIAPHRAGM VALVE` variants around `sizeRatio 0.113-0.145`, with `18,068-25,140` triangles in `balanced` and `45,792-64,472` triangles in `high`.
+- On `large-curved-tank`, tiny-dense rankings are mostly noise because the model has only seven large primitive solids and no real small detail. This confirms Phase 2 needs minimum part-count and triangle gates before displaying or acting on tiny-dense lists.
+
+Large-sparse findings:
+
+- On `u843-non-haz-panel`, large sparse rankings clearly found the most faceting-prone geometry: long `316L SS TUBE` runs and a large unnamed body. In `balanced`, one tube subshape had `sizeRatio 0.504`, only `100` triangles, and density `0.179`; another had `sizeRatio 0.375`, `100` triangles, and density `0.241`. The large unnamed object had `sizeRatio 0.970`, `556` triangles, and density `0.517`.
+- In `high`, those same U843 tube/body candidates remained sparse relative to their size: the `sizeRatio 0.504` tube rose only to `228` triangles, and the large unnamed object rose to `1,196` triangles. This suggests the current global `high` preset still does not spend many triangles on some large curved or elongated parts.
+- On `large-curved-tank`, the top large-sparse entries are exactly the large tank and long pipes. In `balanced`, the main tank-like primitive had `sizeRatio 0.845`, `100` triangles, and density `0.017`; in `high`, it had `228` triangles and density `0.039`. This is a strong curved-surface faceting signal.
+
+Slow-mesh findings:
+
+- On `u843-non-haz-panel`, slow mesh rankings are useful. The top slow entries are the same complex gas sticks and valve bodies highlighted by tiny-dense rankings. `balanced` outliers were about `1,342 ms`, `1,209 ms`, `1,186 ms`, `498 ms`, and `494 ms`; `high` outliers were about `1,655 ms`, `1,494 ms`, `1,244 ms`, `676 ms`, and `626 ms`.
+- On `large-curved-tank`, slow rankings are not meaningful because the model is tiny from a topology perspective. The slowest structured mesh event was only `4.544 ms`.
+
+Part identity and report usefulness:
+
+- U843 part names and paths are sufficient for diagnosis. The report exposes recognizable display names such as `GTC UHP MINI GAS STICK`, `GTC K30 DIAPHRAGM VALVE`, and `316L SS TUBE`, plus label paths and instance paths.
+- Synthetic tank part names are not sufficient because OpenCascade wrote generic names such as `Open CASCADE STEP translator 7.6 1.1`. The label paths still identify rows, but a future synthetic benchmark should use XCAF naming if we need human-readable synthetic part labels.
+- The U843 rankings are useful; the synthetic tank rankings are useful only for large-sparse curved-surface detection, not for tiny-dense or slow-mesh tuning.
+
+Curved-surface findings:
+
+- The synthetic large tank confirms that baseline global presets can leave large cylinders very sparse: `balanced` produced only `100` triangles for each major cylinder and `high` produced only `228`.
+- The U843 Non-Haz report independently shows large `316L SS TUBE` entries with low triangle density even at `high`.
+- These results support tightening angular deflection for large sparse curved parts first, before implementing any simplification.
+
+Refined Phase 2 threshold guidance:
+
+- Medium/balanced large-shape tightening should start at `sizeRatio >= 0.35`, with a watch band from `0.20` to `0.35`. The previous `0.40` start was slightly too conservative because the U843 `316L SS TUBE` at `sizeRatio 0.375` is already a clear large-sparse candidate. Proposed `balanced` angular range: `0.28-0.50`, tightening toward `0.28` for large sparse curved parts. Proposed linear multiplier range: `0.50-1.80`, keeping the existing baseline around the middle and avoiding broad coarsening in Phase 2.
+- High-quality large-shape tightening should start at `sizeRatio >= 0.30`. Proposed angular range: `0.14-0.22`, tightening toward `0.14` for large sparse curved parts. Proposed linear multiplier range: `0.50-1.20`, because `high` should mostly preserve or improve quality rather than coarsen.
+- Medium tiny-dense coarsening candidates should require `sizeRatio <= 0.18` and `triangles >= 8,000`. The earlier `1,200` threshold is too low for this larger model and would over-flag ordinary detail.
+- High tiny-dense coarsening candidates should require `sizeRatio <= 0.18` and `triangles >= 25,000`. This catches the U843 valve/gas-stick outliers without reacting to modest parts.
+- Slow mesh warnings should use `>= 250 ms` as the fixed initial warning and `>= 1,000 ms` as a severe warning on this hardware. The previous `100 ms` threshold is useful for investigation but too chatty for a larger assembly.
+- Minimum gates to stop smoke-model noise: require at least `10` parts or `10,000` total triangles before showing tiny-dense rankings as actionable; require candidate `triangles >= 500` for tiny-dense rows; require candidate `sizeRatio >= 0.25` and `triangles <= 2,000` for large-sparse rows; require `meshingTimeMs >= 100` for slow rows.
+- Phase 2 should initially target large sparse smoothing only. Tiny-dense coarsening should remain report-only until visual review proves it will not damage small functional CAD details.
+- Phase 2 should use constructor-level adaptive `linearDeflection` and `angularDeflection` first, leaving `IMeshTools_Parameters` deferred. The Phase 1C evidence points to angular/linear preset tuning being enough for the next safe experiment.
+
+Phase 2 is now ready to implement behind a default-off flag for large sparse smoothing only. Remaining risks are visual: tighter angular deflection may increase triangles on long tubes and tanks, repeated large curved parts may reduce mesh reuse if adaptive values diverge, and tiny-dense coarsening still needs visual proof before it becomes active.
+
 ### Phase 2: Adaptive OCCT tessellation behind a flag
 
 - Add CLI flag such as `--adaptive-mesh on|off`.
