@@ -148,7 +148,41 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
   const dbModel = db.prepare("SELECT * FROM models WHERE id = ?").get(model.id) as { slug: string };
   assert.equal(dbModel.slug, model.slug);
 
-  // 9. Test cancellation
+  // 9. Chunked upload can add a revision to an existing model.
+  const initRevision = await jsonRequest(`${origin}/api/uploads/chunked/init`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      filename: "box-rev-b.step",
+      sizeBytes: 120,
+      modelSlug: model.slug,
+      revisionLabel: "B",
+      issuedDate: "2026-06-25",
+      quality: "low",
+      makeCurrent: false,
+      allowPublicSelectable: false
+    })
+  });
+  assert.equal(initRevision.response.status, 201);
+  const revisionUpload = initRevision.body as { uploadId: string };
+  const revisionChunk = new FormData();
+  revisionChunk.set("chunk", new Blob([Buffer.alloc(120)]), "chunk.bin");
+  const revisionChunkResponse = await jsonRequest(
+    `${origin}/api/uploads/chunked/${revisionUpload.uploadId}/chunk?chunkIndex=0&totalChunks=1`,
+    { method: "POST", headers, body: revisionChunk }
+  );
+  assert.equal(revisionChunkResponse.response.status, 200);
+  const revisionComplete = await jsonRequest(`${origin}/api/uploads/chunked/${revisionUpload.uploadId}/complete`, {
+    method: "POST",
+    headers
+  });
+  assert.equal(revisionComplete.response.status, 201);
+  assert.equal(revisionComplete.body.revision.revision_label, "B");
+  assert.equal(revisionComplete.body.revision.is_current, 0);
+  assert.equal(revisionComplete.body.revision.is_publicly_selectable, 0);
+  assert.equal(revisionComplete.body.job.revision_id, revisionComplete.body.revision.id);
+
+  // 10. Test cancellation
   const initCancel = await jsonRequest(`${origin}/api/uploads/chunked/init`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },

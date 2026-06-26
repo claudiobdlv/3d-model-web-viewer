@@ -10,9 +10,21 @@ import {
   markJobProcessing,
   markJobReady,
   updateJobProgress,
-  deleteModelBySlug
+  deleteModelBySlug,
+  getRevisionById,
+  getActiveRevisionFileVersion
 } from "../db.js";
-import { getLogDir, getModelDir, getUploadDir, getWorkerOutputDir, isSafeSlug } from "../storage.js";
+import {
+  getLogDir,
+  getModelDir,
+  getUploadDir,
+  getWorkerOutputDir,
+  isSafeSlug,
+  getRevisionLogDir,
+  getRevisionVersionLogDir,
+  resolveSourcePath,
+  resolveDisplayGlbPath
+} from "../storage.js";
 import { workerJobPayload } from "../workerPayload.js";
 
 const developmentWorkerToken = "dev-worker-token";
@@ -94,7 +106,13 @@ workerRouter.get("/jobs/:jobId/source", (req, res) => {
     return;
   }
 
-  const sourcePath = path.join(getUploadDir(job.model_slug), `original${job.source_ext}`);
+  const revision = job.revision_id ? getRevisionById(job.revision_id) : null;
+  if (revision && revision.conversion_job_id !== job.id) {
+    res.status(409).json({ error: "Worker job was superseded by a newer revision file version." });
+    return;
+  }
+  const sourcePath = resolveSourcePath({ slug: job.model_slug, source_ext: job.source_ext }, revision);
+
   if (!fs.existsSync(sourcePath)) {
     res.status(404).json({ error: "Source file not found." });
     return;
@@ -168,7 +186,14 @@ workerRouter.post(
       return;
     }
 
-    const modelDir = getModelDir(job.model_slug);
+    const revision = job.revision_id ? getRevisionById(job.revision_id) : null;
+    if (revision && revision.conversion_job_id !== job.id) {
+      res.status(409).json({ error: "Worker job was superseded by a newer revision file version." });
+      return;
+    }
+    const modelDir = revision
+      ? path.dirname(resolveDisplayGlbPath({ slug: job.model_slug }, revision))
+      : getModelDir(job.model_slug);
     fs.mkdirSync(modelDir, { recursive: true });
     fs.writeFileSync(path.join(modelDir, "display.glb"), displayGlb.buffer);
 
@@ -194,14 +219,15 @@ workerRouter.post(
 
     const conversionLog = firstFile(files, "conversion.log", "conversionLog");
     if (conversionLog) {
-      const logDir = getLogDir(job.model_slug);
+      const logDir = getJobLogDir(job.model_slug, job.revision_id);
       fs.mkdirSync(logDir, { recursive: true });
       fs.writeFileSync(path.join(logDir, "conversion.log"), conversionLog.buffer);
     }
 
     if (!markJobReady(job.id, "Worker completed STEP/STP conversion.", displayGlb.size)) {
       fs.rmSync(modelDir, { recursive: true, force: true });
-      fs.rmSync(getLogDir(job.model_slug), { recursive: true, force: true });
+      const logDir = getJobLogDir(job.model_slug, job.revision_id);
+      fs.rmSync(logDir, { recursive: true, force: true });
       res.status(409).json({ error: "Job was cancelled while artifacts were being received; artifacts were discarded." });
       return;
     }
@@ -223,7 +249,7 @@ workerRouter.post("/jobs/:jobId/fail", failureUpload.single("conversion.log"), (
       : "Worker failed without an error message.";
 
   if (req.file) {
-    const logDir = getLogDir(job.model_slug);
+    const logDir = getJobLogDir(job.model_slug, job.revision_id);
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(path.join(logDir, "conversion.log"), req.file.buffer);
   }
@@ -271,4 +297,12 @@ function readPositiveInteger(value: string | undefined, fallback: number, name: 
     throw new Error(`${name} must be a positive integer number of bytes.`);
   }
   return parsed;
+}
+
+function getJobLogDir(slug: string, revisionId?: number | null): string {
+  if (!revisionId) return getLogDir(slug);
+  const fileVersion = getActiveRevisionFileVersion(revisionId);
+  return fileVersion && fileVersion.file_version_number > 1
+    ? getRevisionVersionLogDir(slug, revisionId, fileVersion.file_version_number)
+    : getRevisionLogDir(slug, revisionId);
 }

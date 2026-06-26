@@ -7,9 +7,14 @@ import type {
   JobRecord,
   ModelListParams,
   ModelRecord,
+  ModelRevisionRecord,
   ProjectRecord,
   PublicModel,
+  PublicShareLinkMode,
   PublicShareResponse,
+  PublicShareSettings,
+  RevisionFileVersionRecord,
+  RevisionMetadata,
   StorageQuota
 } from "./types";
 
@@ -131,16 +136,32 @@ export function batchModels(action: BatchAction, slugs: string[], projectId?: nu
   });
 }
 
-export function getModel(slug: string): Promise<ModelRecord> {
-  return request<ModelRecord>(`/api/models/${encodeURIComponent(slug)}`);
+export function getModel(slug: string, revisionId?: number): Promise<ModelRecord> {
+  const query = revisionId ? `?revisionId=${revisionId}` : "";
+  return request<ModelRecord>(`/api/models/${encodeURIComponent(slug)}${query}`);
 }
 
-export function getPublicModel(token: string): Promise<PublicModel> {
-  return request<PublicModel>(`/public/${encodeURIComponent(token)}/model.json`);
+export function getPublicModel(token: string, revisionId?: number): Promise<PublicModel> {
+  const query = revisionId ? `?revisionId=${revisionId}` : "";
+  return request<PublicModel>(`/public/${encodeURIComponent(token)}/model.json${query}`);
 }
 
-export function createPublicShare(modelId: number): Promise<PublicShareResponse> {
-  return request<PublicShareResponse>(`/api/models/${modelId}/share`, { method: "POST" });
+export function getPublicShareSettings(modelId: number): Promise<PublicShareSettings> {
+  return request<PublicShareSettings>(`/api/models/${modelId}/share`, { cache: "no-store" });
+}
+
+export function createPublicShare(
+  modelId: number,
+  settings?: {
+    linkMode: PublicShareLinkMode;
+    revisionId: number | null;
+    allowRevisionSwitching: boolean;
+  }
+): Promise<PublicShareResponse> {
+  return request<PublicShareResponse>(`/api/models/${modelId}/share`, {
+    method: "POST",
+    body: settings ? JSON.stringify(settings) : undefined
+  });
 }
 
 export async function revokePublicShare(modelId: number): Promise<number> {
@@ -188,12 +209,14 @@ export async function uploadModel(
   file: File,
   folderId: number | null,
   quality: ConversionQuality = "medium",
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  revision: RevisionMetadata = {}
 ): Promise<ModelRecord> {
   const form = new FormData();
   form.set("modelFile", file);
   if (folderId) form.set("folderId", String(folderId));
-  if (/\.(step|stp)$/i.test(file.name)) form.set("quality", quality);
+  form.set("quality", quality);
+  appendRevisionMetadata(form, revision);
 
   const response = await fetch("/api/models", {
     method: "POST",
@@ -213,13 +236,14 @@ export function initChunkedUpload(
   filename: string,
   sizeBytes: number,
   projectId: number | null,
-  quality: ConversionQuality = "medium"
+  quality: ConversionQuality = "medium",
+  revision: RevisionMetadata & { modelSlug?: string } = {}
 ): Promise<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }> {
   return request<{ uploadId: string; chunkSizeBytes: number; maxUploadBytes: number }>(
     "/api/uploads/chunked/init",
     {
       method: "POST",
-      body: JSON.stringify({ filename, sizeBytes, projectId, quality })
+      body: JSON.stringify({ filename, sizeBytes, projectId, quality, ...revision })
     },
     30_000
   );
@@ -268,8 +292,8 @@ export async function uploadChunk(
   });
 }
 
-export function completeChunkedUpload(uploadId: string): Promise<ModelRecord> {
-  return request<ModelRecord>(`/api/uploads/chunked/${encodeURIComponent(uploadId)}/complete`, {
+export function completeChunkedUpload<T = ModelRecord>(uploadId: string): Promise<T> {
+  return request<T>(`/api/uploads/chunked/${encodeURIComponent(uploadId)}/complete`, {
     method: "POST"
   }, 120_000);
 }
@@ -288,5 +312,112 @@ export function saveModelDefaultView(slug: string, defaultView: any | null): Pro
   return request<ModelRecord>(`/api/models/${encodeURIComponent(slug)}/default-view`, {
     method: "POST",
     body: JSON.stringify({ defaultView })
+  });
+}
+
+export async function uploadNewRevision(
+  slug: string,
+  file: File,
+  quality: ConversionQuality,
+  revision: RevisionMetadata,
+  onProgress?: (percent: number) => void
+): Promise<{ revision: ModelRevisionRecord; job: JobRecord }> {
+  if (file.size > 83886080) {
+    const { uploadId, chunkSizeBytes } = await initChunkedUpload(
+      file.name,
+      file.size,
+      null,
+      quality,
+      { ...revision, modelSlug: slug }
+    );
+    try {
+      const totalChunks = Math.ceil(file.size / chunkSizeBytes);
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const start = chunkIndex * chunkSizeBytes;
+        const end = Math.min(start + chunkSizeBytes, file.size);
+        await uploadChunk(uploadId, chunkIndex, totalChunks, file.slice(start, end), undefined, (chunkBytes) => {
+          onProgress?.(Math.round(((start + chunkBytes) / file.size) * 100));
+        });
+      }
+      return await completeChunkedUpload<{ revision: ModelRevisionRecord; job: JobRecord }>(uploadId);
+    } catch (error) {
+      await deleteChunkedUpload(uploadId).catch(() => undefined);
+      throw error;
+    }
+  }
+  const form = new FormData();
+  form.set("modelFile", file);
+  form.set("quality", quality);
+  appendRevisionMetadata(form, revision);
+  return uploadMultipart(`/api/models/${encodeURIComponent(slug)}/revisions`, form, onProgress);
+}
+
+export function replaceRevision(
+  slug: string,
+  revisionId: number,
+  file: File,
+  quality: ConversionQuality,
+  replacementReason: string,
+  onProgress?: (percent: number) => void
+): Promise<{ revision: ModelRevisionRecord; fileVersion: RevisionFileVersionRecord; job: JobRecord }> {
+  const form = new FormData();
+  form.set("modelFile", file);
+  form.set("quality", quality);
+  if (replacementReason.trim()) form.set("replacementReason", replacementReason.trim());
+  return uploadMultipart(`/api/models/${encodeURIComponent(slug)}/revisions/${revisionId}/replace`, form, onProgress);
+}
+
+export function makeRevisionCurrent(slug: string, revisionId: number): Promise<ModelRevisionRecord> {
+  return request<ModelRevisionRecord>(
+    `/api/models/${encodeURIComponent(slug)}/revisions/${revisionId}/current`,
+    { method: "PATCH", body: JSON.stringify({}) }
+  );
+}
+
+export function updateRevisionPublicSelectable(
+  slug: string,
+  revisionId: number,
+  isPubliclySelectable: boolean
+): Promise<ModelRevisionRecord> {
+  return request<ModelRevisionRecord>(
+    `/api/models/${encodeURIComponent(slug)}/revisions/${revisionId}`,
+    { method: "PATCH", body: JSON.stringify({ isPubliclySelectable }) }
+  );
+}
+
+export async function fetchModelRevisions(slug: string): Promise<ModelRevisionRecord[]> {
+  return (await getModel(slug)).revisions ?? [];
+}
+
+function appendRevisionMetadata(form: FormData, revision: RevisionMetadata): void {
+  if (revision.revisionLabel !== undefined) form.set("revisionLabel", revision.revisionLabel);
+  if (revision.issuedDate) form.set("issuedDate", revision.issuedDate);
+  if (revision.makeCurrent !== undefined) form.set("makeCurrent", String(revision.makeCurrent));
+  if (revision.allowPublicSelectable !== undefined) {
+    form.set("allowPublicSelectable", String(revision.allowPublicSelectable));
+  }
+}
+
+function uploadMultipart<T>(url: string, form: FormData, onProgress?: (percent: number) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("accept", "application/json");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as T);
+        } catch {
+          reject(new Error("The server returned an invalid response."));
+        }
+      } else {
+        reject(new Error(xhrErrorMessage(xhr, `Upload failed (${xhr.status}).`)));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network error while uploading the file."));
+    xhr.send(form);
   });
 }

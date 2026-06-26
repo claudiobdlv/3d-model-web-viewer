@@ -1,26 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  ArchiveRestore, ArrowDown, ArrowUp, Box, Check, ChevronRight, Copy, Folder,
-  FolderOpen, HardDrive, List, Loader2, Moon, MoreVertical, Pencil, Plus, QrCode,
-  RefreshCw, Search, Sun, Trash2, Upload, X
+  ArchiveRestore, ArrowDown, ArrowUp, Box, Check, ChevronRight, Copy, Download, Folder,
+  FolderOpen, HardDrive, History, List, Loader2, Moon, MoreVertical, Pencil, Plus, QrCode,
+  RefreshCw, Replace, Search, Share2, Sun, Trash2, Upload, X
 } from "lucide-react";
 import {
-  batchModels, createProject, createPublicShare, deleteProject, getStorageQuota,
+  batchModels, createProject, createPublicShare, deleteProject, getPublicShareSettings, getStorageQuota,
   listLibraryModels, listProjects, renameModel, renameProject, uploadModel,
-  initChunkedUpload, uploadChunk, completeChunkedUpload, deleteChunkedUpload
+  initChunkedUpload, uploadChunk, completeChunkedUpload, deleteChunkedUpload,
+  getModel, makeRevisionCurrent, replaceRevision, updateRevisionPublicSelectable, uploadNewRevision
 } from "../api";
 import { downloadPublicShareQr } from "../qr";
-import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ProjectRecord, StorageQuota, UploadTask } from "../types";
+import type { BatchAction, ConversionQuality, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, PublicShareLinkMode, StorageQuota, UploadTask } from "../types";
 import { activeStatuses, formatDate, formatFileSize, statusKind, statusLabel } from "../utils";
 import { ResizableHeaderCell } from "./ResizableHeaderCell";
 
 type View = { kind: "all" | "projects" | "unsorted" | "trash" } | { kind: "project"; id: number };
 type SortBy = NonNullable<ModelListParams["sortBy"]>;
-type ColumnKey = "name" | "project" | "status" | "quality" | "glbSize" | "created";
+type ColumnKey = "name" | "project" | "revision" | "status" | "quality" | "glbSize" | "created";
 const columnDefinitions: Array<{ key: ColumnKey; label: string; sortKey?: SortBy; defaultWidth: number; minWidth: number; maxWidth: number }> = [
   { key: "name", label: "Name", sortKey: "name", defaultWidth: 280, minWidth: 190, maxWidth: 520 },
   { key: "project", label: "Project", sortKey: "project", defaultWidth: 150, minWidth: 100, maxWidth: 320 },
+  { key: "revision", label: "Revision", defaultWidth: 105, minWidth: 90, maxWidth: 180 },
   { key: "status", label: "Status", sortKey: "status", defaultWidth: 120, minWidth: 100, maxWidth: 220 },
   { key: "quality", label: "Quality", defaultWidth: 90, minWidth: 78, maxWidth: 150 },
   { key: "glbSize", label: "GLB size", sortKey: "glb_size_bytes", defaultWidth: 105, minWidth: 88, maxWidth: 180 },
@@ -75,6 +77,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   const [stagedFile, setStagedFile] = useState<File | null>(null);
   const [uploadProjectId, setUploadProjectId] = useState<number | null>(null);
   const [uploadHint, setUploadHint] = useState<string | null>(null);
+  const [revisionDialog, setRevisionDialog] = useState<{ kind: "new" | "replace" | "manage" | "share"; model: ModelRecord; revisionId?: number } | null>(null);
   const [dragState, setDragState] = useState<{ active: boolean; projectId: number | null; label: string; blocked: boolean }>({ active: false, projectId: null, label: "Unsorted", blocked: false });
   const polling = useRef<number | undefined>(undefined);
   const dragDepth = useRef(0);
@@ -233,7 +236,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
               emptyTitle={view.kind === "project" ? `${title} is empty.` : view.kind === "unsorted" ? "No unsorted models." : "No models yet."}
               emptyDescription={view.kind === "project" ? "Drop STEP or GLB files here." : view.kind === "unsorted" ? "Models without a project will appear here." : "Drop STEP or GLB files here to get started."}
               onSort={(key)=>{if(sortBy===key)setSortDir(d=>d==="asc"?"desc":"asc");else{setSortBy(key);setSortDir("asc");}}}
-              onSelected={setSelected} onAction={rowAction} onRefresh={()=>refresh(false)}/>}
+              onSelected={setSelected} onAction={rowAction} onRevisionAction={(kind,model,revisionId)=>setRevisionDialog({kind,model,revisionId})} onRefresh={()=>refresh(false)}/>}
         </section>
       </main>
     </div>
@@ -241,6 +244,10 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
     {(uploadOpen || uploadInFlight) && <UploadDialog visible={uploadOpen} projects={projects} defaultProjectId={uploadProjectId} initialFile={stagedFile} hint={uploadHint} onClose={()=>setUploadOpen(false)} onBusyChange={setUploadInFlight} onTask={(task)=>{setUploadTasks(current=>{const exists=current.some(item=>item.clientUploadId===task.clientUploadId);return exists?current.map(item=>item.clientUploadId===task.clientUploadId?task:item):[task,...current]});if(task.stage==="queued")window.setTimeout(()=>setUploadTasks(current=>current.filter(item=>item.clientUploadId!==task.clientUploadId)),2000)}} onDone={async()=>{setUploadOpen(false);setUploadInFlight(false);setStagedFile(null);setUploadHint(null);await refresh();}}/>}
     {moveOpen && <MoveDialog projects={projects} busy={busy} onClose={()=>setMoveOpen(false)} onMove={(id)=>void runBatch("moveToProject",id)}/>}
     {deleteForeverOpen && <ConfirmDialog count={selected.size} busy={busy} onClose={()=>setDeleteForeverOpen(false)} onConfirm={()=>void runBatch("deleteForever")}/>}
+    {revisionDialog?.kind === "new" && <UploadRevisionDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
+    {revisionDialog?.kind === "replace" && <ReplaceRevisionDialog model={revisionDialog.model} initialRevisionId={revisionDialog.revisionId} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
+    {revisionDialog?.kind === "manage" && <ManageRevisionsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)} onReplace={(revisionId)=>setRevisionDialog({kind:"replace",model:revisionDialog.model,revisionId})} onChanged={async()=>refresh(false)}/>}
+    {revisionDialog?.kind === "share" && <ShareSettingsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)}/>}
   </div>;
 }
 
@@ -445,7 +452,7 @@ function ModelDetailsPanel({ summary }: { summary?: any }) {
   );
 }
 
-function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRefresh}:{models:ModelRecord[];uploadTasks:UploadTask[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,returnTo,emptyTitle,emptyDescription,onSort,onSelected,onAction,onRevisionAction,onRefresh}:{models:ModelRecord[];uploadTasks:UploadTask[];loading:boolean;trash:boolean;selected:Set<string>;sortBy:SortBy;sortDir:"asc"|"desc";returnTo:string;emptyTitle:string;emptyDescription:string;onSort:(k:SortBy)=>void;onSelected:(s:Set<string>)=>void;onAction:(m:ModelRecord,a:BatchAction)=>void;onRevisionAction:(kind:"new"|"replace"|"manage"|"share",model:ModelRecord,revisionId?:number)=>void;onRefresh:()=>void}) {
   models=[...uploadTasks.map(task=>({id:-1,slug:`upload-${task.clientUploadId}`,name:task.filename.replace(/\.[^.]+$/,"") ,source_filename:task.filename,source_ext:"",status:`upload:${task.stage}:${task.percent}:${task.currentChunk}:${task.totalChunks}`,has_display_glb:0,glb_size_bytes:null,original_size_bytes:task.sizeBytes,folder_id:task.projectId,project_id:task.projectId,project_name:task.projectName,quality:task.quality,deleted_at:null,created_at:new Date().toISOString(),updated_at:new Date().toISOString()} as ModelRecord)),...models];
   const rangeAnchor = useRef<string | null>(null);
   const [widths,setWidths]=useState<Record<ColumnKey,number>>(()=>{
@@ -494,6 +501,7 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
             </div>
           </td>
           <td>{model.project_name??<span className="muted">Unsorted</span>}</td>
+          <td className="revision-cell">{isUpload ? <span className="muted">Rev —</span> : model.current_revision_label ? `Rev ${model.current_revision_label}` : <span className="muted">Legacy</span>}</td>
           <td>
             <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
               <Status status={model.status}/>
@@ -508,12 +516,12 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
           <td className="quality-cell">{model.quality??"—"}</td>
           <td>{formatFileSize(model.glb_size_bytes)}</td>
           <td>{formatDate(model.created_at)}</td>
-          <td className="action-cell">{!isUpload&&<RowMenu model={model} trash={trash} returnTo={returnTo} onAction={onAction} onRefresh={onRefresh}/>}</td>
+          <td className="action-cell">{!isUpload&&<RowMenu model={model} trash={trash} returnTo={returnTo} onAction={onAction} onRevisionAction={onRevisionAction} onRefresh={onRefresh}/>}</td>
         </tr>
         {isExpanded && !isUpload && (
           <tr className="details-row">
             <td />
-            <td colSpan={7}>
+            <td colSpan={8}>
               <ModelDetailsPanel summary={model.largeStepChunkingSummary} />
             </td>
           </tr>
@@ -524,14 +532,18 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
 
 function Status({status}:{status:string}){if(status.startsWith("upload:")){const[,stage,percent,current,total]=status.split(":");return <div className={`row-progress ${stage==="failed"||stage==="cancelled"?"failed":""}`}><strong>{stage==="uploading"?`Uploading ${percent}%`:stage[0].toUpperCase()+stage.slice(1)}</strong>{Number(total)>0&&stage==="uploading"&&<small>chunk {current} of {total}</small>}<span><i style={{width:`${percent}%`}}/></span></div>}if(status.startsWith("progress|")){const[,stage,percent,label,started]=status.split("|");const minutes=started?Math.floor(Math.max(0,Date.now()-new Date(`${started}Z`).getTime())/60000):0;return <div className="row-progress"><strong>{label} - {percent}%</strong><small>{minutes?`${minutes}m elapsed`:stage==="cancelling"?"Stopping worker process":"Stage-based progress"}</small><span><i style={{width:`${percent}%`}}/></span></div>}return <span className={`compact-status ${statusKind(status)}`}><span/>{statusLabel(status)}</span>}
 
-function RowMenu({model,trash,returnTo,onAction,onRefresh}:{model:ModelRecord;trash:boolean;returnTo:string;onAction:(m:ModelRecord,a:BatchAction)=>void;onRefresh:()=>void}) {
+function RowMenu({model,trash,returnTo,onAction,onRevisionAction,onRefresh}:{model:ModelRecord;trash:boolean;returnTo:string;onAction:(m:ModelRecord,a:BatchAction)=>void;onRevisionAction:(kind:"new"|"replace"|"manage"|"share",model:ModelRecord,revisionId?:number)=>void;onRefresh:()=>void}) {
   const [open,setOpen]=useState(false);
   const buttonRef=useRef<HTMLButtonElement>(null); const menuRef=useRef<HTMLDivElement>(null); const [position,setPosition]=useState({top:0,left:0});
-  useEffect(()=>{if(!open)return;const place=()=>{const button=buttonRef.current;if(!button)return;const rect=button.getBoundingClientRect();const width=210;const height=menuRef.current?.offsetHeight??(trash?126:270);const gap=5;setPosition({left:Math.max(8,Math.min(window.innerWidth-width-8,rect.right-width)),top:rect.bottom+gap+height<=window.innerHeight-8?rect.bottom+gap:Math.max(8,rect.top-height-gap)});};place();const close=(event:PointerEvent)=>{const target=event.target as Node;if(!buttonRef.current?.contains(target)&&!menuRef.current?.contains(target))setOpen(false)};const escape=(event:KeyboardEvent)=>{if(event.key==="Escape")setOpen(false)};window.addEventListener("resize",place);window.addEventListener("scroll",place,true);document.addEventListener("pointerdown",close);document.addEventListener("keydown",escape);return()=>{window.removeEventListener("resize",place);window.removeEventListener("scroll",place,true);document.removeEventListener("pointerdown",close);document.removeEventListener("keydown",escape)}},[open,trash]);
+  useEffect(()=>{if(!open)return;const place=()=>{const button=buttonRef.current;if(!button)return;const rect=button.getBoundingClientRect();const width=230;const height=menuRef.current?.offsetHeight??(trash?126:460);const gap=5;setPosition({left:Math.max(8,Math.min(window.innerWidth-width-8,rect.right-width)),top:rect.bottom+gap+height<=window.innerHeight-8?rect.bottom+gap:Math.max(8,rect.top-height-gap)});};place();const close=(event:PointerEvent)=>{const target=event.target as Node;if(!buttonRef.current?.contains(target)&&!menuRef.current?.contains(target))setOpen(false)};const escape=(event:KeyboardEvent)=>{if(event.key==="Escape")setOpen(false)};window.addEventListener("resize",place);window.addEventListener("scroll",place,true);document.addEventListener("pointerdown",close);document.addEventListener("keydown",escape);return()=>{window.removeEventListener("resize",place);window.removeEventListener("scroll",place,true);document.removeEventListener("pointerdown",close);document.removeEventListener("keydown",escape)}},[open,trash]);
   const menu=open?createPortal(<div ref={menuRef} className="menu-popover" style={position} onClick={event=>{if((event.target as Element).closest("a"))setOpen(false)}}>
     {!trash&&<><a href={viewerPath(model.slug,returnTo)}><Box/>Open viewer</a>
-      <button onClick={async()=>{const share=await createPublicShare(model.id);await copyText(share.url);setOpen(false)}}><Copy/>Copy link</button>
-      <button onClick={async()=>{const share=await createPublicShare(model.id);await downloadPublicShareQr(share.url,model.slug);setOpen(false)}}><QrCode/>Download QR</button>
+      <button onClick={()=>{onRevisionAction("share",model);setOpen(false)}}><Share2/>Share link and QR</button>
+      <a href={`/downloads/${encodeURIComponent(model.slug)}/original`}><Download/>Download original</a>
+      <a href={`/downloads/${encodeURIComponent(model.slug)}/display.glb`}><Download/>Download GLB</a>
+      <button onClick={()=>{onRevisionAction("new",model);setOpen(false)}}><Upload/>Upload new revision</button>
+      <button onClick={()=>{onRevisionAction("replace",model);setOpen(false)}}><Replace/>Replace existing revision</button>
+      <button onClick={()=>{onRevisionAction("manage",model);setOpen(false)}}><History/>Manage revisions</button>
       <button onClick={async()=>{const name=window.prompt("Model name",model.name);if(name&&name!==model.name){await renameModel(model.slug,name);onRefresh()}setOpen(false)}}><Pencil/>Rename</button>
       <button onClick={()=>{onAction(model,"moveToProject");setOpen(false)}}><FolderOpen/>Move to project</button><a href={`/admin/logs/${encodeURIComponent(model.slug)}/conversion.log`}><List/>Log</a><button className="danger-item" onClick={()=>{onAction(model,"trash");setOpen(false)}}><Trash2/>Move to recycling bin</button></>}
     {trash&&<><button onClick={()=>{onAction(model,"restore");setOpen(false)}}><ArchiveRestore/>Restore</button><button className="danger-item" onClick={()=>{onAction(model,"deleteForever");setOpen(false)}}><Trash2/>Delete forever</button></>}
@@ -576,6 +588,9 @@ function UploadDialog({
   const [file, setFile] = useState<File | null>(initialFile);
   const [projectId, setProjectId] = useState(defaultProjectId ? String(defaultProjectId) : "");
   const [quality, setQuality] = useState<ConversionQuality>("medium");
+  const [revisionLabel, setRevisionLabel] = useState("");
+  const [issuedDate, setIssuedDate] = useState(todayLocal());
+  const [allowPublicSelectable, setAllowPublicSelectable] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ percent: number; text: string } | null>(null);
@@ -644,7 +659,8 @@ function UploadDialog({
           file.name,
           file.size,
           projectId ? Number(projectId) : null,
-          quality
+          quality,
+          { revisionLabel, issuedDate, allowPublicSelectable }
         );
         uploadIdRef.current = uploadId;
 
@@ -694,7 +710,13 @@ function UploadDialog({
       } else {
         setProgress({ percent: 50, text: "Uploading file..." });
         updateTask({ stage:"uploading", percent:50, currentChunk:1, totalChunks:1 });
-        const model=await uploadModel(file, projectId ? Number(projectId) : null, quality, abortControllerRef.current.signal);
+        const model=await uploadModel(
+          file,
+          projectId ? Number(projectId) : null,
+          quality,
+          abortControllerRef.current.signal,
+          { revisionLabel, issuedDate, allowPublicSelectable }
+        );
         updateTask({ stage:"queued", modelSlug:model.slug, uploadedBytes:file.size, percent:100 });
       }
 
@@ -750,23 +772,15 @@ function UploadDialog({
             ))}
           </select>
         </label>
-        {file && /\.(step|stp)$/i.test(file.name) && (
-          <fieldset disabled={busy}>
-            <legend>Conversion quality</legend>
-            <div className="quality-options">
-              {(["low", "medium", "high"] as const).map((q) => (
-                <button
-                  type="button"
-                  className={quality === q ? "active" : ""}
-                  onClick={() => setQuality(q)}
-                  key={q}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-          </fieldset>
-        )}
+        <div className="revision-fields">
+          <label>Revision<input className="field" value={revisionLabel} disabled={busy} maxLength={100} onChange={e=>setRevisionLabel(e.target.value)} placeholder="Auto-numbered as Rev 1"/><small>Leave blank to auto-number.</small></label>
+          <label>Date issued<input className="field" type="date" value={issuedDate} disabled={busy} onChange={e=>setIssuedDate(e.target.value)}/><small>Used for QR/share history and drawing issue tracking.</small></label>
+        </div>
+        <fieldset disabled={busy}>
+          <legend>Quality</legend>
+          <QualityOptions value={quality} onChange={setQuality}/>
+        </fieldset>
+        <label className="checkbox-field"><input type="checkbox" checked={allowPublicSelectable} disabled={busy} onChange={e=>setAllowPublicSelectable(e.target.checked)}/><span><strong>Allow public revision selection</strong><small>Available in the public revision dropdown when that viewer feature is enabled.</small></span></label>
         {progress && (
           <div className="upload-progress" role="status" aria-live="polite">
             <div className="upload-progress-heading"><strong>{progress.percent}%</strong><span>{progress.text}</span></div>
@@ -789,7 +803,194 @@ function UploadDialog({
     </Dialog>
   );
 }
+
+function UploadRevisionDialog({model,onClose,onDone}:{model:ModelRecord;onClose:()=>void;onDone:(message:string)=>void}) {
+  const [file,setFile]=useState<File|null>(null);
+  const [revisionLabel,setRevisionLabel]=useState("");
+  const [issuedDate,setIssuedDate]=useState(todayLocal());
+  const [quality,setQuality]=useState<ConversionQuality>((model.quality as ConversionQuality)||"medium");
+  const [makeCurrent,setMakeCurrent]=useState(true);
+  const [allowPublicSelectable,setAllowPublicSelectable]=useState(true);
+  const [busy,setBusy]=useState(false);
+  const [progress,setProgress]=useState(0);
+  const [error,setError]=useState<string|null>(null);
+  const submit=async(event:React.FormEvent)=>{
+    event.preventDefault(); if(!file)return;
+    setBusy(true);setError(null);
+    try{
+      const result=await uploadNewRevision(model.slug,file,quality,{revisionLabel,issuedDate,makeCurrent,allowPublicSelectable},setProgress);
+      onDone(`Rev ${result.revision.revision_label} uploaded${makeCurrent?" and set as current":""}.`);
+    }catch(reason){setError(reason instanceof Error?reason.message:"Revision upload failed.");setBusy(false)}
+  };
+  return <Dialog title={`Upload new revision — ${model.name}`} onClose={busy?()=>{}:onClose}><form className="dialog-form" onSubmit={submit}>
+    <FilePicker file={file} busy={busy} onChange={setFile}/>
+    <div className="revision-fields">
+      <label>Revision<input className="field" value={revisionLabel} disabled={busy} maxLength={100} onChange={e=>setRevisionLabel(e.target.value)} placeholder="Auto-number"/><small>Leave blank to auto-number.</small></label>
+      <label>Date issued<input className="field" type="date" value={issuedDate} disabled={busy} onChange={e=>setIssuedDate(e.target.value)}/></label>
+    </div>
+    <fieldset disabled={busy}><legend>Quality</legend><QualityOptions value={quality} onChange={setQuality}/></fieldset>
+    <label className="checkbox-field"><input type="checkbox" checked={makeCurrent} disabled={busy} onChange={e=>setMakeCurrent(e.target.checked)}/><span><strong>Make this the current revision after processing</strong></span></label>
+    <label className="checkbox-field"><input type="checkbox" checked={allowPublicSelectable} disabled={busy} onChange={e=>setAllowPublicSelectable(e.target.checked)}/><span><strong>Available in public revision dropdown</strong></span></label>
+    {busy&&<UploadProgress percent={progress} text={progress<100?"Uploading revision…":"Upload complete. Creating revision…"}/>}
+    {error&&<div className="alert error">{error}</div>}
+    <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary-button" disabled={!file||busy}>{busy?<Loader2 className="animate-spin"/>:<Upload/>}Upload revision</button></div>
+  </form></Dialog>;
+}
+
+function ShareSettingsDialog({model,onClose}:{model:ModelRecord;onClose:()=>void}) {
+  const [detail,setDetail]=useState<ModelRecord|null>(null);
+  const [linkMode,setLinkMode]=useState<PublicShareLinkMode>("locked_revision");
+  const [revisionId,setRevisionId]=useState("");
+  const [allowRevisionSwitching,setAllowRevisionSwitching]=useState(false);
+  const [shareUrl,setShareUrl]=useState<string|null>(null);
+  const [busy,setBusy]=useState(false);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState<string|null>(null);
+  const [notice,setNotice]=useState<string|null>(null);
+
+  useEffect(()=>{
+    let cancelled=false;
+    void Promise.all([getModel(model.slug),getPublicShareSettings(model.id)])
+      .then(([nextDetail,settings])=>{
+        if(cancelled)return;
+        const revisions=nextDetail.revisions??[];
+        const currentId=nextDetail.currentRevision?.id??revisions.find(revision=>revision.is_current)?.id??revisions[0]?.id;
+        setDetail(nextDetail);
+        setLinkMode(settings.linkMode??"locked_revision");
+        setRevisionId(String(settings.revisionId??currentId??""));
+        setAllowRevisionSwitching(settings.allowRevisionSwitching??false);
+        setShareUrl(settings.url??null);
+      })
+      .catch(reason=>{if(!cancelled)setError(reason instanceof Error?reason.message:"Could not load share settings.")})
+      .finally(()=>{if(!cancelled)setLoading(false)});
+    return()=>{cancelled=true};
+  },[model.id,model.slug]);
+
+  const revisions=detail?.revisions??[];
+  const readyRevisions=revisions.filter(revision=>revision.status==="ready");
+  const selectableAlternatives=readyRevisions.filter(revision=>revision.is_publicly_selectable).length;
+  const selectedRevision=readyRevisions.find(revision=>String(revision.id)===revisionId);
+  const save=async(event:React.FormEvent)=>{
+    event.preventDefault();
+    if(linkMode==="locked_revision"&&!selectedRevision){setError("Choose a ready revision to lock this share to.");return}
+    setBusy(true);setError(null);setNotice(null);
+    try{
+      const share=await createPublicShare(model.id,{
+        linkMode,
+        revisionId:linkMode==="locked_revision"?Number(revisionId):null,
+        allowRevisionSwitching
+      });
+      setShareUrl(share.url);
+      setNotice("Share settings saved. The existing token was preserved when a share already existed.");
+    }catch(reason){setError(reason instanceof Error?reason.message:"Could not save share settings.")}
+    finally{setBusy(false)}
+  };
+  const copyShare=async()=>{if(!shareUrl)return;await copyText(shareUrl);setNotice("Share link copied.")};
+  const downloadQr=async()=>{if(!shareUrl)return;await downloadPublicShareQr(shareUrl,model.slug);setNotice("QR code downloaded.")};
+
+  return <Dialog title={`Share link and QR — ${model.name}`} onClose={busy?()=>{}:onClose}>
+    <form className="dialog-form share-settings-form" onSubmit={save}>
+      {loading&&<div className="revision-loading"><Loader2 className="animate-spin"/>Loading share settings…</div>}
+      {!loading&&<>
+        <fieldset disabled={busy}>
+          <legend>Share link mode</legend>
+          <label className={`share-mode-option ${linkMode==="locked_revision"?"selected":""}`}>
+            <input type="radio" name="shareMode" checked={linkMode==="locked_revision"} onChange={()=>setLinkMode("locked_revision")}/>
+            <span><strong>Locked to this revision</strong><small>Best for issued drawings and QR codes. Future revisions will not change this link.</small></span>
+          </label>
+          <label className={`share-mode-option ${linkMode==="latest_current"?"selected":""}`}>
+            <input type="radio" name="shareMode" checked={linkMode==="latest_current"} onChange={()=>setLinkMode("latest_current")}/>
+            <span><strong>Latest/current revision</strong><small>Best for internal live coordination. This link follows the model’s current revision.</small></span>
+          </label>
+        </fieldset>
+        {linkMode==="locked_revision"&&<label>Selected locked revision
+          <select className="field" value={revisionId} disabled={busy||readyRevisions.length<2} onChange={event=>setRevisionId(event.target.value)}>
+            <option value="">Choose a ready revision</option>
+            {readyRevisions.map(revision=><option key={revision.id} value={revision.id}>Rev {revision.revision_label}{revision.is_current?" — Current":""}</option>)}
+          </select>
+          <small>{readyRevisions.length===1?"This model has one ready revision, so the share will stay locked to it.":"Only ready revisions can be used for public shares."}</small>
+        </label>}
+        <label className="checkbox-field"><input type="checkbox" checked={allowRevisionSwitching} disabled={busy} onChange={event=>setAllowRevisionSwitching(event.target.checked)}/><span><strong>Allow public revision switching</strong><small>Public viewers can switch only to revisions marked available in the public revision dropdown.</small>{allowRevisionSwitching&&selectableAlternatives<2?<small>There are not currently multiple ready public-selectable revisions.</small>:null}</span></label>
+        <div className="share-download-note"><strong>Download permissions are unchanged.</strong><span>Original/source and GLB download access continues to follow the existing share behaviour.</span></div>
+        {shareUrl&&<div className="share-link-preview"><span>Current public link</span><code>{shareUrl}</code></div>}
+        {error&&<div className="alert error">{error}</div>}
+        {notice&&<div className="alert"><Check size={16}/>{notice}</div>}
+        <div className="dialog-actions share-dialog-actions">
+          {shareUrl&&<><button type="button" className="secondary-button" disabled={busy} onClick={()=>void copyShare()}><Copy/>Copy link</button><button type="button" className="secondary-button" disabled={busy} onClick={()=>void downloadQr()}><QrCode/>Download QR</button></>}
+          <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Close</button>
+          <button className="primary-button" disabled={busy||readyRevisions.length===0}>{busy?<Loader2 className="animate-spin"/>:<Share2/>}Save settings</button>
+        </div>
+      </>}
+    </form>
+  </Dialog>;
+}
+
+function ReplaceRevisionDialog({model,initialRevisionId,onClose,onDone}:{model:ModelRecord;initialRevisionId?:number;onClose:()=>void;onDone:(message:string)=>void}) {
+  const [revisions,setRevisions]=useState<ModelRevisionRecord[]>([]);
+  const [revisionId,setRevisionId]=useState(initialRevisionId?String(initialRevisionId):"");
+  const [reason,setReason]=useState("");
+  const [quality,setQuality]=useState<ConversionQuality>((model.quality as ConversionQuality)||"medium");
+  const [file,setFile]=useState<File|null>(null);
+  const [busy,setBusy]=useState(false);
+  const [progress,setProgress]=useState(0);
+  const [error,setError]=useState<string|null>(null);
+  const replacementTooLarge=Boolean(file&&file.size>83886080);
+  useEffect(()=>{void getModel(model.slug).then(detail=>{const next=detail.revisions??[];setRevisions(next);setRevisionId(current=>current||String(detail.currentRevision?.id??next[0]?.id??""))}).catch(reason=>setError(reason instanceof Error?reason.message:"Could not load revisions."))},[model.slug]);
+  const submit=async(event:React.FormEvent)=>{
+    event.preventDefault();if(!file||!revisionId)return;
+    if(file.size>83886080){setError("Replacement files over 80 MB are not supported in this screen yet because chunked replacement upload is deferred. Use a smaller export or wait for chunked replacement support.");return}
+    setBusy(true);setError(null);
+    try{
+      const result=await replaceRevision(model.slug,Number(revisionId),file,quality,reason,setProgress);
+      onDone(`Rev ${result.revision.revision_label} replacement uploaded successfully.`);
+    }catch(reason){setError(reason instanceof Error?reason.message:"Replacement upload failed.");setBusy(false)}
+  };
+  return <Dialog title={`Replace revision — ${model.name}`} onClose={busy?()=>{}:onClose}><form className="dialog-form" onSubmit={submit}>
+    <div className="revision-warning">Use this only to fix a bad upload/export/conversion for the same issued revision. Existing locked QR/share links to this revision will show the replacement model after processing. For real design changes, upload a new revision instead.</div>
+    <label>Revision to replace<select className="field" value={revisionId} disabled={busy} onChange={e=>setRevisionId(e.target.value)}><option value="">Select a revision</option>{revisions.map(revision=><option key={revision.id} value={revision.id}>Rev {revision.revision_label}{revision.is_current?" — Current":""}</option>)}</select></label>
+    <label>Replacement reason<textarea className="field textarea-field" value={reason} disabled={busy} maxLength={2000} onChange={e=>setReason(e.target.value)} placeholder="What was corrected?"/></label>
+    <fieldset disabled={busy}><legend>Quality</legend><QualityOptions value={quality} onChange={setQuality}/></fieldset>
+    <FilePicker file={file} busy={busy} onChange={setFile}/>
+    {replacementTooLarge&&<div className="alert error">This replacement is over 80 MB. Chunked replacement upload is deferred, so this screen cannot upload it safely yet. Use a smaller export or wait for chunked replacement support.</div>}
+    {busy&&<UploadProgress percent={progress} text={progress<100?"Uploading replacement…":"Upload complete. Creating conversion job…"}/>}
+    {error&&<div className="alert error">{error}</div>}
+    <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary-button" disabled={!file||!revisionId||busy||replacementTooLarge}>{busy?<Loader2 className="animate-spin"/>:<Replace/>}Replace revision</button></div>
+  </form></Dialog>;
+}
+
+function ManageRevisionsDialog({model,onClose,onReplace,onChanged}:{model:ModelRecord;onClose:()=>void;onReplace:(revisionId:number)=>void;onChanged:()=>void}) {
+  const [detail,setDetail]=useState<ModelRecord|null>(null);
+  const [busyId,setBusyId]=useState<number|null>(null);
+  const [error,setError]=useState<string|null>(null);
+  const load=async()=>{try{setDetail(await getModel(model.slug));setError(null)}catch(reason){setError(reason instanceof Error?reason.message:"Could not load revisions.")}};
+  useEffect(()=>{void load()},[model.slug]);
+  const mutate=async(revisionId:number,operation:()=>Promise<unknown>)=>{setBusyId(revisionId);setError(null);try{await operation();await load();onChanged()}catch(reason){setError(reason instanceof Error?reason.message:"Revision update failed.")}finally{setBusyId(null)}};
+  const revisions=detail?.revisions??[];
+  return <Dialog title={`Manage revisions — ${model.name}`} onClose={onClose} wide><div className="revision-manager">
+    {error&&<div className="alert error">{error}</div>}
+    {!detail&&!error&&<div className="revision-loading"><Loader2 className="animate-spin"/>Loading revisions…</div>}
+    {detail&&<div className="revision-table-scroll"><table className="revision-table"><thead><tr><th>Revision</th><th>Issued date</th><th>Status</th><th>Current</th><th>Public selectable</th><th>Source size</th><th>GLB size</th><th>Uploaded date</th><th>Actions</th></tr></thead><tbody>
+      {revisions.map(revision=>{const active=busyId===revision.id;const ready=revision.status==="ready";return <tr key={revision.id}><td><strong>Rev {revision.revision_label}</strong></td><td>{formatDateOnly(revision.issued_date)}</td><td><Status status={revision.status}/></td><td>{revision.is_current?<span className="current-pill"><Check/>Current</span>:"—"}</td><td><label className="switch-field"><input type="checkbox" checked={Boolean(revision.is_publicly_selectable)} disabled={active} onChange={e=>void mutate(revision.id,()=>updateRevisionPublicSelectable(model.slug,revision.id,e.target.checked))}/><span>{active?"Updating…":revision.is_publicly_selectable?"Available":"Hidden"}</span></label></td><td>{formatFileSize(revision.source_size_bytes)}</td><td>{formatFileSize(revision.glb_size_bytes)}</td><td>{formatDate(revision.uploaded_at)}</td><td><div className="revision-actions">{!revision.is_current&&<button title={ready?"Set as the model's current revision":"Only ready revisions can be made current"} disabled={active||!ready} onClick={()=>void mutate(revision.id,()=>makeRevisionCurrent(model.slug,revision.id))}>{active?"Updating…":"Make current"}</button>}<button disabled={active} onClick={()=>onReplace(revision.id)}>Replace</button></div></td></tr>})}
+    </tbody></table></div>}
+    <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Close</button></div>
+  </div></Dialog>;
+}
+
+function FilePicker({file,busy,onChange}:{file:File|null;busy:boolean;onChange:(file:File|null)=>void}) {
+  return <label className={`upload-drop compact ${busy?"disabled":""}`}><Upload/><strong>{file?.name??"Choose a model file"}</strong><span>{file?`${(file.size/(1024*1024)).toFixed(1)} MB`:"STEP, STP, GLB, or GLTF"}</span><input type="file" accept=".step,.stp,.glb,.gltf" disabled={busy} onChange={e=>onChange(e.target.files?.[0]??null)}/></label>;
+}
+
+function QualityOptions({value,onChange}:{value:ConversionQuality;onChange:(quality:ConversionQuality)=>void}) {
+  return <div className="quality-options">{(["low","medium","high"] as const).map(quality=><button type="button" className={value===quality?"active":""} onClick={()=>onChange(quality)} key={quality}>{quality}</button>)}</div>;
+}
+
+function UploadProgress({percent,text}:{percent:number;text:string}) {
+  return <div className="upload-progress" role="status"><div className="upload-progress-heading"><strong>{percent}%</strong><span>{text}</span></div><div className="upload-progress-track"><span style={{width:`${percent}%`}}/></div></div>;
+}
+
 function MoveDialog({projects,busy,onClose,onMove}:{projects:ProjectRecord[];busy:boolean;onClose:()=>void;onMove:(id:number|null)=>void}){const[id,setId]=useState("");return <Dialog title="Move to project" onClose={onClose}><div className="dialog-form"><label>Destination<select className="field" value={id} onChange={e=>setId(e.target.value)}><option value="">Unsorted</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy} onClick={()=>onMove(id?Number(id):null)}>Move</button></div></div></Dialog>}
 function ConfirmDialog({count,busy,onClose,onConfirm}:{count:number;busy:boolean;onClose:()=>void;onConfirm:()=>void}){return <Dialog title="Delete forever?" onClose={onClose}><div className="dialog-form"><p>This permanently deletes {count} item{count===1?"":"s"} and its files. This cannot be undone.</p><div className="dialog-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="danger-button" disabled={busy} onClick={onConfirm}>Delete forever</button></div></div></Dialog>}
-function Dialog({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){return <div className="dialog-overlay" role="dialog" aria-modal="true"><div className="dialog-card"><header><h2>{title}</h2><button className="icon-button" onClick={onClose}><X size={17}/></button></header>{children}</div></div>}
+function Dialog({title,onClose,children,wide=false}:{title:string;onClose:()=>void;children:React.ReactNode;wide?:boolean}){return <div className="dialog-overlay" role="dialog" aria-modal="true"><div className={`dialog-card ${wide?"wide":""}`}><header><h2>{title}</h2><button className="icon-button" onClick={onClose}><X size={17}/></button></header>{children}</div></div>}
+function todayLocal(){const now=new Date();return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`}
+function formatDateOnly(value:string){if(!value)return "—";const [year,month,day]=value.split("-").map(Number);return Number.isFinite(year)&&Number.isFinite(month)&&Number.isFinite(day)?new Intl.DateTimeFormat(undefined,{day:"numeric",month:"short",year:"numeric"}).format(new Date(year,month-1,day)):value}
 function formatBytes(bytes:number){if(!Number.isFinite(bytes))return "—";const units=["B","KB","MB","GB","TB"];let value=bytes,i=0;while(value>=1024&&i<units.length-1){value/=1024;i++}return `${value.toFixed(i<2?0:value>=10?1:2)} ${units[i]}`}
