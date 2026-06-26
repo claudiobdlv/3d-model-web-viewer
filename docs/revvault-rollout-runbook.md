@@ -4,7 +4,8 @@ This runbook is a plan only. Phase 7 did not merge or deploy it.
 
 Production safety rules:
 
-- Deploy only the `server` and `worker` services from `deploy/docker-compose.elitedesk.yml`.
+- Deploy only the services listed by `docker compose -f deploy/docker-compose.elitedesk.yml config --services`.
+- The expected production services are `server` and `worker`; because these are the only services in the file, the standard deploy script may run the full compose project.
 - Do not run a global Docker restart, reboot the EliteDesk, change Cloudflare, expose router ports, or touch the Pi or unrelated services.
 - Do not move, rename, overwrite, or delete legacy files under `data/uploads`, `data/models`, or `data/logs`.
 - Do not deploy unless the DB backup, storage inventory, previous commit, and rollback operator are confirmed.
@@ -33,6 +34,7 @@ git status --short
 git branch --show-current
 git rev-parse HEAD
 docker compose -f deploy/docker-compose.elitedesk.yml ps
+docker compose -f deploy/docker-compose.elitedesk.yml config --services
 docker inspect 3d-model-web-viewer-server-1 \
   --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'
 ls -lh data/db/app.sqlite*
@@ -176,11 +178,10 @@ git pull --ff-only origin main
 NEW_MAIN="$(git rev-parse HEAD)"
 printf '%s\n' "$NEW_MAIN" > "$BACKUP_DIR/deployed-main.txt"
 
-docker compose -f deploy/docker-compose.elitedesk.yml \
-  up -d --build server worker
+./scripts/deploy-elitedesk.sh
 ```
 
-This command targets only RevVault's `server` and `worker`. Do not run `docker restart`, `systemctl restart docker`, or a host reboot.
+The standard deploy script validates that the Compose file contains exactly `server` and `worker`, then runs `docker compose -f deploy/docker-compose.elitedesk.yml up -d --build`. Do not run `docker restart`, `systemctl restart docker`, or a host reboot.
 
 ## 6. Post-deploy health and UI checks
 
@@ -277,8 +278,7 @@ If deployment fails before the new server starts, restore only the previous code
 cd /home/claudio/projects/3d-model-web-viewer
 PREVIOUS_MAIN="$(cat "$BACKUP_DIR/previous-main.txt")"
 git checkout --detach "$PREVIOUS_MAIN"
-docker compose -f deploy/docker-compose.elitedesk.yml \
-  up -d --build server worker
+docker compose -f deploy/docker-compose.elitedesk.yml up -d --build
 ```
 
 The DB backup should not be restored if migration did not run.
@@ -291,8 +291,7 @@ The migration is additive, so the previous code is expected to tolerate the extr
 cd /home/claudio/projects/3d-model-web-viewer
 PREVIOUS_MAIN="$(cat "$BACKUP_DIR/previous-main.txt")"
 git checkout --detach "$PREVIOUS_MAIN"
-docker compose -f deploy/docker-compose.elitedesk.yml \
-  up -d --build server worker
+docker compose -f deploy/docker-compose.elitedesk.yml up -d --build
 ```
 
 Recheck health, an existing model, and a known QR link. If they work, retain the migrated DB and investigate offline.
@@ -311,8 +310,7 @@ sudo chmod 0644 data/db/app.sqlite
 
 PREVIOUS_MAIN="$(cat "$BACKUP_DIR/previous-main.txt")"
 git checkout --detach "$PREVIOUS_MAIN"
-docker compose -f deploy/docker-compose.elitedesk.yml \
-  up -d --build server worker
+docker compose -f deploy/docker-compose.elitedesk.yml up -d --build
 ```
 
 Then run health checks and compare the restored model/share counts with the values recorded before deployment.

@@ -12,6 +12,12 @@ if [ ! -f .env ]; then
 fi
 
 mkdir -p data/db data/uploads data/models data/logs data/worker-output
+SERVICES="$(docker compose -f "$COMPOSE_FILE" config --services)"
+if [ "$SERVICES" != "$(printf 'server\nworker')" ]; then
+  echo "Unexpected Compose services in $COMPOSE_FILE:" >&2
+  printf '%s\n' "$SERVICES" >&2
+  exit 1
+fi
 git pull --ff-only
 docker compose -f "$COMPOSE_FILE" up -d --build
 docker compose -f "$COMPOSE_FILE" ps
