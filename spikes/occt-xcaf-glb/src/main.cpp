@@ -136,11 +136,18 @@ enum class AdaptiveMeshMode {
   LargeSparseSmoothing
 };
 
+enum class AdaptiveMeshProfile {
+  Conservative,
+  Standard,
+  Strong
+};
+
 struct AdaptiveDeflection {
   double linearDeflection = 0.0;
   double angularDeflection = 0.0;
   bool relative = true;
   std::string reason = "baseline_global_preset";
+  std::string profile = "standard";
   std::vector<std::string> warnings;
 };
 
@@ -149,6 +156,7 @@ struct ReuseKey {
   double linearDeflection = 0.0;
   double angularDeflection = 0.0;
   bool relative = false;
+  std::string adaptiveProfile = "standard";
   std::string materialSignature;
   bool isSafe = false;
 
@@ -157,6 +165,7 @@ struct ReuseKey {
     if (linearDeflection != o.linearDeflection) return linearDeflection < o.linearDeflection;
     if (angularDeflection != o.angularDeflection) return angularDeflection < o.angularDeflection;
     if (relative != o.relative) return relative < o.relative;
+    if (adaptiveProfile != o.adaptiveProfile) return adaptiveProfile < o.adaptiveProfile;
     if (materialSignature != o.materialSignature) return materialSignature < o.materialSignature;
     return isSafe < o.isSafe;
   }
@@ -228,6 +237,7 @@ struct MeshPrimitive {
   double angularDeflection = 0.0;
   bool relativeDeflection = true;
   std::string deflectionReason = "baseline_global_preset";
+  std::string deflectionProfile = "standard";
   std::vector<std::string> deflectionWarnings;
   bool isReused = false;
   void* tshapePtr = nullptr;
@@ -260,6 +270,7 @@ AdaptiveDeflection computeAdaptiveDeflection(
     const struct CliOptions& cliOptions,
     const double assemblyBboxDiagonal,
     const double shapeWorldBboxDiagonal);
+int runAdaptiveMeshSelfTests();
 
 struct CachedGeometry {
   std::vector<float> positions;
@@ -2213,6 +2224,31 @@ bool adaptiveMeshEnabled(const AdaptiveMeshMode mode) {
   return mode == AdaptiveMeshMode::LargeSparseSmoothing;
 }
 
+AdaptiveMeshProfile parseAdaptiveMeshProfile(const std::string& value) {
+  if (value == "conservative") {
+    return AdaptiveMeshProfile::Conservative;
+  }
+  if (value == "standard") {
+    return AdaptiveMeshProfile::Standard;
+  }
+  if (value == "strong") {
+    return AdaptiveMeshProfile::Strong;
+  }
+  throw std::runtime_error("--adaptive-mesh-profile requires conservative, standard, or strong");
+}
+
+std::string adaptiveMeshProfileName(const AdaptiveMeshProfile profile) {
+  switch (profile) {
+    case AdaptiveMeshProfile::Conservative:
+      return "conservative";
+    case AdaptiveMeshProfile::Strong:
+      return "strong";
+    case AdaptiveMeshProfile::Standard:
+    default:
+      return "standard";
+  }
+}
+
 ColourSpaceConfig parseColourSpace(const std::string& value) {
   if (value == "raw") {
     return {ColourSpaceMode::Raw, "raw"};
@@ -2247,6 +2283,7 @@ struct CliOptions {
   bool enableMeshReuse = false;
   bool generatePrototypeReport = false;
   AdaptiveMeshMode adaptiveMeshMode = AdaptiveMeshMode::Off;
+  AdaptiveMeshProfile adaptiveMeshProfile = AdaptiveMeshProfile::Standard;
 
   // Filtering options
   bool hasLabelList = false;
@@ -2294,6 +2331,13 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
       options.adaptiveMeshMode = parseAdaptiveMeshMode(argv[++i]);
     } else if (arg.rfind("--adaptive-mesh=", 0) == 0) {
       options.adaptiveMeshMode = parseAdaptiveMeshMode(arg.substr(std::string("--adaptive-mesh=").size()));
+    } else if (arg == "--adaptive-mesh-profile") {
+      if (i + 1 >= argc) {
+        throw std::runtime_error("--adaptive-mesh-profile requires conservative, standard, or strong");
+      }
+      options.adaptiveMeshProfile = parseAdaptiveMeshProfile(argv[++i]);
+    } else if (arg.rfind("--adaptive-mesh-profile=", 0) == 0) {
+      options.adaptiveMeshProfile = parseAdaptiveMeshProfile(arg.substr(std::string("--adaptive-mesh-profile=").size()));
     } else if (arg == "--debug-super-coarse-mesh") {
       options.debugSuperCoarseMesh = true;
     } else if (arg == "--debug-skip-raw-step-styles") {
@@ -3043,6 +3087,7 @@ void tessellateLabel(
     adaptiveDeflection.angularDeflection = angDeflect;
     adaptiveDeflection.relative = relDeflect;
     adaptiveDeflection.reason = "baseline_global_preset";
+    adaptiveDeflection.profile = adaptiveMeshProfileName(cliOptions.adaptiveMeshProfile);
     adaptiveDeflection.warnings.clear();
   }
 
@@ -3077,6 +3122,7 @@ void tessellateLabel(
   key.linearDeflection = linDeflect;
   key.angularDeflection = angDeflect;
   key.relative = relDeflect;
+  key.adaptiveProfile = adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? adaptiveDeflection.profile : "standard";
   key.materialSignature = materialSignature;
   key.isSafe = reuseSafe;
 
@@ -3397,6 +3443,7 @@ void tessellateLabel(
       primitive.angularDeflection = angDeflect;
       primitive.relativeDeflection = relDeflect;
       primitive.deflectionReason = adaptiveDeflection.reason;
+      primitive.deflectionProfile = adaptiveDeflection.profile;
       primitive.deflectionWarnings = adaptiveDeflection.warnings;
       if (!reuseSafe) {
         primitive.meshingTimeMs = meshingTimeMs;
@@ -4351,6 +4398,31 @@ double clampDouble(const double value, const double minValue, const double maxVa
   return value;
 }
 
+struct AdaptiveProfileThresholds {
+  double gate;
+  double watch;
+  double linearMultiplier;
+  double targetAngular;
+  double minLinearMultiplier;
+  double maxLinearMultiplier;
+};
+
+AdaptiveProfileThresholds adaptiveThresholdsFor(const Quality& quality, const AdaptiveMeshProfile profile) {
+  if (quality.name == "high") {
+    if (profile == AdaptiveMeshProfile::Conservative) return {0.40, 0.25, 0.65, 0.17, 0.50, 1.20};
+    if (profile == AdaptiveMeshProfile::Strong) return {0.30, 0.20, 0.35, 0.09, 0.35, 1.20};
+    return {0.30, 0.20, 0.50, 0.14, 0.50, 1.20};
+  }
+  if (quality.name == "balanced") {
+    if (profile == AdaptiveMeshProfile::Conservative) return {0.45, 0.25, 0.65, 0.34, 0.50, 1.80};
+    if (profile == AdaptiveMeshProfile::Strong) return {0.25, 0.12, 0.35, 0.18, 0.35, 1.80};
+    return {0.35, 0.20, 0.50, 0.28, 0.50, 1.80};
+  }
+  if (profile == AdaptiveMeshProfile::Conservative) return {0.50, 0.25, 0.90, 0.60, 0.75, 1.10};
+  if (profile == AdaptiveMeshProfile::Strong) return {0.35, 0.20, 0.65, 0.45, 0.65, 1.10};
+  return {0.45, 0.30, 0.85, 0.55, 0.75, 1.10};
+}
+
 AdaptiveDeflection computeAdaptiveDeflection(
     const Quality& quality,
     const CliOptions& cliOptions,
@@ -4364,6 +4436,7 @@ AdaptiveDeflection computeAdaptiveDeflection(
   if (!adaptiveMeshEnabled(cliOptions.adaptiveMeshMode)) {
     return result;
   }
+  result.profile = adaptiveMeshProfileName(cliOptions.adaptiveMeshProfile);
 
   if (!std::isfinite(assemblyBboxDiagonal) || assemblyBboxDiagonal <= 0.0 ||
       !std::isfinite(shapeWorldBboxDiagonal) || shapeWorldBboxDiagonal <= 0.0) {
@@ -4373,49 +4446,36 @@ AdaptiveDeflection computeAdaptiveDeflection(
   }
 
   const double sizeRatio = std::max(0.0, std::min(1.0, shapeWorldBboxDiagonal / assemblyBboxDiagonal));
-  double gate = 0.35;
-  double watch = 0.20;
-  double targetAngular = quality.angularDeflection;
-  double linearMultiplier = 1.0;
-  double minLinear = quality.linearDeflection * 0.50;
-  double maxLinear = quality.linearDeflection * 1.80;
+  const AdaptiveProfileThresholds thresholds = adaptiveThresholdsFor(quality, cliOptions.adaptiveMeshProfile);
 
-  if (quality.name == "high") {
-    gate = 0.30;
-    watch = 0.20;
-    targetAngular = 0.14;
-    linearMultiplier = 0.50;
-    minLinear = quality.linearDeflection * 0.50;
-    maxLinear = quality.linearDeflection * 1.20;
-  } else if (quality.name == "balanced") {
-    gate = 0.35;
-    watch = 0.20;
-    targetAngular = 0.28;
-    linearMultiplier = 0.50;
-    minLinear = quality.linearDeflection * 0.50;
-    maxLinear = quality.linearDeflection * 1.80;
-  } else {
-    gate = 0.45;
-    watch = 0.30;
-    targetAngular = 0.55;
-    linearMultiplier = 0.85;
-    minLinear = quality.linearDeflection * 0.75;
-    maxLinear = quality.linearDeflection * 1.10;
-  }
-
-  if (sizeRatio < gate) {
+  if (sizeRatio < thresholds.watch) {
     result.reason = "adaptive_noop";
+    return result;
+  }
+  if (sizeRatio < thresholds.gate) {
+    result.reason = "adaptive_watch_band";
+    result.warnings.push_back("large_sparse_watch_band");
     return result;
   }
 
   result.reason = "large_sparse_smoothing";
   result.warnings.push_back("large_sparse_smoothed");
-  if (sizeRatio >= watch && sizeRatio < gate) {
-    result.warnings.push_back("large_sparse_watch_band");
+  if (cliOptions.adaptiveMeshProfile == AdaptiveMeshProfile::Conservative) {
+    result.warnings.push_back("adaptive_profile_conservative");
+  } else if (cliOptions.adaptiveMeshProfile == AdaptiveMeshProfile::Strong) {
+    result.warnings.push_back("adaptive_profile_strong");
   }
 
-  result.linearDeflection = clampDouble(quality.linearDeflection * linearMultiplier, minLinear, maxLinear, result.warnings);
-  result.angularDeflection = clampDouble(targetAngular, std::min(targetAngular, quality.angularDeflection), std::max(targetAngular, quality.angularDeflection), result.warnings);
+  result.linearDeflection = clampDouble(
+      quality.linearDeflection * thresholds.linearMultiplier,
+      quality.linearDeflection * thresholds.minLinearMultiplier,
+      quality.linearDeflection * thresholds.maxLinearMultiplier,
+      result.warnings);
+  result.angularDeflection = clampDouble(
+      thresholds.targetAngular,
+      std::min(thresholds.targetAngular, quality.angularDeflection),
+      std::max(thresholds.targetAngular, quality.angularDeflection),
+      result.warnings);
   result.relative = true;
   return result;
 }
@@ -4482,6 +4542,8 @@ void writeMeshReport(
   bool hasTinyDenseReportOnly = false;
   bool hasLargeSparseSmoothed = false;
   bool hasAdaptiveClamp = false;
+  bool hasStrongProfile = false;
+  bool hasConservativeProfile = false;
   std::vector<MeshReportRankingEntry> rankingEntries;
   rankingEntries.reserve(primitives.size());
 
@@ -4502,6 +4564,8 @@ void writeMeshReport(
     for (const auto& warning : primitive.deflectionWarnings) {
       if (warning == "large_sparse_smoothed") hasLargeSparseSmoothed = true;
       if (warning == "adaptive_clamped_min" || warning == "adaptive_clamped_max") hasAdaptiveClamp = true;
+      if (warning == "adaptive_profile_strong") hasStrongProfile = true;
+      if (warning == "adaptive_profile_conservative") hasConservativeProfile = true;
     }
     rankingEntries.push_back({i, sizeRatio, densityScore});
   }
@@ -4538,6 +4602,7 @@ void writeMeshReport(
   out << "    \"nativePreset\": "; writeString(out, quality.name); out << ",\n";
   out << "    \"adaptiveEnabled\": " << (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? "true" : "false") << ",\n";
   out << "    \"adaptiveMode\": "; writeString(out, adaptiveMeshModeName(cliOptions.adaptiveMeshMode)); out << ",\n";
+  out << "    \"adaptiveProfile\": "; writeString(out, adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? adaptiveMeshProfileName(cliOptions.adaptiveMeshProfile) : "standard"); out << ",\n";
   out << "    \"simplificationEnabled\": false,\n";
   out << "    \"baseLinearDeflection\": " << quality.linearDeflection << ",\n";
   out << "    \"baseAngularDeflection\": " << quality.angularDeflection << ",\n";
@@ -4583,7 +4648,7 @@ void writeMeshReport(
     out << "\"densityScore\": " << densityScore << ", ";
     out << "\"meshingTimeMs\": "; writeNullableMs(out, primitive.meshingTimeMs); out << ", ";
     out << "\"simplificationRatio\": 0, ";
-    out << "\"deflection\": {\"linear\": " << primitive.linearDeflection << ", \"angular\": " << primitive.angularDeflection << ", \"relative\": " << (primitive.relativeDeflection ? "true" : "false") << ", \"reason\": "; writeString(out, primitive.deflectionReason); out << "}, ";
+    out << "\"deflection\": {\"linear\": " << primitive.linearDeflection << ", \"angular\": " << primitive.angularDeflection << ", \"relative\": " << (primitive.relativeDeflection ? "true" : "false") << ", \"reason\": "; writeString(out, primitive.deflectionReason); out << ", \"profile\": "; writeString(out, primitive.deflectionProfile); out << "}, ";
     out << "\"warnings\": [";
     bool firstWarning = true;
     if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode)) {
@@ -4655,6 +4720,16 @@ void writeMeshReport(
   if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && hasAdaptiveClamp) {
     if (!firstWarning) out << ", ";
     writeString(out, "adaptive_clamp_applied");
+    firstWarning = false;
+  }
+  if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && hasStrongProfile) {
+    if (!firstWarning) out << ", ";
+    writeString(out, "adaptive_profile_strong");
+    firstWarning = false;
+  }
+  if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && hasConservativeProfile) {
+    if (!firstWarning) out << ", ";
+    writeString(out, "adaptive_profile_conservative");
   }
   out << "],\n";
   out << "  \"recommendations\": [";
@@ -4733,7 +4808,8 @@ void writeReport(
   out << "    \"angularDeflection\": " << quality.angularDeflection << ",\n";
   out << "    \"relative\": " << (quality.relative ? "true" : "false") << ",\n";
   out << "    \"adaptiveEnabled\": " << (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? "true" : "false") << ",\n";
-  out << "    \"adaptiveMode\": "; writeString(out, adaptiveMeshModeName(cliOptions.adaptiveMeshMode)); out << "\n";
+  out << "    \"adaptiveMode\": "; writeString(out, adaptiveMeshModeName(cliOptions.adaptiveMeshMode)); out << ",\n";
+  out << "    \"adaptiveProfile\": "; writeString(out, adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? adaptiveMeshProfileName(cliOptions.adaptiveMeshProfile) : "standard"); out << "\n";
   out << "  },\n";
   out << "  \"colourSpace\": {\n";
   out << "    \"mode\": "; writeString(out, colourSpace.name); out << ",\n";
@@ -5942,11 +6018,97 @@ void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& ren
   }
 }
 
+int runAdaptiveMeshSelfTests() {
+  int failures = 0;
+  auto check = [&](const bool condition, const std::string& message) {
+    if (!condition) {
+      std::cerr << "FAIL: " << message << "\n";
+      failures++;
+    }
+  };
+
+  const Quality balanced = parseQuality("balanced");
+  const Quality high = parseQuality("high");
+  const Quality low = parseQuality("preview");
+
+  CliOptions off;
+  off.adaptiveMeshMode = AdaptiveMeshMode::Off;
+  off.adaptiveMeshProfile = AdaptiveMeshProfile::Strong;
+  const AdaptiveDeflection offDeflection = computeAdaptiveDeflection(balanced, off, 100.0, 100.0);
+  check(offDeflection.linearDeflection == balanced.linearDeflection, "adaptive off keeps baseline linear deflection");
+  check(offDeflection.angularDeflection == balanced.angularDeflection, "adaptive off keeps baseline angular deflection");
+  check(offDeflection.reason == "baseline_global_preset", "adaptive off keeps baseline reason");
+
+  CliOptions standard;
+  standard.adaptiveMeshMode = AdaptiveMeshMode::LargeSparseSmoothing;
+  standard.adaptiveMeshProfile = AdaptiveMeshProfile::Standard;
+  const AdaptiveDeflection standardBalanced = computeAdaptiveDeflection(balanced, standard, 100.0, 35.0);
+  const AdaptiveDeflection standardHigh = computeAdaptiveDeflection(high, standard, 100.0, 30.0);
+  const AdaptiveDeflection standardLow = computeAdaptiveDeflection(low, standard, 100.0, 45.0);
+  check(std::abs(standardBalanced.linearDeflection - 0.225) < 0.000001, "standard balanced preserves Phase 2A linear");
+  check(std::abs(standardBalanced.angularDeflection - 0.28) < 0.000001, "standard balanced preserves Phase 2A angular");
+  check(std::abs(standardHigh.linearDeflection - 0.06) < 0.000001, "standard high preserves Phase 2A linear");
+  check(std::abs(standardHigh.angularDeflection - 0.14) < 0.000001, "standard high preserves Phase 2A angular");
+  check(std::abs(standardLow.linearDeflection - 0.7225) < 0.000001, "standard low preserves Phase 2A linear");
+  check(std::abs(standardLow.angularDeflection - 0.55) < 0.000001, "standard low preserves Phase 2A angular");
+
+  CliOptions conservative = standard;
+  conservative.adaptiveMeshProfile = AdaptiveMeshProfile::Conservative;
+  const AdaptiveDeflection conservativeBalanced = computeAdaptiveDeflection(balanced, conservative, 100.0, 45.0);
+  check(conservativeBalanced.linearDeflection > standardBalanced.linearDeflection, "conservative balanced is weaker than standard");
+  check(conservativeBalanced.angularDeflection > standardBalanced.angularDeflection, "conservative balanced angular is weaker than standard");
+
+  CliOptions strong = standard;
+  strong.adaptiveMeshProfile = AdaptiveMeshProfile::Strong;
+  const AdaptiveDeflection strongBalanced = computeAdaptiveDeflection(balanced, strong, 100.0, 25.0);
+  const AdaptiveDeflection strongLow = computeAdaptiveDeflection(low, strong, 100.0, 35.0);
+  check(strongBalanced.linearDeflection < standardBalanced.linearDeflection, "strong balanced is stronger than standard");
+  check(strongBalanced.angularDeflection < standardBalanced.angularDeflection, "strong balanced angular is stronger than standard");
+  check(strongLow.linearDeflection > 0.0 && strongLow.angularDeflection > 0.0 && strongLow.relative, "strong low profile values are sane");
+
+  const AdaptiveDeflection fallback = computeAdaptiveDeflection(balanced, strong, 0.0, 25.0);
+  check(fallback.reason == "adaptive_invalid_bounds_fallback", "invalid bounds fallback still works");
+  check(fallback.linearDeflection == balanced.linearDeflection, "invalid bounds fallback keeps baseline linear");
+
+  check(adaptiveMeshProfileName(parseAdaptiveMeshProfile("conservative")) == "conservative", "explicit conservative accepted");
+  check(adaptiveMeshProfileName(parseAdaptiveMeshProfile("standard")) == "standard", "explicit standard accepted");
+  check(adaptiveMeshProfileName(parseAdaptiveMeshProfile("strong")) == "strong", "explicit strong accepted");
+  try {
+    (void)parseAdaptiveMeshProfile("invalid");
+    check(false, "invalid profile rejected");
+  } catch (const std::exception&) {
+    check(true, "invalid profile rejected");
+  }
+
+  ReuseKey standardKey;
+  standardKey.tshapePtr = reinterpret_cast<void*>(0x1);
+  standardKey.linearDeflection = standardBalanced.linearDeflection;
+  standardKey.angularDeflection = standardBalanced.angularDeflection;
+  standardKey.relative = standardBalanced.relative;
+  standardKey.adaptiveProfile = standardBalanced.profile;
+  standardKey.materialSignature = "color:test";
+  standardKey.isSafe = true;
+  ReuseKey strongKey = standardKey;
+  strongKey.linearDeflection = strongBalanced.linearDeflection;
+  strongKey.angularDeflection = strongBalanced.angularDeflection;
+  strongKey.adaptiveProfile = strongBalanced.profile;
+  check(standardKey < strongKey || strongKey < standardKey, "reuse key distinguishes adaptive values and profile");
+
+  if (failures == 0) {
+    std::cout << "Adaptive mesh self-tests passed\n";
+  }
+  return failures == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3 || argc > 22) {
-    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear] [--parallel-mesh on|off] [--adaptive-mesh on|off] [--debug-super-coarse-mesh] [--debug-skip-raw-step-styles] [--debug-disable-style-cache] [--label-list <file>]\n";
+  if (argc == 2 && std::string(argv[1]) == "--run-adaptive-mesh-tests") {
+    return runAdaptiveMeshSelfTests();
+  }
+
+  if (argc < 3 || argc > 24) {
+    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear] [--parallel-mesh on|off] [--adaptive-mesh on|off] [--adaptive-mesh-profile conservative|standard|strong] [--debug-super-coarse-mesh] [--debug-skip-raw-step-styles] [--debug-disable-style-cache] [--label-list <file>]\n";
     return 2;
   }
 
@@ -5981,6 +6143,7 @@ int main(int argc, char** argv) {
             " applyLayerColours=" + (colourMode.applyLayerColours ? "true" : "false"));
     logLine("Parallel mesh: " + (cliOptions.parallelMesh ? std::string("on") : std::string("off")));
     logLine("Adaptive mesh: " + adaptiveMeshModeName(cliOptions.adaptiveMeshMode));
+    logLine("Adaptive mesh profile: " + (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? adaptiveMeshProfileName(cliOptions.adaptiveMeshProfile) : std::string("standard")));
     logLine("Debug super coarse mesh: " + (cliOptions.debugSuperCoarseMesh ? std::string("true") : std::string("false")));
     logLine("Debug skip raw STEP styles: " + (cliOptions.debugSkipRawStepStyles ? std::string("true") : std::string("false")));
     logLine("Debug disable style cache: " + (cliOptions.debugDisableStyleCache ? std::string("true") : std::string("false")));

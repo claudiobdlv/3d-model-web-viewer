@@ -15,11 +15,20 @@ import { validateMergedGlb } from "./utils/mergeGlbs.js";
 import { decideLargeStepChunking } from "./utils/largeStepDecision.js";
 
 type MeshiqAdaptiveMeshMode = "off" | "on";
+type MeshiqAdaptiveMeshProfile = "conservative" | "standard" | "strong";
 
 function meshiqAdaptiveMeshMode(): MeshiqAdaptiveMeshMode {
   const value = process.env.MESHIQ_ADAPTIVE_MESH ?? "off";
   if (value !== "off" && value !== "on") {
     throw new Error("MESHIQ_ADAPTIVE_MESH must be off or on.");
+  }
+  return value;
+}
+
+function meshiqAdaptiveMeshProfile(): MeshiqAdaptiveMeshProfile {
+  const value = process.env.MESHIQ_ADAPTIVE_MESH_PROFILE ?? "standard";
+  if (value !== "conservative" && value !== "standard" && value !== "strong") {
+    throw new Error("MESHIQ_ADAPTIVE_MESH_PROFILE must be conservative, standard, or strong.");
   }
   return value;
 }
@@ -360,8 +369,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       const parallelMesh = process.env.XCAF_PARALLEL_MESH === "off" ? "off" : "on";
       args.push("--parallel-mesh", parallelMesh);
       const adaptiveMesh = meshiqAdaptiveMeshMode();
+      const adaptiveProfile = meshiqAdaptiveMeshProfile();
       if (adaptiveMesh === "on") {
         args.push("--adaptive-mesh", "on");
+        args.push("--adaptive-mesh-profile", adaptiveProfile);
       }
       if (process.env.DEBUG_SUPER_COARSE_MESH === "true") args.push("--debug-super-coarse-mesh");
       if (process.env.DEBUG_SKIP_RAW_STEP_STYLES === "true") args.push("--debug-skip-raw-step-styles");
@@ -890,7 +901,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
               },
               adaptiveMesh: {
                 enabled: nativeQualityDetails.adaptiveEnabled,
-                mode: nativeQualityDetails.adaptiveMode
+                mode: nativeQualityDetails.adaptiveMode,
+                profile: nativeQualityDetails.adaptiveProfile
               },
               converterBackend: input.converterBackend,
               artifacts: {
@@ -969,7 +981,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     angularDeflection: nativeDeflections[nativePreset].angular,
     relative: true,
     adaptiveEnabled: false,
-    adaptiveMode: "off"
+    adaptiveMode: "off",
+    adaptiveProfile: "standard"
   };
 
   if (input.converterBackend === "occt-js") {
@@ -1094,7 +1107,8 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
         },
         adaptiveMesh: {
           enabled: nativeQualityDetails.adaptiveEnabled,
-          mode: nativeQualityDetails.adaptiveMode
+          mode: nativeQualityDetails.adaptiveMode,
+          profile: nativeQualityDetails.adaptiveProfile
         },
         converterBackend: input.converterBackend,
         artifacts: {
@@ -1189,7 +1203,9 @@ async function runXcafBaselineConverter(input: {
   console.log(`Native XCAF quality: ${nativeQuality}`);
   console.log(`Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`);
   const adaptiveMesh = meshiqAdaptiveMeshMode();
+  const adaptiveProfile = meshiqAdaptiveMeshProfile();
   console.log(`MeshIQ adaptive mesh: ${adaptiveMesh}`);
+  console.log(`MeshIQ adaptive profile: ${adaptiveMesh === "on" ? adaptiveProfile : "standard"}`);
 
   const args = [
     input.sourcePath,
@@ -1206,6 +1222,7 @@ async function runXcafBaselineConverter(input: {
   args.push("--parallel-mesh", parallelMesh);
   if (adaptiveMesh === "on") {
     args.push("--adaptive-mesh", "on");
+    args.push("--adaptive-mesh-profile", adaptiveProfile);
   }
 
   if (process.env.DEBUG_SUPER_COARSE_MESH === "true") {
@@ -1244,6 +1261,7 @@ async function runXcafBaselineConverter(input: {
     `Native preset: ${nativeQuality}`,
     `Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`,
     `MeshIQ adaptive mesh: ${adaptiveMesh}`,
+    `MeshIQ adaptive profile: ${adaptiveMesh === "on" ? adaptiveProfile : "standard"}`,
     `XCAF colour mode: ${input.xcafColourMode}`,
     `Colour space: raw`,
     `Mesh reuse: ${meshReuseMode}`,
@@ -1362,6 +1380,7 @@ async function writeXcafCompatibilityFiles(input: {
       relative?: boolean;
       adaptiveEnabled?: boolean;
       adaptiveMode?: string;
+      adaptiveProfile?: string;
     };
     colourMode?: { mode?: string };
     colourSpace?: { mode?: string };
@@ -1387,7 +1406,8 @@ async function writeXcafCompatibilityFiles(input: {
     nativeRelativeDeflection: report.quality?.relative,
     adaptiveMesh: {
       enabled: report.quality?.adaptiveEnabled ?? false,
-      mode: report.quality?.adaptiveMode ?? "off"
+      mode: report.quality?.adaptiveMode ?? "off",
+      profile: report.quality?.adaptiveProfile ?? "standard"
     },
     openCascadeVersion: report.openCascadeVersion,
     colourMode: report.colourMode?.mode,
@@ -1432,7 +1452,8 @@ async function writeXcafCompatibilityFiles(input: {
     angularDeflection: report.quality?.angularDeflection ?? nativeDeflections[fallbackPreset].angular,
     relative: report.quality?.relative ?? true,
     adaptiveEnabled: report.quality?.adaptiveEnabled ?? false,
-    adaptiveMode: report.quality?.adaptiveMode ?? "off"
+    adaptiveMode: report.quality?.adaptiveMode ?? "off",
+    adaptiveProfile: report.quality?.adaptiveProfile ?? "standard"
   };
 }
 
@@ -1443,6 +1464,7 @@ type NativeQualityDetails = {
   relative: boolean;
   adaptiveEnabled: boolean;
   adaptiveMode: string;
+  adaptiveProfile: string;
 };
 
 async function assertFile(filePath: string, message: string): Promise<void> {

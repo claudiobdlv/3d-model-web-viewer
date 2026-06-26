@@ -815,6 +815,64 @@ Recommended Phase 2B path:
 - Add a report UI summary before exposing any admin control.
 - Keep tiny-dense coarsening and simplification separate behind their own later flags.
 
+#### Phase 2B adaptive profile tuning
+
+Phase 2B adds tunable adaptive smoothing profiles while preserving all production and adaptive-off defaults:
+
+- native CLI flag: `--adaptive-mesh-profile conservative|standard|strong`
+- native default profile: `standard`
+- worker environment variable: `MESHIQ_ADAPTIVE_MESH_PROFILE=conservative|standard|strong`
+- worker default profile: `standard`
+- profile is only passed by the worker when `MESHIQ_ADAPTIVE_MESH=on`
+- adaptive mode remains default-off in native CLI and worker config
+- no tiny-dense coarsening and no simplification are implemented
+
+The `standard` profile preserves Phase 2A adaptive-on behavior. The `conservative` profile backs off the large-sparse gate and smoothing strength. The `strong` profile tightens linear and angular values for large sparse curved geometry such as tanks and tubes.
+
+Profile thresholds:
+
+| Native preset | Profile | Large-shape gate | Watch band | Linear multiplier | Angular target |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `preview` / `low` | `conservative` | `0.50` | `0.25-0.50` | `0.90` | `0.60` |
+| `preview` / `low` | `standard` | `0.45` | `0.30-0.45` | `0.85` | `0.55` |
+| `preview` / `low` | `strong` | `0.35` | `0.20-0.35` | `0.65` | `0.45` |
+| `balanced` | `conservative` | `0.45` | `0.25-0.45` | `0.65` | `0.34` |
+| `balanced` | `standard` | `0.35` | `0.20-0.35` | `0.50` | `0.28` |
+| `balanced` | `strong` | `0.25` | `0.12-0.25` | `0.35` | `0.18` |
+| `high` | `conservative` | `0.40` | `0.25-0.40` | `0.65` | `0.17` |
+| `high` | `standard` | `0.30` | `0.20-0.30` | `0.50` | `0.14` |
+| `high` | `strong` | `0.30` | `0.20-0.30` | `0.35` | `0.09` |
+
+The implementation continues to use the existing `BRepMesh_IncrementalMesh(shape, linearDeflection, relative, angularDeflection, parallel)` constructor. It keeps `relative=true`, does not use `IMeshTools_Parameters`, does not use pre-mesh triangle counts for tessellation decisions, and does not coarsen tiny dense parts. The `high` + `strong` gate intentionally matches `standard` after validation showed the looser `0.22` gate pulled dense regulator and gas-stick assemblies into smoothing and exceeded the U843 hard stop.
+
+`mesh-report.json` and `xcaf-report.json` record `adaptiveProfile`. Per-part deflection entries record the actual linear value, actual angular value, relative mode, reason, profile, and warning codes. Profile-specific warning codes are:
+
+- `adaptive_profile_strong`
+- `adaptive_profile_conservative`
+- `large_sparse_smoothed`
+- `tiny_dense_report_only`
+- existing clamp/fallback warnings
+
+Mesh reuse keys include actual linear deflection, angular deflection, relative mode, material signature, safety state, and adaptive profile, so adaptive-off, standard, conservative, and strong outputs cannot mix unsafe cached tessellations.
+
+Phase 2B isolated validation should use only the EliteDesk worktree:
+
+- worktree: `/home/claudio/projects/3d-model-web-viewer-worktrees/meshiq-phase1-runtime`
+- image: `meshiq-phase2b-xcaf:validation`
+- output root: `.tmp/meshiq-runtime-validation-phase2b/`
+- models: `large-curved-tank` and `u843-non-haz-panel`
+
+Required comparison matrix:
+
+| Model | Quality | Adaptive off | Adaptive standard | Adaptive strong |
+| --- | --- | --- | --- | --- |
+| `large-curved-tank` | `balanced` | required | required | required |
+| `large-curved-tank` | `high` | required | required | required |
+| `u843-non-haz-panel` | `balanced` | required | required | required |
+| `u843-non-haz-panel` | `high` | required | required | required |
+
+Validation should capture triangles, vertices, GLB bytes, conversion time, mesh time, smoothed part count, top large-sparse candidates, top tiny-dense warnings, and per-part deflection profile/reason values. Strong is acceptable only if the U843 triangle increase stays below the 10 percent hard stop and ideally below the 5 percent target for both balanced and high. The expected rollout posture after Phase 2B is that `standard` remains the safer candidate for future rollout unless visual validation proves `strong` is materially better without exceeding the U843 budget.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.

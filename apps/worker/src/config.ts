@@ -11,6 +11,7 @@ export type WorkerConfig = {
   xcafConverterBin: string;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
   meshiqAdaptiveMesh: "off" | "on";
+  meshiqAdaptiveMeshProfile: "conservative" | "standard" | "strong";
   quality: string;
   glbOptimizationMode: "disabled" | "meshopt";
   runOnce: boolean;
@@ -69,6 +70,10 @@ export function loadConfig(argv = process.argv): WorkerConfig {
   if (!["off", "on"].includes(meshiqAdaptiveMesh)) {
     throw new Error("MESHIQ_ADAPTIVE_MESH must be off or on.");
   }
+  const meshiqAdaptiveMeshProfile = process.env.MESHIQ_ADAPTIVE_MESH_PROFILE || "standard";
+  if (!["conservative", "standard", "strong"].includes(meshiqAdaptiveMeshProfile)) {
+    throw new Error("MESHIQ_ADAPTIVE_MESH_PROFILE must be conservative, standard, or strong.");
+  }
 
   const glbOptimizationMode = process.env.GLB_OPTIMIZATION_MODE || "disabled";
   if (!["disabled", "meshopt"].includes(glbOptimizationMode)) {
@@ -110,6 +115,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     xcafConverterBin: path.resolve(process.env.XCAF_CONVERTER_BIN || "/app/bin/xcaf-step-to-glb"),
     xcafColourMode: xcafColourMode as WorkerConfig["xcafColourMode"],
     meshiqAdaptiveMesh: meshiqAdaptiveMesh as WorkerConfig["meshiqAdaptiveMesh"],
+    meshiqAdaptiveMeshProfile: meshiqAdaptiveMeshProfile as WorkerConfig["meshiqAdaptiveMeshProfile"],
     quality,
     glbOptimizationMode: glbOptimizationMode as "disabled" | "meshopt",
     runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once"),

@@ -20,6 +20,7 @@ console.log(`Converter quality: ${config.quality}`);
 if (config.converterBackend === "xcaf-baseline") {
   console.log(`XCAF colour mode: ${config.xcafColourMode}`);
   console.log(`MeshIQ adaptive mesh: ${config.meshiqAdaptiveMesh}`);
+  console.log(`MeshIQ adaptive profile: ${config.meshiqAdaptiveMeshProfile}`);
 } else {
   console.log(`Material rules mode: ${process.env.MATERIAL_RULES_MODE || "fallback"}`);
 }
