@@ -10,6 +10,7 @@ export type WorkerConfig = {
   converterCli: string;
   xcafConverterBin: string;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
+  meshiqAdaptiveMesh: "off" | "on";
   quality: string;
   glbOptimizationMode: "disabled" | "meshopt";
   runOnce: boolean;
@@ -64,6 +65,10 @@ export function loadConfig(argv = process.argv): WorkerConfig {
   if (!["xcaf-baseline", "step-presentation"].includes(xcafColourMode)) {
     throw new Error("XCAF_COLOUR_MODE must be xcaf-baseline or step-presentation.");
   }
+  const meshiqAdaptiveMesh = process.env.MESHIQ_ADAPTIVE_MESH || "off";
+  if (!["off", "on"].includes(meshiqAdaptiveMesh)) {
+    throw new Error("MESHIQ_ADAPTIVE_MESH must be off or on.");
+  }
 
   const glbOptimizationMode = process.env.GLB_OPTIMIZATION_MODE || "disabled";
   if (!["disabled", "meshopt"].includes(glbOptimizationMode)) {
@@ -104,6 +109,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     converterCli: path.resolve(process.env.CONVERTER_CLI || "../converter/src/cli.js"),
     xcafConverterBin: path.resolve(process.env.XCAF_CONVERTER_BIN || "/app/bin/xcaf-step-to-glb"),
     xcafColourMode: xcafColourMode as WorkerConfig["xcafColourMode"],
+    meshiqAdaptiveMesh: meshiqAdaptiveMesh as WorkerConfig["meshiqAdaptiveMesh"],
     quality,
     glbOptimizationMode: glbOptimizationMode as "disabled" | "meshopt",
     runOnce: process.env.RUN_ONCE === "true" || argv.includes("--once"),

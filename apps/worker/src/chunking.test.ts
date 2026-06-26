@@ -96,6 +96,23 @@ test("config parsing and defaults", () => {
   assert.equal(config.largeStepTargetChunks, 3);
   assert.equal(config.largeStepMaxConcurrentChunks, 3);
   assert.equal(config.largeStepChunkFallbackMode, "fail");
+  assert.equal(config.meshiqAdaptiveMesh, "off");
+});
+
+test("config validates MeshIQ adaptive mesh mode", () => {
+  const previous = process.env.MESHIQ_ADAPTIVE_MESH;
+  try {
+    process.env.MESHIQ_ADAPTIVE_MESH = "on";
+    assert.equal(loadConfig([]).meshiqAdaptiveMesh, "on");
+    process.env.MESHIQ_ADAPTIVE_MESH = "maybe";
+    assert.throws(() => loadConfig([]), /MESHIQ_ADAPTIVE_MESH must be off or on/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MESHIQ_ADAPTIVE_MESH;
+    } else {
+      process.env.MESHIQ_ADAPTIVE_MESH = previous;
+    }
+  }
 });
 
 test("disabled mode does not run planner/chunks", async (t) => {
@@ -182,12 +199,81 @@ test("disabled mode does not run planner/chunks", async (t) => {
     const calls = spawnMock.mock.calls;
     assert.equal(calls.length, 1);
     assert.ok(!calls[0]!.arguments[0].includes("xcaf-step-planner"));
+    assert.ok(!calls[0]!.arguments[1].includes("--adaptive-mesh"));
     
     const manifest = JSON.parse(await fs.promises.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.largeStepChunking.mode, "disabled");
     assert.equal(manifest.largeStepChunking.status, "disabled");
     assert.equal(manifest.artifacts.meshReport, "mesh-report.json");
+    assert.equal(manifest.adaptiveMesh.enabled, false);
+    assert.equal(manifest.adaptiveMesh.mode, "off");
   } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("MESHIQ_ADAPTIVE_MESH=on passes native adaptive mesh flag", async (t) => {
+  const previous = process.env.MESHIQ_ADAPTIVE_MESH;
+  process.env.MESHIQ_ADAPTIVE_MESH = "on";
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "modelbase-adaptive-mesh-on-"));
+  const spawnMock = t.mock.method(child_process, "spawn");
+
+  try {
+    const { xcafConverterBin } = await setupTestDir(dir);
+    const sourcePath = path.join(dir, "model.step");
+    await fs.promises.writeFile(sourcePath, "dummy step content");
+
+    spawnMock.mock.mockImplementation((cmd: any, args: any) => {
+      const child = new MockChildProcess();
+      const outDir = args[1] || dir;
+      process.nextTick(async () => {
+        const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+        fs.mkdirSync(outDir, { recursive: true });
+        await io.write(path.join(outDir, "display.glb"), createChunkFixture("adaptive-on"));
+        fs.writeFileSync(path.join(outDir, "xcaf-report.json"), JSON.stringify({
+          openCascadeVersion: "7.8.0",
+          summary: { triangles: 10, nodeCount: 5, meshesPrimitivesExported: 1, primitiveCount: 1, materialCount: 1 },
+          quality: { preset: "balanced", adaptiveEnabled: true, adaptiveMode: "large_sparse_smoothing" }
+        }));
+        fs.writeFileSync(path.join(outDir, "mesh-report.json"), JSON.stringify({
+          schemaVersion: 1,
+          converterBackend: "xcaf-baseline",
+          quality: { adaptiveEnabled: true, adaptiveMode: "large_sparse_smoothing" },
+          totals: {},
+          parts: [],
+          rankings: {},
+          warnings: ["large_sparse_smoothed"]
+        }));
+        fs.writeFileSync(path.join(outDir, "conversion.log"), "normal conversion log");
+        child.emit("exit", 0);
+      });
+      return child as any;
+    });
+
+    const result = await convertStepJob({
+      slug: "test-adaptive-on",
+      sourcePath,
+      outputDir: dir,
+      converterBackend: "xcaf-baseline",
+      converterCli: "cli.js",
+      xcafConverterBin,
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "disabled",
+      largeStepChunkingMode: "disabled"
+    });
+
+    const args = spawnMock.mock.calls[0]!.arguments[1];
+    assert.deepEqual(args.slice(args.indexOf("--adaptive-mesh"), args.indexOf("--adaptive-mesh") + 2), ["--adaptive-mesh", "on"]);
+    const manifest = JSON.parse(await fs.promises.readFile(result.manifestPath, "utf8"));
+    assert.equal(manifest.adaptiveMesh.enabled, true);
+    assert.equal(manifest.adaptiveMesh.mode, "large_sparse_smoothing");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MESHIQ_ADAPTIVE_MESH;
+    } else {
+      process.env.MESHIQ_ADAPTIVE_MESH = previous;
+    }
     await fs.promises.rm(dir, { recursive: true, force: true });
   }
 });

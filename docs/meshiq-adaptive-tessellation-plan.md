@@ -697,6 +697,124 @@ Phase 2 is now ready to implement behind a default-off flag for large sparse smo
 - Write deflection reasons and clamp decisions into `mesh-report.json`.
 - Keep default off until benchmarks are reviewed.
 
+#### Phase 2A implementation notes
+
+Phase 2A implements large-sparse adaptive smoothing only, behind disabled-by-default flags:
+
+- native CLI flag: `--adaptive-mesh on|off`
+- native default: `off`
+- worker environment flag: `MESHIQ_ADAPTIVE_MESH=off|on`
+- worker default: `off`
+- adaptive mode name in reports: `large_sparse_smoothing`
+
+When adaptive meshing is off, the native presets remain unchanged:
+
+| Native preset | Linear deflection | Angular deflection | Relative mode |
+| --- | ---: | ---: | --- |
+| `preview` / `low` | `0.85` | `0.65` | `true` |
+| `balanced` | `0.45` | `0.50` | `true` |
+| `high` | `0.12` | `0.22` | `true` |
+
+When adaptive meshing is on, the converter computes the full assembly bounding-box diagonal once before XCAF traversal, then computes each render shape's world bounding-box diagonal before meshing. The size ratio is:
+
+```text
+sizeRatio = clamp(shapeWorldBboxDiagonal / assemblyBboxDiagonal, 0.0, 1.0)
+```
+
+If bounds are missing, zero, NaN, or infinite, the converter keeps baseline values and reports `adaptive_invalid_bounds_fallback`. The implementation still uses the existing `BRepMesh_IncrementalMesh(shape, linearDeflection, relative, angularDeflection, parallel)` constructor. It does not use `IMeshTools_Parameters`, does not switch to absolute deflection, and keeps current parallel mesh behavior.
+
+Phase 2A thresholds:
+
+| Native preset | Large-shape gate | Watch band | Linear multiplier | Angular target |
+| --- | ---: | ---: | ---: | ---: |
+| `preview` / `low` | `sizeRatio >= 0.45` | `0.30-0.45` | `0.85` | `0.55` |
+| `balanced` | `sizeRatio >= 0.35` | `0.20-0.35` | `0.50` | `0.28` |
+| `high` | `sizeRatio >= 0.30` | `0.20-0.30` | `0.50` | `0.14` |
+
+Clamp ranges:
+
+| Native preset | Linear clamp |
+| --- | --- |
+| `preview` / `low` | `base * 0.75` to `base * 1.10` |
+| `balanced` | `base * 0.50` to `base * 1.80` |
+| `high` | `base * 0.50` to `base * 1.20` |
+
+Tiny-dense handling remains report-only. The Phase 2A warning gates are:
+
+- `balanced` / medium: `sizeRatio <= 0.18` and triangles `>= 8000`
+- `high`: `sizeRatio <= 0.18` and triangles `>= 25000`
+
+No tiny-dense coarsening, part deletion, or simplification is implemented in Phase 2A.
+
+Mesh reuse remains keyed by the actual linear deflection, angular deflection, relative mode, material signature, and safety state. Because adaptive deflection is computed before building `ReuseKey`, adaptive-on and adaptive-off cached geometry cannot be mixed. Repeated geometry with the same adaptive context can still reuse safely. If a future transform-scale case makes reuse ambiguous, the safe path is to disable reuse for that case rather than sharing a mismatched tessellation.
+
+`mesh-report.json` additions:
+
+- `quality.adaptiveEnabled`
+- `quality.adaptiveMode`
+- per-part `deflection.linear`
+- per-part `deflection.angular`
+- per-part `deflection.relative`
+- per-part `deflection.reason`
+- per-part warnings: `large_sparse_smoothed`, `adaptive_clamped_min`, `adaptive_clamped_max`, `tiny_dense_report_only`
+
+`xcaf-report.json` also records `quality.adaptiveEnabled` and `quality.adaptiveMode`.
+
+Runtime validation for Phase 2A should use only the isolated EliteDesk worktree:
+
+- worktree: `/home/claudio/projects/3d-model-web-viewer-worktrees/meshiq-phase1-runtime`
+- image: `meshiq-phase2a-xcaf:validation`
+- output root: `.tmp/meshiq-runtime-validation-phase2a/`
+
+Required validation models:
+
+- `u843-non-haz-panel`
+- `large-curved-tank`
+- optionally `u843_cda_panel` if quick
+
+For each model, compare `balanced` off/on and `high` off/on for triangles, vertices, GLB bytes, conversion time, mesh time, large-sparse smoothing counts, and report-only tiny-dense warnings. Phase 2A artifacts must not be uploaded to production or committed.
+
+Phase 2A isolated validation was run on the EliteDesk worktree above with image `meshiq-phase2a-xcaf:validation`. Inputs were mounted read-only and outputs were written under `.tmp/meshiq-runtime-validation-phase2a/`. The production worktree, production database, uploaded STEP files, generated production GLBs, public links, QR links, and services were not modified.
+
+Validation totals:
+
+| Model | Quality | Adaptive | Triangles | Vertices | GLB bytes | Conversion time | Mesh time | Smoothed parts | Tiny dense warnings |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `large-curved-tank` | `balanced` | off | 524 | 1,572 | 66,812 | 0.089 s | 0.000 ms | 0 | 0 |
+| `large-curved-tank` | `balanced` | on | 752 | 2,256 | 85,968 | 0.088 s | 0.000 ms | 3 | 0 |
+| `large-curved-tank` | `high` | off | 1,164 | 3,492 | 120,576 | 0.083 s | 0.000 ms | 0 | 0 |
+| `large-curved-tank` | `high` | on | 1,548 | 4,644 | 152,860 | 0.090 s | 0.000 ms | 3 | 0 |
+| `u843-non-haz-panel` | `balanced` | off | 378,952 | 1,136,856 | 28,923,772 | 69.846 s | 7,454.048 ms | 0 | 0 |
+| `u843-non-haz-panel` | `balanced` | on | 381,564 | 1,144,692 | 29,143,184 | 70.935 s | 7,603.872 ms | 26 | 5 |
+| `u843-non-haz-panel` | `high` | off | 1,011,054 | 3,033,162 | 77,932,768 | 71.969 s | 9,478.878 ms | 0 | 0 |
+| `u843-non-haz-panel` | `high` | on | 1,016,882 | 3,050,646 | 78,422,440 | 72.127 s | 10,111.852 ms | 26 | 5 |
+
+Large curved tank results:
+
+- `balanced` adaptive-on increased the three major cylinders from 100 triangles each to 176 triangles each.
+- `high` adaptive-on increased the main large cylinder from 228 triangles to 356 triangles.
+- Visual inspection of the balanced off/on GLBs showed finer cylinder faceting with adaptive-on; the model still remains visibly faceted enough that Phase 2B tuning may consider a tighter angular target if file-size and time budgets allow.
+
+U843 Non-Haz results:
+
+- `balanced` adaptive-on smoothed 26 large sparse parts. Representative `316L SS TUBE` rows increased from 100 triangles to 180 triangles, and the large unnamed body increased from 556 to 956 triangles.
+- `high` adaptive-on smoothed the same 26 large sparse parts. A representative `316L SS TUBE` increased from 228 triangles to 356 triangles, and the large unnamed body increased from 1,196 to 1,836 triangles.
+- Tiny-dense candidates stayed report-only. The top gas-stick and diaphragm-valve parts retained their triangle counts between adaptive off and on; the five warnings were diagnostic only.
+
+Remaining Phase 2A risks:
+
+- Large-sparse smoothing is currently size-ratio based because triangle count is unavailable before meshing; some large flat or blocky parts may be tightened even if visual benefit is small.
+- The synthetic tank improved but is still not perfectly smooth, so default-on rollout should wait for a reviewed visual threshold.
+- Adaptive-on modestly increases U843 GLB size and mesh time; the increase was small in this validation but should be rechecked on larger production-like assemblies before changing defaults.
+
+Recommended Phase 2B path:
+
+- Keep `MESHIQ_ADAPTIVE_MESH=off` in production.
+- Review the adaptive-on tank and U843 screenshots/GLBs from the isolated output folder.
+- Tune the balanced angular target if the tank still looks too faceted.
+- Add a report UI summary before exposing any admin control.
+- Keep tiny-dense coarsening and simplification separate behind their own later flags.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.

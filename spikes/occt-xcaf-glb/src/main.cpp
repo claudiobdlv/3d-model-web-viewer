@@ -131,6 +131,19 @@ struct Quality {
   bool relative = true;
 };
 
+enum class AdaptiveMeshMode {
+  Off,
+  LargeSparseSmoothing
+};
+
+struct AdaptiveDeflection {
+  double linearDeflection = 0.0;
+  double angularDeflection = 0.0;
+  bool relative = true;
+  std::string reason = "baseline_global_preset";
+  std::vector<std::string> warnings;
+};
+
 struct ReuseKey {
   void* tshapePtr = nullptr;
   double linearDeflection = 0.0;
@@ -211,6 +224,11 @@ struct MeshPrimitive {
   std::vector<float> normals;
   std::vector<std::uint32_t> indices;
   double meshingTimeMs = -1.0;
+  double linearDeflection = 0.0;
+  double angularDeflection = 0.0;
+  bool relativeDeflection = true;
+  std::string deflectionReason = "baseline_global_preset";
+  std::vector<std::string> deflectionWarnings;
   bool isReused = false;
   void* tshapePtr = nullptr;
   gp_Trsf transform;
@@ -236,6 +254,12 @@ struct MeshPrimitive {
 void computeWorldBounds(const std::array<float, 3>& localMin, const std::array<float, 3>& localMax, const gp_Trsf& transform, std::array<float, 3>& worldMin, std::array<float, 3>& worldMax);
 void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& renderShape, const std::string& instancePath);
 std::string labelEntry(const TDF_Label& label);
+double shapeBboxDiagonal(const TopoDS_Shape& shape);
+AdaptiveDeflection computeAdaptiveDeflection(
+    const Quality& quality,
+    const struct CliOptions& cliOptions,
+    const double assemblyBboxDiagonal,
+    const double shapeWorldBboxDiagonal);
 
 struct CachedGeometry {
   std::vector<float> positions;
@@ -2171,6 +2195,24 @@ Quality parseQuality(const std::string& value) {
   throw std::runtime_error("Unsupported quality preset: " + value);
 }
 
+AdaptiveMeshMode parseAdaptiveMeshMode(const std::string& value) {
+  if (value == "off") {
+    return AdaptiveMeshMode::Off;
+  }
+  if (value == "on") {
+    return AdaptiveMeshMode::LargeSparseSmoothing;
+  }
+  throw std::runtime_error("--adaptive-mesh requires on or off");
+}
+
+std::string adaptiveMeshModeName(const AdaptiveMeshMode mode) {
+  return mode == AdaptiveMeshMode::LargeSparseSmoothing ? "large_sparse_smoothing" : "off";
+}
+
+bool adaptiveMeshEnabled(const AdaptiveMeshMode mode) {
+  return mode == AdaptiveMeshMode::LargeSparseSmoothing;
+}
+
 ColourSpaceConfig parseColourSpace(const std::string& value) {
   if (value == "raw") {
     return {ColourSpaceMode::Raw, "raw"};
@@ -2204,6 +2246,7 @@ struct CliOptions {
   bool debugLegacyTransform = false;
   bool enableMeshReuse = false;
   bool generatePrototypeReport = false;
+  AdaptiveMeshMode adaptiveMeshMode = AdaptiveMeshMode::Off;
 
   // Filtering options
   bool hasLabelList = false;
@@ -2234,10 +2277,23 @@ CliOptions parseCliOptions(const int argc, char** argv, const int startIndex) {
         throw std::runtime_error("--parallel-mesh requires on or off");
       }
       std::string val = argv[++i];
+      if (val != "on" && val != "off") {
+        throw std::runtime_error("--parallel-mesh requires on or off");
+      }
       options.parallelMesh = (val == "on");
     } else if (arg.rfind("--parallel-mesh=", 0) == 0) {
       std::string val = arg.substr(std::string("--parallel-mesh=").size());
+      if (val != "on" && val != "off") {
+        throw std::runtime_error("--parallel-mesh requires on or off");
+      }
       options.parallelMesh = (val == "on");
+    } else if (arg == "--adaptive-mesh") {
+      if (i + 1 >= argc) {
+        throw std::runtime_error("--adaptive-mesh requires on or off");
+      }
+      options.adaptiveMeshMode = parseAdaptiveMeshMode(argv[++i]);
+    } else if (arg.rfind("--adaptive-mesh=", 0) == 0) {
+      options.adaptiveMeshMode = parseAdaptiveMeshMode(arg.substr(std::string("--adaptive-mesh=").size()));
     } else if (arg == "--debug-super-coarse-mesh") {
       options.debugSuperCoarseMesh = true;
     } else if (arg == "--debug-skip-raw-step-styles") {
@@ -2733,6 +2789,7 @@ void tessellateLabel(
     const std::string& parentChain,
     const std::string& parentDisplayName,
     const std::string& parentProductName,
+    const double assemblyBboxDiagonal,
     std::vector<MeshPrimitive>& primitives,
     Stats& stats) {
   stats.labelsProcessed += 1;
@@ -2973,13 +3030,20 @@ void tessellateLabel(
   bool reuseSafe = cliOptions.enableMeshReuse && !isMirrored && !faceStyle;
   void* tshapePtr = sourceShape.TShape().get();
 
-  double linDeflect = quality.linearDeflection;
-  double angDeflect = quality.angularDeflection;
-  bool relDeflect = quality.relative;
+  const double shapeDiag = shapeBboxDiagonal(renderShape);
+  AdaptiveDeflection adaptiveDeflection = computeAdaptiveDeflection(quality, cliOptions, assemblyBboxDiagonal, shapeDiag);
+  double linDeflect = adaptiveDeflection.linearDeflection;
+  double angDeflect = adaptiveDeflection.angularDeflection;
+  bool relDeflect = adaptiveDeflection.relative;
   if (cliOptions.debugSuperCoarseMesh) {
     linDeflect = 5.0;
     angDeflect = 1.5;
     relDeflect = true;
+    adaptiveDeflection.linearDeflection = linDeflect;
+    adaptiveDeflection.angularDeflection = angDeflect;
+    adaptiveDeflection.relative = relDeflect;
+    adaptiveDeflection.reason = "baseline_global_preset";
+    adaptiveDeflection.warnings.clear();
   }
 
   Colour shapeColour;
@@ -3329,6 +3393,11 @@ void tessellateLabel(
       primitive.stableObjectId = selectableId + "/material/" + colourKey(colour) +
           stableTopologySuffix;
       primitive.colour = colour;
+      primitive.linearDeflection = linDeflect;
+      primitive.angularDeflection = angDeflect;
+      primitive.relativeDeflection = relDeflect;
+      primitive.deflectionReason = adaptiveDeflection.reason;
+      primitive.deflectionWarnings = adaptiveDeflection.warnings;
       if (!reuseSafe) {
         primitive.meshingTimeMs = meshingTimeMs;
       }
@@ -3472,6 +3541,7 @@ void traverse(
     const std::string& parentChain,
     const std::string& parentDisplayName,
     const std::string& parentProductName,
+    const double assemblyBboxDiagonal,
     std::vector<MeshPrimitive>& primitives,
     Stats& stats,
     const bool isInsideSelectedSubtree = false) {
@@ -3550,6 +3620,7 @@ void traverse(
           currentParentChain,
           currentDisplayName,
           currentProductName,
+          assemblyBboxDiagonal,
           primitives,
           stats,
           childInsideSelected);
@@ -3578,6 +3649,7 @@ void traverse(
       parentChain,
       parentDisplayName,
       parentProductName,
+      assemblyBboxDiagonal,
       primitives,
       stats);
 }
@@ -4249,6 +4321,105 @@ double safeAssemblyDiagonal(const std::array<float, 3>& min, const std::array<fl
   return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+double shapeBboxDiagonal(const TopoDS_Shape& shape) {
+  Bnd_Box box;
+  BRepBndLib::Add(shape, box);
+  if (box.IsVoid()) {
+    return 0.0;
+  }
+  Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+  box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+  const double dx = static_cast<double>(xmax - xmin);
+  const double dy = static_cast<double>(ymax - ymin);
+  const double dz = static_cast<double>(zmax - zmin);
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+double clampDouble(const double value, const double minValue, const double maxValue, std::vector<std::string>& warnings) {
+  if (!std::isfinite(value)) {
+    warnings.push_back("adaptive_invalid_value");
+    return minValue;
+  }
+  if (value < minValue) {
+    warnings.push_back("adaptive_clamped_min");
+    return minValue;
+  }
+  if (value > maxValue) {
+    warnings.push_back("adaptive_clamped_max");
+    return maxValue;
+  }
+  return value;
+}
+
+AdaptiveDeflection computeAdaptiveDeflection(
+    const Quality& quality,
+    const CliOptions& cliOptions,
+    const double assemblyBboxDiagonal,
+    const double shapeWorldBboxDiagonal) {
+  AdaptiveDeflection result;
+  result.linearDeflection = quality.linearDeflection;
+  result.angularDeflection = quality.angularDeflection;
+  result.relative = quality.relative;
+
+  if (!adaptiveMeshEnabled(cliOptions.adaptiveMeshMode)) {
+    return result;
+  }
+
+  if (!std::isfinite(assemblyBboxDiagonal) || assemblyBboxDiagonal <= 0.0 ||
+      !std::isfinite(shapeWorldBboxDiagonal) || shapeWorldBboxDiagonal <= 0.0) {
+    result.reason = "adaptive_invalid_bounds_fallback";
+    result.warnings.push_back("adaptive_invalid_bounds_fallback");
+    return result;
+  }
+
+  const double sizeRatio = std::max(0.0, std::min(1.0, shapeWorldBboxDiagonal / assemblyBboxDiagonal));
+  double gate = 0.35;
+  double watch = 0.20;
+  double targetAngular = quality.angularDeflection;
+  double linearMultiplier = 1.0;
+  double minLinear = quality.linearDeflection * 0.50;
+  double maxLinear = quality.linearDeflection * 1.80;
+
+  if (quality.name == "high") {
+    gate = 0.30;
+    watch = 0.20;
+    targetAngular = 0.14;
+    linearMultiplier = 0.50;
+    minLinear = quality.linearDeflection * 0.50;
+    maxLinear = quality.linearDeflection * 1.20;
+  } else if (quality.name == "balanced") {
+    gate = 0.35;
+    watch = 0.20;
+    targetAngular = 0.28;
+    linearMultiplier = 0.50;
+    minLinear = quality.linearDeflection * 0.50;
+    maxLinear = quality.linearDeflection * 1.80;
+  } else {
+    gate = 0.45;
+    watch = 0.30;
+    targetAngular = 0.55;
+    linearMultiplier = 0.85;
+    minLinear = quality.linearDeflection * 0.75;
+    maxLinear = quality.linearDeflection * 1.10;
+  }
+
+  if (sizeRatio < gate) {
+    result.reason = "adaptive_noop";
+    return result;
+  }
+
+  result.reason = "large_sparse_smoothing";
+  result.warnings.push_back("large_sparse_smoothed");
+  if (sizeRatio >= watch && sizeRatio < gate) {
+    result.warnings.push_back("large_sparse_watch_band");
+  }
+
+  result.linearDeflection = clampDouble(quality.linearDeflection * linearMultiplier, minLinear, maxLinear, result.warnings);
+  result.angularDeflection = clampDouble(targetAngular, std::min(targetAngular, quality.angularDeflection), std::max(targetAngular, quality.angularDeflection), result.warnings);
+  result.relative = true;
+  return result;
+}
+
 void writeNullableMs(std::ostream& out, double value) {
   if (value >= 0.0) {
     out << value;
@@ -4308,6 +4479,9 @@ void writeMeshReport(
   std::uint64_t triangleTotal = 0;
   double meshingTimeTotalMs = 0.0;
   bool hasNullMeshingTime = false;
+  bool hasTinyDenseReportOnly = false;
+  bool hasLargeSparseSmoothed = false;
+  bool hasAdaptiveClamp = false;
   std::vector<MeshReportRankingEntry> rankingEntries;
   rankingEntries.reserve(primitives.size());
 
@@ -4324,6 +4498,10 @@ void writeMeshReport(
       meshingTimeTotalMs += primitive.meshingTimeMs;
     } else {
       hasNullMeshingTime = true;
+    }
+    for (const auto& warning : primitive.deflectionWarnings) {
+      if (warning == "large_sparse_smoothed") hasLargeSparseSmoothed = true;
+      if (warning == "adaptive_clamped_min" || warning == "adaptive_clamped_max") hasAdaptiveClamp = true;
     }
     rankingEntries.push_back({i, sizeRatio, densityScore});
   }
@@ -4358,7 +4536,8 @@ void writeMeshReport(
   out << "  \"quality\": {\n";
   out << "    \"semantic\": "; writeString(out, semanticQualityForNativePreset(quality)); out << ",\n";
   out << "    \"nativePreset\": "; writeString(out, quality.name); out << ",\n";
-  out << "    \"adaptiveEnabled\": false,\n";
+  out << "    \"adaptiveEnabled\": " << (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? "true" : "false") << ",\n";
+  out << "    \"adaptiveMode\": "; writeString(out, adaptiveMeshModeName(cliOptions.adaptiveMeshMode)); out << ",\n";
   out << "    \"simplificationEnabled\": false,\n";
   out << "    \"baseLinearDeflection\": " << quality.linearDeflection << ",\n";
   out << "    \"baseAngularDeflection\": " << quality.angularDeflection << ",\n";
@@ -4404,10 +4583,27 @@ void writeMeshReport(
     out << "\"densityScore\": " << densityScore << ", ";
     out << "\"meshingTimeMs\": "; writeNullableMs(out, primitive.meshingTimeMs); out << ", ";
     out << "\"simplificationRatio\": 0, ";
-    out << "\"deflection\": {\"linear\": " << quality.linearDeflection << ", \"angular\": " << quality.angularDeflection << ", \"relative\": " << (quality.relative ? "true" : "false") << ", \"reason\": \"baseline_global_preset\"}, ";
+    out << "\"deflection\": {\"linear\": " << primitive.linearDeflection << ", \"angular\": " << primitive.angularDeflection << ", \"relative\": " << (primitive.relativeDeflection ? "true" : "false") << ", \"reason\": "; writeString(out, primitive.deflectionReason); out << "}, ";
     out << "\"warnings\": [";
     bool firstWarning = true;
+    if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode)) {
+      for (const auto& warning : primitive.deflectionWarnings) {
+        if (!firstWarning) out << ", ";
+        writeString(out, warning);
+        firstWarning = false;
+      }
+      const bool tinyDense =
+          (quality.name == "high" && sizeRatio <= 0.18 && primitiveTriangleCount(primitive) >= 25000) ||
+          (quality.name != "high" && sizeRatio <= 0.18 && primitiveTriangleCount(primitive) >= 8000);
+      if (tinyDense) {
+        if (!firstWarning) out << ", ";
+        writeString(out, "tiny_dense_report_only");
+        firstWarning = false;
+        hasTinyDenseReportOnly = true;
+      }
+    }
     if (primitive.isReused) {
+      if (!firstWarning) out << ", ";
       writeString(out, "meshingTimeMs is null because this primitive reused cached prototype geometry");
       firstWarning = false;
     }
@@ -4444,10 +4640,27 @@ void writeMeshReport(
   if (stats.failedShapes > 0) {
     if (!firstWarning) out << ", ";
     writeString(out, "One or more shapes failed tessellation; see conversion.log for details.");
+    firstWarning = false;
+  }
+  if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && hasLargeSparseSmoothed) {
+    if (!firstWarning) out << ", ";
+    writeString(out, "large_sparse_smoothed");
+    firstWarning = false;
+  }
+  if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && hasTinyDenseReportOnly) {
+    if (!firstWarning) out << ", ";
+    writeString(out, "tiny_dense_report_only");
+    firstWarning = false;
+  }
+  if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && hasAdaptiveClamp) {
+    if (!firstWarning) out << ", ";
+    writeString(out, "adaptive_clamp_applied");
   }
   out << "],\n";
   out << "  \"recommendations\": [";
-  writeString(out, "Use topTinyDenseParts and topLargeSparseParts as diagnostic candidates only; Phase 1 does not change tessellation.");
+  writeString(out, adaptiveMeshEnabled(cliOptions.adaptiveMeshMode)
+      ? "Adaptive large sparse smoothing is enabled; tiny-dense candidates are report-only and simplification remains disabled."
+      : "Use topTinyDenseParts and topLargeSparseParts as diagnostic candidates only; adaptive tessellation is disabled.");
   out << "]\n";
   out << "}\n";
 }
@@ -4518,7 +4731,9 @@ void writeReport(
   out << "    \"preset\": "; writeString(out, quality.name); out << ",\n";
   out << "    \"linearDeflection\": " << quality.linearDeflection << ",\n";
   out << "    \"angularDeflection\": " << quality.angularDeflection << ",\n";
-  out << "    \"relative\": " << (quality.relative ? "true" : "false") << "\n";
+  out << "    \"relative\": " << (quality.relative ? "true" : "false") << ",\n";
+  out << "    \"adaptiveEnabled\": " << (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? "true" : "false") << ",\n";
+  out << "    \"adaptiveMode\": "; writeString(out, adaptiveMeshModeName(cliOptions.adaptiveMeshMode)); out << "\n";
   out << "  },\n";
   out << "  \"colourSpace\": {\n";
   out << "    \"mode\": "; writeString(out, colourSpace.name); out << ",\n";
@@ -5730,8 +5945,8 @@ void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& ren
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3 || argc > 20) {
-    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear] [--parallel-mesh on|off] [--debug-super-coarse-mesh] [--debug-skip-raw-step-styles] [--debug-disable-style-cache] [--label-list <file>]\n";
+  if (argc < 3 || argc > 22) {
+    std::cerr << "Usage: " << argv[0] << " /path/to/input.step /path/to/output-dir [preview|balanced|high] [--colour-mode experimental|xcaf-baseline] [--colour-space raw|srgb-to-linear] [--parallel-mesh on|off] [--adaptive-mesh on|off] [--debug-super-coarse-mesh] [--debug-skip-raw-step-styles] [--debug-disable-style-cache] [--label-list <file>]\n";
     return 2;
   }
 
@@ -5765,6 +5980,7 @@ int main(int argc, char** argv) {
             " applyRawStepStyles=" + (colourMode.applyRawStepStyles ? "true" : "false") +
             " applyLayerColours=" + (colourMode.applyLayerColours ? "true" : "false"));
     logLine("Parallel mesh: " + (cliOptions.parallelMesh ? std::string("on") : std::string("off")));
+    logLine("Adaptive mesh: " + adaptiveMeshModeName(cliOptions.adaptiveMeshMode));
     logLine("Debug super coarse mesh: " + (cliOptions.debugSuperCoarseMesh ? std::string("true") : std::string("false")));
     logLine("Debug skip raw STEP styles: " + (cliOptions.debugSkipRawStepStyles ? std::string("true") : std::string("false")));
     logLine("Debug disable style cache: " + (cliOptions.debugDisableStyleCache ? std::string("true") : std::string("false")));
@@ -5849,6 +6065,27 @@ int main(int argc, char** argv) {
 
     TDF_LabelSequence freeShapes;
     shapeTool->GetFreeShapes(freeShapes);
+
+    std::array<float, 3> assemblyMin = emptyMinBounds();
+    std::array<float, 3> assemblyMax = emptyMaxBounds();
+    for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
+      TDF_Label referred;
+      TopoDS_Shape freeShape = shapeForLabel(shapeTool, freeShapes.Value(i), referred);
+      if (freeShape.IsNull()) continue;
+      Bnd_Box box;
+      BRepBndLib::Add(freeShape, box);
+      if (box.IsVoid()) continue;
+      Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+      box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+      assemblyMin[0] = std::min(assemblyMin[0], static_cast<float>(xmin));
+      assemblyMin[1] = std::min(assemblyMin[1], static_cast<float>(ymin));
+      assemblyMin[2] = std::min(assemblyMin[2], static_cast<float>(zmin));
+      assemblyMax[0] = std::max(assemblyMax[0], static_cast<float>(xmax));
+      assemblyMax[1] = std::max(assemblyMax[1], static_cast<float>(ymax));
+      assemblyMax[2] = std::max(assemblyMax[2], static_cast<float>(zmax));
+    }
+    const double assemblyBboxDiagonal = safeAssemblyDiagonal(assemblyMin, assemblyMax);
+    logLine("Assembly bbox diagonal for adaptive mesh: " + std::to_string(assemblyBboxDiagonal));
 
     Stats stats;
     stats.freeShapes = freeShapes.Length();
@@ -5961,6 +6198,7 @@ int main(int argc, char** argv) {
           "",
           "",
           "",
+          assemblyBboxDiagonal,
           primitives,
           stats);
     }

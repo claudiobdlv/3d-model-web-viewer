@@ -14,6 +14,16 @@ import type { GlbOptimizationMode } from "./glbOptimizer.js";
 import { validateMergedGlb } from "./utils/mergeGlbs.js";
 import { decideLargeStepChunking } from "./utils/largeStepDecision.js";
 
+type MeshiqAdaptiveMeshMode = "off" | "on";
+
+function meshiqAdaptiveMeshMode(): MeshiqAdaptiveMeshMode {
+  const value = process.env.MESHIQ_ADAPTIVE_MESH ?? "off";
+  if (value !== "off" && value !== "on") {
+    throw new Error("MESHIQ_ADAPTIVE_MESH must be off or on.");
+  }
+  return value;
+}
+
 export type ConverterProcessorInput = {
   slug: string;
   sourcePath: string;
@@ -349,6 +359,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
 
       const parallelMesh = process.env.XCAF_PARALLEL_MESH === "off" ? "off" : "on";
       args.push("--parallel-mesh", parallelMesh);
+      const adaptiveMesh = meshiqAdaptiveMeshMode();
+      if (adaptiveMesh === "on") {
+        args.push("--adaptive-mesh", "on");
+      }
       if (process.env.DEBUG_SUPER_COARSE_MESH === "true") args.push("--debug-super-coarse-mesh");
       if (process.env.DEBUG_SKIP_RAW_STEP_STYLES === "true") args.push("--debug-skip-raw-step-styles");
       if (process.env.DEBUG_DISABLE_STYLE_CACHE === "true") args.push("--debug-disable-style-cache");
@@ -874,6 +888,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
                 angular: nativeQualityDetails.angularDeflection,
                 relative: nativeQualityDetails.relative
               },
+              adaptiveMesh: {
+                enabled: nativeQualityDetails.adaptiveEnabled,
+                mode: nativeQualityDetails.adaptiveMode
+              },
               converterBackend: input.converterBackend,
               artifacts: {
                 displayGlb: "display.glb",
@@ -949,7 +967,9 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     preset: nativePreset,
     linearDeflection: nativeDeflections[nativePreset].linear,
     angularDeflection: nativeDeflections[nativePreset].angular,
-    relative: true
+    relative: true,
+    adaptiveEnabled: false,
+    adaptiveMode: "off"
   };
 
   if (input.converterBackend === "occt-js") {
@@ -1072,6 +1092,10 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           angular: nativeQualityDetails.angularDeflection,
           relative: nativeQualityDetails.relative
         },
+        adaptiveMesh: {
+          enabled: nativeQualityDetails.adaptiveEnabled,
+          mode: nativeQualityDetails.adaptiveMode
+        },
         converterBackend: input.converterBackend,
         artifacts: {
           displayGlb: "display.glb",
@@ -1164,6 +1188,8 @@ async function runXcafBaselineConverter(input: {
   console.log(`Semantic quality: ${input.quality}`);
   console.log(`Native XCAF quality: ${nativeQuality}`);
   console.log(`Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`);
+  const adaptiveMesh = meshiqAdaptiveMeshMode();
+  console.log(`MeshIQ adaptive mesh: ${adaptiveMesh}`);
 
   const args = [
     input.sourcePath,
@@ -1178,6 +1204,9 @@ async function runXcafBaselineConverter(input: {
   // Read environment flags and push them to args
   const parallelMesh = process.env.XCAF_PARALLEL_MESH === "off" ? "off" : "on";
   args.push("--parallel-mesh", parallelMesh);
+  if (adaptiveMesh === "on") {
+    args.push("--adaptive-mesh", "on");
+  }
 
   if (process.env.DEBUG_SUPER_COARSE_MESH === "true") {
     args.push("--debug-super-coarse-mesh");
@@ -1214,6 +1243,7 @@ async function runXcafBaselineConverter(input: {
     `Semantic quality: ${input.quality}`,
     `Native preset: ${nativeQuality}`,
     `Native deflection: linear=${deflection.linear}, angular=${deflection.angular}, relative=true`,
+    `MeshIQ adaptive mesh: ${adaptiveMesh}`,
     `XCAF colour mode: ${input.xcafColourMode}`,
     `Colour space: raw`,
     `Mesh reuse: ${meshReuseMode}`,
@@ -1330,6 +1360,8 @@ async function writeXcafCompatibilityFiles(input: {
       linearDeflection?: number;
       angularDeflection?: number;
       relative?: boolean;
+      adaptiveEnabled?: boolean;
+      adaptiveMode?: string;
     };
     colourMode?: { mode?: string };
     colourSpace?: { mode?: string };
@@ -1353,6 +1385,10 @@ async function writeXcafCompatibilityFiles(input: {
     nativeLinearDeflection: report.quality?.linearDeflection,
     nativeAngularDeflection: report.quality?.angularDeflection,
     nativeRelativeDeflection: report.quality?.relative,
+    adaptiveMesh: {
+      enabled: report.quality?.adaptiveEnabled ?? false,
+      mode: report.quality?.adaptiveMode ?? "off"
+    },
     openCascadeVersion: report.openCascadeVersion,
     colourMode: report.colourMode?.mode,
     colourSpace: report.colourSpace?.mode,
@@ -1394,7 +1430,9 @@ async function writeXcafCompatibilityFiles(input: {
     preset: report.quality?.preset ?? fallbackPreset,
     linearDeflection: report.quality?.linearDeflection ?? nativeDeflections[fallbackPreset].linear,
     angularDeflection: report.quality?.angularDeflection ?? nativeDeflections[fallbackPreset].angular,
-    relative: report.quality?.relative ?? true
+    relative: report.quality?.relative ?? true,
+    adaptiveEnabled: report.quality?.adaptiveEnabled ?? false,
+    adaptiveMode: report.quality?.adaptiveMode ?? "off"
   };
 }
 
@@ -1403,6 +1441,8 @@ type NativeQualityDetails = {
   linearDeflection: number;
   angularDeflection: number;
   relative: boolean;
+  adaptiveEnabled: boolean;
+  adaptiveMode: string;
 };
 
 async function assertFile(filePath: string, message: string): Promise<void> {

@@ -19,6 +19,7 @@ console.log(`XCAF converter binary: ${config.xcafConverterBin}`);
 console.log(`Converter quality: ${config.quality}`);
 if (config.converterBackend === "xcaf-baseline") {
   console.log(`XCAF colour mode: ${config.xcafColourMode}`);
+  console.log(`MeshIQ adaptive mesh: ${config.meshiqAdaptiveMesh}`);
 } else {
   console.log(`Material rules mode: ${process.env.MATERIAL_RULES_MODE || "fallback"}`);
 }
