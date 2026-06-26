@@ -1242,6 +1242,60 @@ Rollout recommendation:
 - First production validation should use a tiny non-sensitive test model with Off, then Standard, then Strong, confirming worker logs, manifest, stats, `mesh-report.json`, admin route, and viewer route.
 - Do not mutate existing public/QR URL structure, production uploaded STEP files, generated GLBs, or SQLite rows without a backup and explicit rollout prompt.
 
+### Phase 3B: Isolated EliteDesk per-upload runtime smoke
+
+Date: 2026-06-26.
+
+Review result:
+
+- Phase 3A code review found no blocker. The allowed values are exactly `off`, `standard`, and `strong`.
+- Server-side parsing defaults omitted, empty, null, and older normalized values to `off`; invalid request values are rejected before job creation.
+- The schema change is backward-compatible and idempotent through default-off `ALTER TABLE` additions for jobs, model revisions, and revision file versions.
+- Per-job `jobs.meshiq_adaptive_smoothing` is authoritative for worker command construction. In the isolated smoke, the worker environment deliberately had `MESHIQ_ADAPTIVE_MESH=on` and `MESHIQ_ADAPTIVE_MESH_PROFILE=strong`; Off jobs still passed no adaptive flags.
+- Public viewer routes, public share structure, QR/share URL shape, and public metadata paths were unchanged by this branch.
+
+Isolated runtime method:
+
+- EliteDesk production was left on `main` at `064239eeb771b0ab9c0cbdc9b1451aa9164d197e`; no deploy was run.
+- The smoke used detached worktree `/home/claudio/projects/3d-model-web-viewer-phase3b-smoke-20260626-224241` at `21712139f83dd548f7966357b4febe5569b820ad`.
+- The isolated compose project was `meshiq-phase3b`, bound only to `http://127.0.0.1:3029`.
+- Isolated storage was `/home/claudio/projects/3d-model-web-viewer-phase3b-smoke-20260626-224241/phase3b-isolated-data`, including SQLite, uploads, models, logs, and worker output.
+- A temporary converter wrapper in `phase3b-wrapper/xcaf-wrapper.sh` logged native XCAF argv blocks and then executed the real `/app/bin/xcaf-step-to-glb`.
+- Test model: tiny safe `cube.step` from the `occt-import-js` dependency test files, copied into the isolated worktree as `phase3b-cube.step`.
+
+Smoke results:
+
+- Invalid value `banana`: HTTP 400 with `Invalid MeshIQ adaptive smoothing...`; job count stayed 0.
+- Off upload `phase3b-off-20260626124950`: DB job, revision, and file version stored `off`; worker argv had no `--adaptive-mesh`; model reached ready; viewer, GLB, source, manifest, stats, and mesh-report routes all returned 200.
+- Standard upload `phase3b-standard-20260626124951`: DB job, revision, and file version stored `standard`; worker argv included `--adaptive-mesh on --adaptive-mesh-profile standard`; model reached ready; all checked routes returned 200.
+- Strong upload `phase3b-strong-20260626124952`: DB job, revision, and file version stored `strong`; worker argv included `--adaptive-mesh on --adaptive-mesh-profile strong`; model reached ready; all checked routes returned 200.
+- Omitted value upload `phase3b-omitted-20260626124953`: stored and reported `off`; worker argv had no adaptive flags; all checked routes returned 200.
+- Chunked upload `phase3b-chunked-20260626124956`: `/api/uploads/chunked/init` with Standard preserved the value through complete; DB, manifest, stats, mesh-report, and worker argv all matched Standard; all checked routes returned 200.
+- New revision upload on `phase3b-off-20260626124950`, revision label `Smoke-Strong`: stored Strong on the new revision and active file version; worker argv used Strong; current model reached ready; all checked routes returned 200.
+
+Artifact/report checks:
+
+- Off and omitted manifests/stats recorded `meshiqAdaptiveSmoothing: "off"` and adaptive disabled/off.
+- Standard manifests/stats/mesh-reports recorded `standard`, adaptive enabled, mode `large_sparse_smoothing`, profile `standard`.
+- Strong manifests/stats/mesh-reports recorded `strong`, adaptive enabled, mode `large_sparse_smoothing`, profile `strong`.
+- Public/private route checks did not expose storage paths or secrets.
+
+Checks:
+
+- `git diff --check`: passed.
+- `apps/server`: `npm run typecheck`, `npm run build`, `npm test` passed.
+- `apps/worker`: `npm run typecheck`, `npm run build`, `npm test` passed.
+- `apps/converter`: `npm test` passed.
+- `apps/web`: `npx tsc --noEmit` and `npm run build` passed. The Vite build retained the existing large chunk warning.
+- Local Windows Docker was unavailable, so local compose validation was skipped. EliteDesk read-only `docker compose -f deploy/docker-compose.elitedesk.yml config --quiet` passed.
+
+Blockers and recommendation:
+
+- No Phase 3B blocker was found.
+- No code fix was required.
+- Remaining risk is normal rollout risk: this smoke used one tiny safe STEP file and does not prove visual quality on large coworker models.
+- Recommendation: branch is ready for PR/review. Do not merge or deploy until an explicit rollout prompt authorizes the production change.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.
