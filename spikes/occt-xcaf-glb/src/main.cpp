@@ -4538,7 +4538,7 @@ AdaptiveProfileThresholds adaptiveThresholdsFor(const Quality& quality, const Ad
     return {0.35, 0.20, 0.50, 0.28, 0.50, 1.80};
   }
   if (profile == AdaptiveMeshProfile::Conservative) return {0.50, 0.25, 0.90, 0.60, 0.75, 1.10};
-  if (profile == AdaptiveMeshProfile::Strong) return {0.35, 0.20, 0.65, 0.45, 0.65, 1.10};
+  if (profile == AdaptiveMeshProfile::Strong) return {0.35, 0.20, 0.53, 0.40, 0.50, 1.10};
   return {0.45, 0.30, 0.85, 0.55, 0.75, 1.10};
 }
 

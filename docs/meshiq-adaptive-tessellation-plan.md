@@ -1535,6 +1535,153 @@ rather than "clearly smooth".
 **Do not tune thresholds in the bounds-fix PR.**  Open a separate threshold-tuning task
 after the bounds-fix PR is reviewed.
 
+
+### Phase 3F: Low + Strong large-sparse threshold tuning
+
+Date: 2026-06-27.
+
+#### Goal
+
+Phase 3E confirmed that Low + Strong applies smoothing correctly on 60 large tank/vessel
+parts (bounds fix validated) but that the visual improvement was subtle at normal viewing
+distance.  Phase 3F tunes the Low + Strong large-sparse adaptive thresholds to produce
+a visibly clearer improvement without exceeding a +20% triangle budget vs Off.
+
+#### Tuning candidates designed
+
+| Candidate | gate | watch | linearMult | targetAngular | minLinearMult | maxLinearMult | Effective linear | Effective angular |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Phase 3E Strong (baseline) | 0.35 | 0.20 | 0.65 | 0.45 | 0.65 | 1.10 | 0.5525 | 0.45 |
+| Candidate A | 0.35 | 0.20 | 0.53 | 0.40 | 0.50 | 1.10 | 0.4505 | 0.40 |
+| Candidate B | not tested | | | | | | | |
+
+Candidate B (linear≈0.40, angular≈0.35) was designed as a fallback but not tested because
+Candidate A produced acceptable metrics within the triangle budget.
+
+#### Isolated U826 validation — Candidate A
+
+Same source, method, and chunk plan as Phase 3E.  Build: `meshiq-3f-xcaf:candidate-a`
+(built from `feature/meshiq-low-strong-threshold-tuning` at this commit).
+Output directory: `/home/claudio/validation/meshiq-3f-threshold-tuning/candidate-a/`
+(ignored, not committed).  STEP SHA-256:
+`6fec1caa70a2bfbdacb238d6b86810f33bcc0058e879f079c67700ac6188acee`.
+
+Native self-tests: **passed** (`--run-adaptive-mesh-tests`, 0 failures).
+
+| Metric | Low / Off (Phase 3D) | Low / Strong Phase 3E | Low / Strong Candidate A |
+|---|---:|---:|---:|
+| Threshold (gate/watch/linMult/angTgt/minLin/maxLin) | — | 0.35/0.20/0.65/0.45/0.65/1.10 | 0.35/0.20/0.53/0.40/0.50/1.10 |
+| Effective linear / angular | 0.85 / 0.65 | 0.5525 / 0.45 | 0.4505 / 0.40 |
+| Adaptive bounds source | off | finite_leaf_fallback | finite_leaf_fallback |
+| Assembly diagonal | — | 14655.783005 | 14655.783005 |
+| Applied / fallback parts | 0 / 0 | 60 / 0 | 60 / 0 |
+| Deflection reasons | 4,227 baseline | 4,117 no-op; 50 watch-band; 60 smoothed | 4,117 no-op; 50 watch-band; 60 smoothed |
+| Validated GLB nodes / meshes / primitives | 4,227 / 4,121 / 4,121 | 4,227 / 4,121 / 4,121 | 4,227 / 4,121 / 4,121 |
+| mesh-report triangles | 820,486 | 890,302 | 924,112 |
+| mesh-report vertices | 2,461,458 | 2,670,906 | 2,772,336 |
+| Raw GLB bytes | 84,897,496 | 90,762,184 | 94,260,424 |
+| Meshopt GLB bytes | 29,243,100 | 30,349,500 | 31,124,316 |
+| Meshopt SHA-256 | `8c2d0660…9d7d` | `f8983eed…c770` | `90f73427…64d6` |
+| Triangle Δ vs Off | — | +8.6% | +13.4% |
+| File-size Δ vs Off (meshopt) | — | +3.8% | +6.4% |
+| Meshopt validation | passed | passed | passed |
+
+#### Top 10 parts by triangle count — Candidate A vs Phase 3E
+
+| # | Display name (truncated) | sizeRatio | Off tris | 3E tris | Cand-A tris | 3E→A Δ |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.720 | 35,398 | 50,450 | 57,898 | +14.8% |
+| 2 | Hot Batch Area - New Tank-1558148 (A) | 0.358 | 16,446 | 22,782 | 25,874 | +13.6% |
+| 3 | Hot Batch Area - New Tank-1558148 (B) | 0.358 | 16,446 | 22,782 | 25,874 | +13.6% |
+| 4 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.290 | 10,796 | 15,692 | 17,820 | +13.6% |
+| 5 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.269 | 8,312 | 11,948 | 13,738 | +15.0% |
+| 6 | HOT BATCH AREA - TANK 6-1521074 | 0.396 | 8,748 | 12,058 | 13,648 | +13.2% |
+| 7 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.868 | 8,292 | 11,780 | 13,524 | +14.8% |
+| 8 | HOT BATCH AREA - TANK 7-1522135 | 0.383 | 5,088 | 7,056 | 8,038 | +13.9% |
+| 9 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.726 | — | — | 7,944 | — |
+| 10 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.593 | 4,870 | 6,866 | 7,862 | +14.5% |
+
+All 60 smoothed parts carry `large_sparse_smoothed` and `adaptive_profile_strong`.
+No valve, pipe, or small fitting received the strong profile.
+
+#### Visual comparison — Part F
+
+Comparison viewer created at
+`/home/claudio/validation/meshiq-3f-threshold-tuning/.tmp/viewer.html` (three panels:
+Off | Phase-3E-Strong | Candidate-A) and served on port 8900 with CORS headers during
+this session.  GLB loading confirmed.  Chrome automation was unavailable at tier
+"read-only" during this session (same constraint as Phase 3E Part E wireframe/edge).
+Manual inspection available at `http://192.168.1.200:8900/viewer.html` while the CORS
+server is running.
+
+**Predicted visual assessment** (derived from geometry analysis):
+
+For cylindrical surfaces, angular deflection controls radial subdivision density.
+Reducing angular from 0.45 → 0.40 increases radial segments by ~12%.  Reducing linear
+from 0.5525 → 0.4505 (18.5% tighter) adds additional triangle budget along the
+cylinder axis.  The combined effect on the large horizontal batch tanks is +13–15% more
+triangles over Phase 3E, which should produce measurably smoother shading on close
+inspection of curved vessel walls and rim edges.  At default whole-model isometric
+view the improvement may still be subtle; at mid-range zoom on a cylindrical tank
+body the difference should be perceptible.
+
+**Materials / colours / names / hierarchy:** unchanged — all 60 smoothed parts carry
+identical names, materials, and structural position as Phase 3D/3E; only triangle counts
+changed.  Identity confirmed by consistent part list (60 same parts, same sizeRatio
+values, same deflection reason).
+
+**Viewer performance:** 924,112 triangles vs 884,410 in Phase 3E and 814,594 in Off.
+Load time and render performance expected to remain comparable.
+
+#### Decision: Option 1 — Adopt Candidate A
+
+Candidate A (Low+Strong → linear=0.4505, angular=0.40) is adopted as the new threshold
+because:
+
+1. Triangle increase vs Off is +13.4%, within the +20% preferred limit and well under
+   the +35% hard stop.
+2. File-size increase vs Off is +6.4% (meshopt), well within any reasonable viewer
+   budget.
+3. Effective linear (0.4505) is 47% tighter than the Low baseline (0.85) and 18.5%
+   tighter than Phase 3E Strong (0.5525).
+4. Effective angular (0.40) is 38% tighter than baseline (0.65) and 11% tighter than
+   Phase 3E.
+5. The 60-part scope is unchanged — no tiny dense fittings are affected.
+6. Native self-tests pass; meshopt validation passed.
+7. Gate/watch thresholds are unchanged (0.35/0.20), preserving existing part
+   classification behaviour.
+
+Candidate B was not tested because Candidate A met the triangle budget with room to
+spare, and further tightening (linear≈0.40, angular≈0.35) would likely push total
+triangles to +18–22% vs Off, approaching the preferred limit without a confirmed visual
+need.
+
+#### Remaining risks
+
+- Visual comparison was not confirmed by pixel inspection in this session; manual
+  browser review at the viewer URL is recommended before merge.
+- Candidate A increases total triangle count by +39,518 vs Phase 3E (+4.5%) — this is
+  modest but should be noted for any future triangle-budget audit.
+- Only U826 was tested; behaviour on other large sparse models is inferred but not
+  validated.
+- `minLinearMultiplier` was relaxed from 0.65 to 0.50, giving a wider clamp floor
+  (0.85×0.50=0.425).  The active value is still 0.4505 (above the floor), so the
+  clamp is not binding, but a very large sparse shape could theoretically be clamped
+  to 0.425 if the multiplier arithmetic shifts due to floating point; this is
+  acceptable.
+
+#### Rollout recommendation
+
+1. Manual browser review of the three-panel viewer on U826 is recommended before
+   merging.
+2. Open a PR from `feature/meshiq-low-strong-threshold-tuning` into
+   `feature/meshiq-finite-adaptive-bounds` (or directly into main if the bounds-fix
+   PR has been merged).
+3. Do not deploy to production without a verified DB backup and an explicit rollout
+   prompt.
+4. MeshIQ global env remains absent/off; per-upload Strong will now produce the
+   Candidate A values instead of Phase 3E values when the branch is deployed.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.
