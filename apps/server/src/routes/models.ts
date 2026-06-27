@@ -43,6 +43,7 @@ import {
   toStorageRelativePath
 } from "../storage.js";
 import { parseConversionQuality, type ConversionQuality } from "../quality.js";
+import { parseMeshiqAdaptiveSmoothing, type MeshiqAdaptiveSmoothing } from "../meshiq.js";
 import { getLargeStepChunkingSummary } from "../utils/largeStepChunkingSummary.js";
 
 const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
@@ -183,6 +184,7 @@ export async function registerModelAndJob({
   sourceFilename,
   sourceExt,
   quality,
+  meshiqAdaptiveSmoothing,
   folderId,
   originalSizeBytes,
   saveOriginalFile,
@@ -194,6 +196,7 @@ export async function registerModelAndJob({
   sourceFilename: string;
   sourceExt: string;
   quality: ConversionQuality;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   folderId: number | null;
   originalSizeBytes: number;
   saveOriginalFile: (targetPath: string) => void | Promise<void>;
@@ -225,6 +228,7 @@ export async function registerModelAndJob({
       revisionLabel: revisionLabel || "1",
       issuedDate,
       qualityPreset: quality,
+      meshiqAdaptiveSmoothing,
       status,
       sourceFilename,
       sourcePath: (id) => toStorageRelativePath(path.join(getRevisionUploadDir(slug, id), `original${sourceExt}`)),
@@ -252,6 +256,7 @@ export async function registerModelAndJob({
       sourceExt,
       status,
       quality,
+      meshiqAdaptiveSmoothing,
       folderId
     });
 
@@ -262,6 +267,7 @@ export async function registerModelAndJob({
       type: isStep ? "step-to-glb" : "viewer-ready",
       status,
       quality,
+      meshiqAdaptiveSmoothing,
       message: uploadJobMessage(isGlb, isStep)
     });
     setRevisionConversionJob(revision.id, job.id);
@@ -285,6 +291,7 @@ modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
     const sourceFilename = path.basename(req.file.originalname);
     const sourceExt = path.extname(sourceFilename).toLowerCase();
     const quality = parseConversionQuality(req.body?.quality);
+    const meshiqAdaptiveSmoothing = parseMeshiqAdaptiveSmoothing(req.body?.meshiqAdaptiveSmoothing);
     const revisionMetadata = parseRevisionMetadata(req.body, true);
     const folderId = parseUploadProjectId(req.body);
     if (folderId !== null && !getFolderById(folderId)) {
@@ -309,6 +316,7 @@ modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
       sourceFilename,
       sourceExt,
       quality,
+      meshiqAdaptiveSmoothing,
       folderId,
       originalSizeBytes: file.size,
       ...revisionMetadata,
@@ -342,6 +350,7 @@ modelsRouter.post("/:slug/revisions", upload.fields([{ name: "modelFile", maxCou
       modelSlug: slug,
       sourceFilename: path.basename(file.originalname),
       quality: parseConversionQuality(req.body?.quality),
+      meshiqAdaptiveSmoothing: parseMeshiqAdaptiveSmoothing(req.body?.meshiqAdaptiveSmoothing),
       originalSizeBytes: file.size,
       ...metadata,
       saveOriginalFile: (targetPath) => fs.writeFileSync(targetPath, file.buffer)
@@ -356,6 +365,7 @@ export async function registerRevisionAndJob(input: {
   modelSlug: string;
   sourceFilename: string;
   quality: ConversionQuality;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   originalSizeBytes: number;
   revisionLabel?: string;
   issuedDate?: string;
@@ -384,6 +394,7 @@ export async function registerRevisionAndJob(input: {
       revisionLabel,
       issuedDate: input.issuedDate,
       qualityPreset: input.quality,
+      meshiqAdaptiveSmoothing: input.meshiqAdaptiveSmoothing,
       status,
       sourceFilename: input.sourceFilename,
       sourcePath: (id) => toStorageRelativePath(path.join(getRevisionUploadDir(model.slug, id), `original${sourceExt}`)),
@@ -402,7 +413,8 @@ export async function registerRevisionAndJob(input: {
     if (isGlb) fs.copyFileSync(sourcePath, path.join(modelDir, "display.glb"));
     writeRevisionManifest(modelDir, {
       slug: model.slug, revisionId: revision.id, revisionLabel: revision.revision_label, name: model.name,
-      sourceFilename: input.sourceFilename, sourceExt, status, quality: input.quality, folderId: model.folder_id
+      sourceFilename: input.sourceFilename, sourceExt, status, quality: input.quality, folderId: model.folder_id,
+      meshiqAdaptiveSmoothing: input.meshiqAdaptiveSmoothing
     });
     const job = createJob({
       modelId: model.id,
@@ -411,6 +423,7 @@ export async function registerRevisionAndJob(input: {
       type: isStep ? "step-to-glb" : "viewer-ready",
       status,
       quality: input.quality,
+      meshiqAdaptiveSmoothing: input.meshiqAdaptiveSmoothing,
       message: uploadJobMessage(isGlb, isStep)
     });
     setRevisionConversionJob(revision.id, job.id);
@@ -444,6 +457,7 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
     const sourceExt = path.extname(sourceFilename).toLowerCase();
     validateUploadSize(sourceExt, file.size);
     const quality = parseConversionQuality(req.body?.quality);
+    const meshiqAdaptiveSmoothing = parseMeshiqAdaptiveSmoothing(req.body?.meshiqAdaptiveSmoothing);
     const replacementReason = typeof req.body?.replacementReason === "string"
       ? req.body.replacementReason.trim().slice(0, 2000) || null
       : null;
@@ -462,7 +476,8 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
       writeRevisionManifest(modelDir, {
         slug, revisionId, revisionLabel: getRevisionForModel(model.id, revisionId)!.revision_label, name: model.name,
         sourceFilename, sourceExt, status: isGlb ? "ready" : "uploaded", quality, folderId: model.folder_id,
-        fileVersionNumber: version
+        fileVersionNumber: version,
+        meshiqAdaptiveSmoothing
       });
       const replaced = replaceRevisionFileVersion({
         modelId: model.id,
@@ -471,6 +486,7 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
         sourcePath: () => toStorageRelativePath(sourcePath),
         displayGlbPath: () => toStorageRelativePath(path.join(modelDir, "display.glb")),
         qualityPreset: quality,
+        meshiqAdaptiveSmoothing,
         replacementReason,
         sourceSizeBytes: file.size,
         fileVersionNumber: version
@@ -483,6 +499,7 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
         type: isStep ? "step-to-glb" : "viewer-ready",
         status: isGlb ? "ready" : "uploaded",
         quality,
+        meshiqAdaptiveSmoothing,
         message: uploadJobMessage(isGlb, isStep)
       });
       setRevisionConversionJob(revisionId, job.id);
@@ -866,6 +883,7 @@ function writeRevisionManifest(modelDir: string, input: {
   sourceExt: string;
   status: string;
   quality: ConversionQuality;
+  meshiqAdaptiveSmoothing?: MeshiqAdaptiveSmoothing | null;
   folderId: number | null;
   fileVersionNumber?: number;
 }): void {
