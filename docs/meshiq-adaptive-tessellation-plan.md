@@ -1296,6 +1296,52 @@ Blockers and recommendation:
 - Remaining risk is normal rollout risk: this smoke used one tiny safe STEP file and does not prove visual quality on large coworker models.
 - Recommendation: branch is ready for PR/review. Do not merge or deploy until an explicit rollout prompt authorizes the production change.
 
+### Phase 3C: Production merge and deploy (per-upload adaptive smoothing)
+
+Executed under an explicit rollout prompt after preflight, full test suite, and a verified DB backup passed.
+
+Deploy summary:
+
+- Merged PR #1 (`feature/meshiq-per-upload-options`) into `main` via a merge commit.
+- Previous production commit: `064239eeb771b0ab9c0cbdc9b1451aa9164d197e`.
+- New deployed commit: `ca5db5f38a0f186685080f902d50cab75206f6fb`.
+- Deployed with `scripts/deploy-elitedesk.sh` (rebuilt and recreated only the `server` and `worker` services). No global Docker restart, no reboot, no other services touched.
+- Health after deploy: `/health` 200, `/api/health` 200, server container healthy, worker polling.
+
+Backup:
+
+- Path: `/home/claudio/backups/3d-model-web-viewer/meshiq-phase3a-per-upload-20260627-134108/app.sqlite` (+ `manifest.txt`).
+- Method: `node:sqlite` online backup API with a read-only source (no writes to the live DB).
+- Backup `PRAGMA integrity_check` = ok, `PRAGMA foreign_key_check` = clean.
+
+Schema migration verification (live DB, post-deploy):
+
+- `meshiq_adaptive_smoothing` present on `jobs`, `model_revisions`, and `revision_file_versions` as `TEXT NOT NULL DEFAULT 'off'`.
+- All existing rows backfilled to `off` (0 NULLs); old/omitted-field rows behave as Off.
+- `PRAGMA integrity_check` = ok, `PRAGMA foreign_key_check` = clean.
+
+Production `.env` (unchanged):
+
+- `MESHIQ_ADAPTIVE_MESH` and `MESHIQ_ADAPTIVE_MESH_PROFILE` remain absent before and after deploy. MeshIQ was **not** globally enabled. Per-upload setting is authoritative.
+
+Smoke uploads (one safe public CAX-IF STEP file, `dm1-id-214.stp`):
+
+- Off: job ready; `adaptiveMesh.enabled=false`; converter `Adaptive mesh: off`; no `--adaptive-mesh` flags; manifest/stats `meshiqAdaptiveSmoothing=off`; viewer/GLB/source 200.
+- Standard: job ready; `adaptiveMesh.enabled=true` profile `standard`; converter `Adaptive mesh: large_sparse_smoothing`; manifest/stats `standard`; viewer/GLB/source 200.
+- Strong: job ready; `adaptiveMesh.enabled=true` profile `strong`; converter `Adaptive mesh: large_sparse_smoothing`; manifest/stats `strong`; viewer/GLB/source 200.
+- Triangle counts rose Off 1632 -> Standard 2668 -> Strong 3764 with identical node count, confirming finer tessellation on curved geometry without structural/material regression.
+
+Existing-data compatibility:
+
+- Admin page/API, model list, model detail, RevVault revisions, downloads, and admin viewer all returned 200.
+- An existing public share/QR link returned 200 for the share shell, `model.json`, and `model.glb`; a locked share kept `allowRevisionSwitching=false` and rejected a bogus revision request.
+
+Counts (pre -> post): models 47 -> 48, revisions 47 -> 50, jobs 61 -> 64 (no new failures), public shares 15 -> 15. Changes match exactly the three smoke uploads (one model, three revisions/jobs).
+
+Remaining risk:
+
+- Visual quality was validated only numerically (triangle/GLB deltas) on one tiny safe STEP file in a headless deploy session; a pixel-level render and larger real coworker models have not yet been visually inspected.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.
