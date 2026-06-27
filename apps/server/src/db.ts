@@ -18,6 +18,11 @@ export type ModelRecord = {
   folder_id: number | null;
   project_id: number | null;
   project_name?: string | null;
+  // Phase 1 accounts ownership (PostgreSQL holds the canonical orgs/users; these
+  // SQLite columns store the owning organization/user ids and model visibility).
+  organization_id: string | null;
+  created_by_user_id: string | null;
+  visibility: string;
   quality?: ConversionQuality | null;
   meshiq_adaptive_smoothing?: MeshiqAdaptiveSmoothing | null;
   deleted_at: string | null;
@@ -84,6 +89,8 @@ export type FolderRecord = {
 export type ModelListOptions = {
   view?: "all" | "unsorted" | "recycling";
   projectId?: number;
+  // When set, only models owned by this organization are returned (accounts on).
+  organizationId?: string;
   q?: string;
   sortBy?: "name" | "status" | "created_at" | "updated_at" | "glb_size_bytes" | "original_size_bytes" | "project";
   sortDir?: "asc" | "desc";
@@ -277,6 +284,9 @@ export function initDb(): void {
   ensureColumn("public_shares", "link_mode", "TEXT DEFAULT 'locked_revision'");
   ensureColumn("public_shares", "allow_revision_switching", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn("models", "current_revision_id", "INTEGER REFERENCES model_revisions(id) ON DELETE SET NULL");
+  ensureColumn("models", "organization_id", "TEXT");
+  ensureColumn("models", "created_by_user_id", "TEXT");
+  ensureColumn("models", "visibility", "TEXT NOT NULL DEFAULT 'private'");
   ensureColumn("model_revisions", "meshiq_adaptive_smoothing", "TEXT NOT NULL DEFAULT 'off'");
   ensureColumn("revision_file_versions", "meshiq_adaptive_smoothing", "TEXT NOT NULL DEFAULT 'off'");
 
@@ -285,6 +295,8 @@ export function initDb(): void {
       ON models (deleted_at);
     CREATE INDEX IF NOT EXISTS models_folder_deleted_idx
       ON models (folder_id, deleted_at);
+    CREATE INDEX IF NOT EXISTS models_organization_idx
+      ON models (organization_id, deleted_at);
     CREATE UNIQUE INDEX IF NOT EXISTS public_shares_public_token_idx
       ON public_shares (public_token)
       WHERE public_token IS NOT NULL;
@@ -438,6 +450,10 @@ export function listModels(options: ModelListOptions = {}): ModelRecord[] {
   if (typeof options.projectId === "number") {
     where.push("models.folder_id = ?");
     params.push(options.projectId);
+  }
+  if (options.organizationId) {
+    where.push("models.organization_id = ?");
+    params.push(options.organizationId);
   }
   if (options.q) {
     where.push("(models.name LIKE ? ESCAPE '\\' OR models.source_filename LIKE ? ESCAPE '\\' OR folders.name LIKE ? ESCAPE '\\')");
@@ -599,11 +615,14 @@ export function createModel(input: {
   glbSizeBytes?: number | null;
   originalSizeBytes?: number | null;
   folderId?: number | null;
+  organizationId?: string | null;
+  createdByUserId?: string | null;
+  visibility?: string;
 }): ModelRecord {
   const result = db
     .prepare(
-      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb, glb_size_bytes, original_size_bytes, folder_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO models (slug, name, source_filename, source_ext, status, has_display_glb, glb_size_bytes, original_size_bytes, folder_id, organization_id, created_by_user_id, visibility)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.slug,
@@ -614,7 +633,10 @@ export function createModel(input: {
       input.hasDisplayGlb ? 1 : 0,
       input.glbSizeBytes ?? null,
       input.originalSizeBytes ?? null,
-      input.folderId ?? null
+      input.folderId ?? null,
+      input.organizationId ?? null,
+      input.createdByUserId ?? null,
+      input.visibility ?? "private"
     );
 
   return getModelById(Number(result.lastInsertRowid))!;

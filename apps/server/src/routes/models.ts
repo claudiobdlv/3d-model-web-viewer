@@ -45,6 +45,7 @@ import {
 import { parseConversionQuality, type ConversionQuality } from "../quality.js";
 import { parseMeshiqAdaptiveSmoothing, type MeshiqAdaptiveSmoothing } from "../meshiq.js";
 import { getLargeStepChunkingSummary } from "../utils/largeStepChunkingSummary.js";
+import { authorizeModelForOrg } from "../auth/index.js";
 
 const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
 
@@ -67,7 +68,10 @@ export const modelsRouter = express.Router();
 
 modelsRouter.get("/", (req, res) => {
   try {
-    const list = listModels(parseListOptions(req.query));
+    const options: ModelListOptions = parseListOptions(req.query);
+    // When accounts are enabled, scope the admin list to the active workspace.
+    if (req.auth?.organization) options.organizationId = req.auth.organization.id;
+    const list = listModels(options);
     const listWithSummary = list.map((model) => {
       const summary = getLargeStepChunkingSummary(model.slug, false);
       return summary ? { ...model, largeStepChunkingSummary: summary } : model;
@@ -155,6 +159,12 @@ modelsRouter.get("/:slug", (req, res) => {
     res.status(404).json({ error: "Model not found." });
     return;
   }
+  // Scope private/admin access to the active workspace (404, not 403, to avoid
+  // leaking existence of other workspaces' models).
+  if (req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
+    res.status(404).json({ error: "Model not found." });
+    return;
+  }
 
   const currentRevision = getCurrentRevisionForModel(model.id);
   const revisions = listRevisionsForModel(model.id);
@@ -192,6 +202,8 @@ export async function registerModelAndJob({
   issuedDate,
   makeCurrent = true,
   allowPublicSelectable = true,
+  organizationId = null,
+  createdByUserId = null,
 }: {
   sourceFilename: string;
   sourceExt: string;
@@ -204,6 +216,8 @@ export async function registerModelAndJob({
   issuedDate?: string;
   makeCurrent?: boolean;
   allowPublicSelectable?: boolean;
+  organizationId?: string | null;
+  createdByUserId?: string | null;
 }) {
   const slug = createSlug(sourceFilename);
   const isGlb = sourceExt === ".glb";
@@ -218,7 +232,10 @@ export async function registerModelAndJob({
     hasDisplayGlb: isGlb,
     glbSizeBytes: isGlb ? originalSizeBytes : null,
     originalSizeBytes,
-    folderId
+    folderId,
+    organizationId,
+    createdByUserId,
+    visibility: "private"
   });
 
   let revisionId: number | null = null;
@@ -319,6 +336,8 @@ modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
       meshiqAdaptiveSmoothing,
       folderId,
       originalSizeBytes: file.size,
+      organizationId: req.auth?.organization?.id ?? null,
+      createdByUserId: req.auth?.user?.id ?? null,
       ...revisionMetadata,
       saveOriginalFile: (targetPath) => {
         fs.writeFileSync(targetPath, file.buffer);

@@ -130,6 +130,8 @@ uploadsRouter.post("/init", (req, res) => {
       issuedDate: revisionMetadata.issuedDate,
       makeCurrent: revisionMetadata.makeCurrent,
       allowPublicSelectable: revisionMetadata.allowPublicSelectable,
+      organizationId: req.auth?.organization?.id ?? null,
+      createdByUserId: req.auth?.user?.id ?? null,
       totalChunks,
       chunkSizeBytes: MAX_UPLOAD_CHUNK_BYTES,
       createdAt: new Date().toISOString()
@@ -286,6 +288,8 @@ uploadsRouter.post("/:uploadId/complete", async (req, res, next) => {
           meshiqAdaptiveSmoothing: metadata.meshiqAdaptiveSmoothing,
           folderId: metadata.projectId,
           originalSizeBytes: metadata.sizeBytes,
+          organizationId: metadata.organizationId ?? null,
+          createdByUserId: metadata.createdByUserId ?? null,
           revisionLabel: metadata.revisionLabel,
           issuedDate: metadata.issuedDate,
           makeCurrent: metadata.makeCurrent,

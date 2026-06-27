@@ -48,6 +48,7 @@ import {
   resolveDisplayGlbPath,
   resolveSourcePath
 } from "./storage.js";
+import { createAuthSubsystem, authorizeModelForOrg } from "./auth/index.js";
 
 const port = Number(process.env.PORT || 3009);
 export const app = express();
@@ -56,7 +57,23 @@ ensureStorage();
 cleanAbandonedChunkedUploads();
 initDb();
 
+// Accounts subsystem (feature-flagged via AUTH_ENABLED; default off → legacy
+// Basic-auth admin path and existing SQLite flows are unchanged in production).
+const auth = createAuthSubsystem();
+if (auth.enabled) {
+  await auth.migrate();
+}
+// Flag-aware admin guard: session-based when accounts are on, legacy otherwise.
+const adminGuard = auth.adminGuard(legacyRequireAdmin);
+// Exposed for integration tests to mint sessions without a live OAuth provider.
+export const authSubsystem = auth;
+
 app.use(express.json());
+// Resolve the session cookie into req.auth before any route runs (no-op when off).
+if (auth.enabled && auth.attach) app.use(auth.attach);
+// Public, no-login auth routes (/login, /auth/*, /api/me) when accounts are on.
+if (auth.enabled && auth.router) app.use(auth.router);
+
 const frontendRoot = fs.existsSync(path.join(webRoot, "index.html")) ? webRoot : publicRoot;
 app.use((req, res, next) => {
   const protectedShells = new Set(["/index.html", "/admin.html", "/model.html", "/admin.js", "/model.js"]);
@@ -72,7 +89,18 @@ if (!process.env.ADMIN_PASSWORD) {
   console.warn("ADMIN_PASSWORD is not set. Admin upload routes are unprotected in this local/development process.");
 }
 
+// Flag-aware admin guard used by all private/admin routes. Delegates to the
+// session-based workspace guard when accounts are enabled, otherwise to the
+// legacy Basic-auth check below (unchanged production behavior).
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  if (auth.enabled) {
+    adminGuard(req, res, next);
+    return;
+  }
+  legacyRequireAdmin(req, res, next);
+}
+
+function legacyRequireAdmin(req: express.Request, res: express.Response, next: express.NextFunction): void {
   const password = process.env.ADMIN_PASSWORD;
   if (!password) {
     next();
@@ -251,7 +279,11 @@ app.get("/model-files/:slug/:file", requireAdmin, (req, res) => {
     return;
   }
 
-  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
+  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; organization_id?: string | null } | undefined;
+  if (model && req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
+    res.status(404).send("Not found");
+    return;
+  }
   const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
   if (resolved.invalid) {
     res.status(404).send("Not found");
@@ -276,8 +308,12 @@ app.get("/downloads/:slug/original", requireAdmin, (req, res) => {
     return;
   }
 
-  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; source_ext: string; source_filename: string } | undefined;
+  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; source_ext: string; source_filename: string; organization_id?: string | null } | undefined;
   if (!model) {
+    res.status(404).send("Not found");
+    return;
+  }
+  if (req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
     res.status(404).send("Not found");
     return;
   }
@@ -301,7 +337,11 @@ app.get("/downloads/:slug/display.glb", requireAdmin, (req, res) => {
     return;
   }
 
-  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
+  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; organization_id?: string | null } | undefined;
+  if (model && req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
+    res.status(404).send("Not found");
+    return;
+  }
   const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
   if (resolved.invalid) {
     res.status(404).send("Revision not found.");

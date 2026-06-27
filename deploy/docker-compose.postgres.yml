@@ -1,0 +1,47 @@
+# PostgreSQL service for the Phase 1 accounts layer — OPTIONAL OVERRIDE.
+#
+# This is intentionally a SEPARATE compose file, not part of
+# docker-compose.elitedesk.yml, so that:
+#   * the live deploy path (scripts/deploy-elitedesk.sh) and its strict
+#     "services must be exactly server+worker" guard keep working unchanged, and
+#   * production infrastructure is NOT altered until accounts are deliberately
+#     enabled (see docs/accounts-phase1.md).
+#
+# PostgreSQL is NOT exposed publicly: no host port mapping is declared, so it is
+# reachable only over the project's Docker network (the server connects via the
+# `postgres` service hostname in DATABASE_URL).
+#
+# To run the stack WITH Postgres once accounts are ready to enable:
+#   docker compose \
+#     -f deploy/docker-compose.elitedesk.yml \
+#     -f deploy/docker-compose.postgres.yml \
+#     up -d --build
+# (and update the deploy script's service-name guard to allow `postgres`).
+
+name: 3d-model-web-viewer
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-modelbase}
+      POSTGRES_USER: ${POSTGRES_USER:-modelbase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    # No `ports:` — database stays private to the Docker network.
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-modelbase} -d ${POSTGRES_DB:-modelbase}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Override fragment: make the server wait for Postgres when this file is used.
+  server:
+    depends_on:
+      postgres:
+        condition: service_healthy
