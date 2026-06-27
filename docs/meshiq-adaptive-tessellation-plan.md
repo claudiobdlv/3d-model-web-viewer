@@ -1342,6 +1342,68 @@ Remaining risk:
 
 - Visual quality was validated only numerically (triangle/GLB deltas) on one tiny safe STEP file in a headless deploy session; a pixel-level render and larger real coworker models have not yet been visually inspected.
 
+### Phase 3D: finite adaptive bounds fix
+
+Date: 2026-06-27.
+
+Root cause:
+
+- Production Low/Off and Low/Strong U826 Steric conversions were byte-identical even though Strong was stored and passed correctly.
+- The native converter called `Bnd_Box::Get()` on an open aggregate free-shape box, cast the resulting infinite limits to floats, and computed an infinite assembly diagonal.
+- All 4,227 Strong report parts therefore used the Low baseline values (`linear=0.85`, `angular=0.65`) with `adaptive_invalid_bounds_fallback`.
+
+Fix design:
+
+- Open, void, non-finite, inverted, zero-diagonal, and overflowed bounds are rejected before they can be used for adaptive size ratios.
+- If the aggregate free-shape box is unusable, the converter unions only finite transformed leaf/render-shape boxes. Invalid leaves are ignored rather than poisoning the assembly.
+- Label-list chunks derive this fallback from the whole assembly, not only the emitted chunk, so every adaptive chunk uses one stable assembly extent. This is diagnostic/adaptive extent calculation only; it does not mutate geometry or transforms.
+- If no finite leaf box exists, baseline tessellation remains the safe result and `adaptiveDisabledReason` is `invalid_assembly_bounds`.
+- `mesh-report.json` now records `adaptiveBoundsSource`, `adaptiveBoundsFallbackUsed`, `adaptiveDisabledReason`, `adaptiveAppliedPartCount`, and `adaptiveFallbackPartCount`. Worker chunk aggregation preserves the finite assembly box and sums the part counts.
+- Existing adaptive reuse-key inputs (linear/angular deflection, relative mode, and profile) remain unchanged. Thresholds, tiny-dense coarsening, and simplification were not changed.
+
+Regression coverage:
+
+- Native self-tests cover a normal finite global box, open aggregate recovery from finite leaves, invalid leaves being ignored, no-finite-leaf safe fallback, zero/inverted/NaN rejection, Strong applying after recovery, report metadata serialization, and adaptive reuse-key separation.
+- Worker tests cover aggregation of bounds metadata and applied/fallback counts across chunks.
+
+Isolated U826 validation method:
+
+- Production stayed on `main` at `ca5db5f38a0f186685080f902d50cab75206f6fb`; no deploy was run.
+- The feature was built in an isolated EliteDesk worktree/image from `6728269cbc562eb10ef04e87546926a780b44be1`.
+- The failed U826 source (SHA-256 `6fec1caa70a2bfbdacb238d6b86810f33bcc0058e879f079c67700ac6188acee`) was mounted read-only. The existing four-chunk plan was read as reference; all outputs went to an isolated validation directory.
+- Off and Strong used the production command shape: `preview`, `step-presentation`, raw colour, label-list chunks, parallel meshing, and mesh reuse. Strong added `--adaptive-mesh on --adaptive-mesh-profile strong`.
+- Both merged raw GLBs passed hierarchy/name/material/extras/bounds validation. Both Meshopt results passed 19 semantic gates and glTF Validator with zero errors and zero warnings.
+
+Results:
+
+| Metric | Low / Off | Low / Strong |
+|---|---:|---:|
+| Adaptive bounds | off; per-chunk diagnostic leaf fallback | `finite_leaf_fallback`, diagonal `14655.783005` in all 4 chunks |
+| Applied / invalid-bounds fallback parts | `0 / 0` | `60 / 0` |
+| Deflection reasons | 4,227 baseline | 4,117 no-op; 50 watch-band; 60 smoothed |
+| Validated GLB nodes / meshes / primitives / materials | 4,227 / 4,121 / 4,121 / 260 | 4,227 / 4,121 / 4,121 / 260 |
+| Validated raw triangles / vertices | 814,594 / 2,443,782 | 884,410 / 2,653,230 |
+| `mesh-report` triangles / vertices | 820,486 / 2,461,458 | 890,302 / 2,670,906 |
+| Raw GLB bytes | 84,897,496 | 90,762,184 |
+| Meshopt GLB bytes | 29,243,100 | 30,349,500 |
+| Raw SHA-256 | `38ca6578630728ade837e1a520fb07f1b948da5f046b1e64210fa3fa0dfeeba5` | `a6adf37d7be1b6b26703e5df77666c589282f10c01fccb783618bd1cdbc1290f` |
+| Meshopt SHA-256 | `8c2d066067cf1fc0b7da2dddde7874e5406e8d7b69d5b23eaf4845055ad39d7d` | `f8983eedf7a0491f725d3c8bda8e5bac038aa453f4ef66c97753d36c0121c770` |
+| Sum of native chunk conversion seconds | 1,670.275 | 1,665.118 |
+
+Interpretation:
+
+- Off exactly reproduced the current production raw and Meshopt byte hashes, confirming baseline geometry remained unchanged.
+- Strong is no longer byte-identical to Off. Validated triangles and vertices increased by 69,816 and 209,448 respectively, while node, mesh, primitive, material, name, and colour/material identity remained stable.
+- The compared name/material/colour identity multiset for all 4,227 report parts was identical (SHA-256 `992d6b918eb7e8f94c4425dd7b6fb20a0ac8dbbf3f396f2066c5068ccf57850d`).
+- Representative large tank parts changed from `0.85 / 0.65` to `0.5525 / 0.45` with reason `large_sparse_smoothing`; smaller tank parts remained watch-band or no-op.
+- This phase proves the intended numerical geometry change and eliminates the silent fallback. It did not perform a browser/pixel comparison, so visible improvement is not yet established and threshold tuning remains a separate task.
+
+Remaining risks and rollout recommendation:
+
+- Run an explicit visual Off-versus-Strong review on U826 before deciding whether the current Low/Strong thresholds are useful enough; do not tune thresholds in the bounds-fix rollout.
+- Review the existing difference between native report primitive/triangle totals and merged GLB readback totals separately; it is unchanged in kind between Off and Strong and did not fail GLB semantic validation.
+- Open a PR for review, then use a separate explicit rollout prompt with a fresh verified backup. Keep MeshIQ globally off, deploy only server/worker, and validate one new safe Off/Strong pair without overwriting the existing production U826 records or public links.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.

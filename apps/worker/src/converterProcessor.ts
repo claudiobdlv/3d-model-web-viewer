@@ -1668,6 +1668,30 @@ async function aggregateMeshReports(
   );
   const first = reports[0] || {};
   const parts = reports.flatMap((report) => Array.isArray(report.parts) ? report.parts : []);
+  const firstQuality = first.quality ?? {};
+  const hasAdaptiveBoundsMetadata = reports.some((report) =>
+    report.quality && Object.prototype.hasOwnProperty.call(report.quality, "adaptiveBoundsSource")
+  );
+  const quality = { ...firstQuality };
+  if (hasAdaptiveBoundsMetadata) {
+    quality.adaptiveBoundsSource = reports
+      .map((report) => report.quality?.adaptiveBoundsSource)
+      .find((source) => typeof source === "string") ?? "unavailable";
+    quality.adaptiveBoundsFallbackUsed = reports.some((report) =>
+      report.quality?.adaptiveBoundsFallbackUsed === true
+    );
+    quality.adaptiveAppliedPartCount = reports.reduce(
+      (sum, report) => sum + Number(report.quality?.adaptiveAppliedPartCount ?? 0),
+      0
+    );
+    quality.adaptiveFallbackPartCount = reports.reduce(
+      (sum, report) => sum + Number(report.quality?.adaptiveFallbackPartCount ?? 0),
+      0
+    );
+    quality.adaptiveDisabledReason = reports.every((report) =>
+      report.quality?.adaptiveDisabledReason === "invalid_assembly_bounds"
+    ) ? "invalid_assembly_bounds" : null;
+  }
   const totals = {
     trianglesBeforeSimplification: 0,
     trianglesAfterSimplification: 0,
@@ -1687,15 +1711,27 @@ async function aggregateMeshReports(
   let globalMin = [Infinity, Infinity, Infinity];
   let globalMax = [-Infinity, -Infinity, -Infinity];
   let hasBounds = false;
-  for (const part of parts) {
-    const min = part.boundingBox?.min;
-    const max = part.boundingBox?.max;
+  const mergeBounds = (min: unknown, max: unknown): void => {
     if (Array.isArray(min) && Array.isArray(max) && min.length === 3 && max.length === 3) {
+      const finiteMin = min.map(Number);
+      const finiteMax = max.map(Number);
+      if (!finiteMin.every(Number.isFinite) || !finiteMax.every(Number.isFinite) ||
+          finiteMin.some((value, index) => value > finiteMax[index]!)) {
+        return;
+      }
       for (let i = 0; i < 3; i++) {
-        globalMin[i] = Math.min(globalMin[i], Number(min[i]));
-        globalMax[i] = Math.max(globalMax[i], Number(max[i]));
+        globalMin[i] = Math.min(globalMin[i]!, finiteMin[i]!);
+        globalMax[i] = Math.max(globalMax[i]!, finiteMax[i]!);
       }
       hasBounds = true;
+    }
+  };
+  for (const report of reports) {
+    mergeBounds(report.assemblyBoundingBox?.min, report.assemblyBoundingBox?.max);
+  }
+  if (!hasBounds) {
+    for (const part of parts) {
+      mergeBounds(part.boundingBox?.min, part.boundingBox?.max);
     }
   }
   const diagonal = hasBounds
@@ -1755,7 +1791,7 @@ async function aggregateMeshReports(
     schemaVersion: 1,
     converterBackend: first.converterBackend ?? "xcaf-baseline",
     sourceFileName: first.sourceFileName,
-    quality: first.quality,
+    quality,
     assemblyBoundingBox: {
       min: globalMin,
       max: globalMax,

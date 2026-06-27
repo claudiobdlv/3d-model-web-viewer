@@ -443,6 +443,26 @@ test("converterProcessor: adaptive scheduler loops and completes chunking", asyn
           fs.mkdirSync(outDir, { recursive: true });
           await io.write(glbPath, createChunkFixture(args.includes("chunk-0") ? "c0" : "c1"));
           fs.writeFileSync(path.join(outDir, "xcaf-report.json"), JSON.stringify(xcafReport));
+          const chunkIndex = Number(outDir.match(/chunk-(\d+)$/)?.[1] ?? 0);
+          fs.writeFileSync(path.join(outDir, "mesh-report.json"), JSON.stringify({
+            schemaVersion: 1,
+            converterBackend: "xcaf-baseline",
+            quality: {
+              adaptiveEnabled: true,
+              adaptiveMode: "large_sparse_smoothing",
+              adaptiveProfile: "strong",
+              adaptiveBoundsSource: "finite_leaf_fallback",
+              adaptiveBoundsFallbackUsed: true,
+              adaptiveDisabledReason: null,
+              adaptiveAppliedPartCount: chunkIndex + 1,
+              adaptiveFallbackPartCount: 0
+            },
+            assemblyBoundingBox: { min: [0, 0, 0], max: [10, 10, 10], diagonal: 17.32 },
+            totals: {},
+            parts: [],
+            rankings: {},
+            warnings: []
+          }));
         }
         child.emit("exit", 0);
       });
@@ -483,6 +503,14 @@ test("converterProcessor: adaptive scheduler loops and completes chunking", asyn
     assert.equal(chunking.adaptiveConcurrency.maxConfigured, 3);
     assert.ok(chunking.adaptiveConcurrency.maxReached >= 2);
     assert.ok(chunking.adaptiveConcurrency.snapshots.length > 0);
+    const meshReport = JSON.parse(await fs.promises.readFile(result.meshReportPath!, "utf8"));
+    assert.equal(meshReport.quality.adaptiveBoundsSource, "finite_leaf_fallback");
+    assert.equal(meshReport.quality.adaptiveBoundsFallbackUsed, true);
+    assert.equal(meshReport.quality.adaptiveDisabledReason, null);
+    assert.equal(meshReport.quality.adaptiveAppliedPartCount, 6);
+    assert.equal(meshReport.quality.adaptiveFallbackPartCount, 0);
+    assert.deepEqual(meshReport.assemblyBoundingBox.min, [0, 0, 0]);
+    assert.deepEqual(meshReport.assemblyBoundingBox.max, [10, 10, 10]);
   } finally {
     await fs.promises.rm(dir, { recursive: true, force: true });
   }
