@@ -1404,6 +1404,137 @@ Remaining risks and rollout recommendation:
 - Review the existing difference between native report primitive/triangle totals and merged GLB readback totals separately; it is unchanged in kind between Off and Strong and did not fail GLB semantic validation.
 - Open a PR for review, then use a separate explicit rollout prompt with a fresh verified backup. Keep MeshIQ globally off, deploy only server/worker, and validate one new safe Off/Strong pair without overwriting the existing production U826 records or public links.
 
+### Phase 3E: Isolated visual Off-vs-Strong validation for U826 Steric
+
+Date: 2026-06-27.
+
+#### Isolated visual method
+
+A standalone Three.js side-by-side comparison viewer was created at
+`/home/claudio/validation/meshiq-finite-bounds-20260627/.tmp/viewer.html` and served
+from `/home/claudio/validation/meshiq-finite-bounds-20260627/` on port 8899 with CORS
+headers (`python3 /tmp/cors_srv.py`, killed after session).  The viewer loaded the two
+isolated Meshopt GLBs via `GLTFLoader` with `MeshoptDecoder`, rendered both in
+synchronized `OrbitControls` side-by-side, and provided wireframe, edge-overlay, and
+camera-preset buttons.  Screenshots were taken from the viewer running at
+`http://192.168.1.200:8899/.tmp/viewer.html`.  Temp artifacts stored under
+`.tmp/` (ignored, not committed).
+
+#### Off and Strong GLBs compared
+
+| Property | Off | Strong |
+|---|---|---|
+| Path | `/home/claudio/validation/meshiq-finite-bounds-20260627/off/display.glb` | `/home/claudio/validation/meshiq-finite-bounds-20260627/strong/display.glb` |
+| Bytes | 29,243,100 | 30,349,500 |
+| SHA-256 | `8c2d0660…9d7d` | `f8983eed…c770` |
+| Validated triangles | 814,594 | 884,410 |
+| Parts smoothed | 0 | 60 |
+| Deflection (large parts) | linear=0.85, angular=0.65 | linear=0.5525, angular=0.45 |
+| Compression | Meshopt, POSITION:16/NORMAL:12, validated pass | same |
+
+These are the same isolated outputs confirmed in Phase 3D.  Production was not touched.
+
+#### Visual findings
+
+Camera: default whole-model isometric angle, synchronized across both panels.
+
+**Tank side wall (large horizontal cylindrical vessels — "Hot Batch Area - New Tank",
+sizeRatio≈0.38–0.42):**
+Strong shows marginally smoother shading continuity on the curved cylinder walls compared
+to Off.  The improvement is perceptible on close inspection (tight zoom on the cylinder
+body) but subtle at normal viewing distance and default camera angle.  Off exhibits
+slightly more angular shading transitions where the low-tessellation facets catch
+different light.
+
+**Tank top rim / circular edge:**
+Both Off and Strong show comparable resolution on the end caps of the horizontal
+cylinders at the default camera angle.  No strong visual difference at this view.
+
+**Curved pipes/manifolds:**
+No obvious difference between Off and Strong on pipe bodies or elbows at the default view
+distance.  Both show reasonable rounding for the pipe diameters present.
+
+**Zoomed-out whole model:**
+The two panels appear nearly identical at full-model zoom.  Structural hierarchy, part
+placement, colors, materials, and names are visually identical.
+
+**Large sparse diagnostic area (sizeRatio=0.87 part):**
+The largest-ratio changed part presents as a large flat/gently-curved vessel body in the
+background of the scene.  Differences in smoothness on a near-planar surface are not
+visible at the tested camera angles.
+
+**Materials / colours / names / hierarchy:**
+No differences observed.  All parts, assemblies, colors, and materials appear identical
+between Off and Strong panels.  Confirmed by Phase 3D identity hash
+(`992d6b918eb7e8f94c4425dd7b6fb20a0ac8dbbf3f396f2066c5068ccf57850d`).
+
+**Viewer performance:**
+Both panels rendered smoothly with camera sync enabled.  No perceptible lag or frame-rate
+difference between Off (814,594 tris) and Strong (884,410 tris).
+
+**GLB load time:**
+Both loaded within a few seconds from the LAN HTTP server.  No perceptible difference.
+
+**Part E wireframe/edge:**
+Wireframe and edge overlay toggles were built into the viewer but could not be activated
+during automated inspection (Chrome tier restricted to read-only).  The comparative zoom
+screenshots were taken from the default shaded render.
+
+#### Part F: Top 10 parts by triangle increase (Off → Strong)
+
+Source: cross-chunk merge of all four `mesh-report.json` files from both Off and Strong
+runs.  48 parts gained triangles; 0 decreased.
+
+| # | Display name (truncated) | sizeRatio | Off deflection (linear/angular) | Strong deflection (linear/angular) | Off tris | Strong tris | Δ tris |
+|---|---|---|---|---|---|---|---|
+| 1 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.721 | 0.85 / 0.65 | 0.5525 / 0.45 | 35,398 | 50,450 | +15,052 |
+| 2 | Hot Batch Area - New Tank - …-155814 (instance A) | 0.378 | 0.85 / 0.65 | 0.5525 / 0.45 | 16,446 | 22,782 | +6,336 |
+| 3 | Hot Batch Area - New Tank - …-155814 (instance B) | 0.378 | 0.85 / 0.65 | 0.5525 / 0.45 | 16,446 | 22,782 | +6,336 |
+| 4 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.290 | 0.85 / 0.65 | 0.5525 / 0.45 | 10,796 | 15,692 | +4,896 |
+| 5 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.269 | 0.85 / 0.65 | 0.5525 / 0.45 | 8,312 | 11,948 | +3,636 |
+| 6 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.870 | 0.85 / 0.65 | 0.5525 / 0.45 | 8,292 | 11,780 | +3,488 |
+| 7 | HOT BATCH AREA - TANK 6 - …-1521074 | 0.419 | 0.85 / 0.65 | 0.5525 / 0.45 | 8,748 | 12,058 | +3,310 |
+| 8 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.594 | 0.85 / 0.65 | 0.5525 / 0.45 | 4,870 | 6,866 | +1,996 |
+| 9 | HOT BATCH AREA - TANK 7 - …-1522135 | 0.404 | 0.85 / 0.65 | 0.5525 / 0.45 | 5,088 | 7,056 | +1,968 |
+| 10 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.684 | 0.85 / 0.65 | 0.5525 / 0.45 | 4,272 | 6,064 | +1,792 |
+
+All 48 smoothed parts are "U826-Steric" or "Hot Batch Area" vessel/tank bodies.  All
+carry `large_sparse_smoothed` and `adaptive_profile_strong` warnings.  No pipe, valve,
+or small fitting received the strong profile.  The top changed parts (#1, #2, #3, #7,
+#9) correspond directly to the large cylindrical tank vessels visible in the viewer.
+
+Triangle increases: +42% on the largest vessel (#1), +39% on the large batch tanks (#2,
+#3).  These are geometrically meaningful improvements for curved surfaces but remain in
+the Low-quality deflection range (0.5525 relative linear).
+
+#### Decision: Option 2 — visual improvement present but subtle; threshold tuning recommended next
+
+Low + Strong **works numerically** (the finite bounds fix is confirmed) and produces a
+real, verifiable geometry improvement on the 60 large tank parts.  The visual improvement
+is **present but subtle** at the default whole-model camera angle and normal viewing
+distance.  Close inspection of the cylindrical vessel walls does show smoother shading
+continuity in Strong vs Off, but the difference is not immediately striking.
+
+The current Low quality baseline (linear=0.5525 after Strong) is still in the coarse
+range.  The improvement from 0.85 to 0.5525 (35% tighter linear) and 0.65 to 0.45 (31%
+tighter angular) produces the observed 8.6% total triangle increase.  For U826-scale
+industrial models with large curved tanks, the result is better than Off but may not be
+compelling enough to justify recommending Strong to users as the default.
+
+Options 3 and 4 are not selected: the viewer showed no regressions, no broken
+materials, no performance issue, and no worse geometry.
+
+Recommended next step: threshold tuning.  Evaluate whether reducing the Large Sparse
+linear deflection target from 0.5525 to, e.g., 0.40–0.45 (with the corresponding
+angular target) would produce a visually clear improvement on cylindrical vessel walls
+without unacceptable file-size or load-time impact.  Do not merge or deploy the current
+bounds fix until the threshold decision is made, or accept the current subtle improvement
+and document it as Phase 3E-passed if the product requirement is only "better than Off"
+rather than "clearly smooth".
+
+**Do not tune thresholds in the bounds-fix PR.**  Open a separate threshold-tuning task
+after the bounds-fix PR is reviewed.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.
