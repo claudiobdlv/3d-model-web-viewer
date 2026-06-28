@@ -1,0 +1,13 @@
+{
+  "name": "formatiq-dxf-spike",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FormatIQ DXF mesh import spike — zero npm dependencies, pure Node.js ESM",
+  "scripts": {
+    "test": "node src/dxfSpikeParser.mjs fixtures/test-3dface.dxf fixtures/test-polyface.dxf fixtures/test-block-insert.dxf fixtures/test-layer-color.dxf fixtures/test-acis-only.dxf"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
