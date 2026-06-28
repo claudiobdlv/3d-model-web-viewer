@@ -20,6 +20,10 @@ Thumbs.db
 .cache/
 cache/
 .tmp/
+# FormatIQ private compatibility inputs and generated benchmark/results (also covered by .tmp/).
+.tmp/formatiq-private-samples/
+.tmp/formatiq-compatibility-results/
+.tmp/formatiq-benchmarks/
 tmp/
 temp/
 *.tmp

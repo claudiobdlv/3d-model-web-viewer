@@ -7,6 +7,36 @@ import type {
 import { resolveColor } from "./colors.js";
 import { analyzeBlockTraversal } from "./blockTraversal.js";
 import { isDefaultExtrusion } from "./ocs.js";
+import { expandInsertInstances } from "./insertInstances.js";
+import { DEFAULT_BLOCK_NESTING_LIMIT } from "./blockTraversal.js";
+
+function analyzeLayer0Inheritance(parsedDxf: ParsedDxf): { count: number; summary: Record<string, number> } {
+  let count = 0;
+  const summary: Record<string, number> = {};
+
+  function visit(insert: ParsedDxf["entities"]["inserts"][number], inheritedLayer: string | undefined, depth: number, stack: string[]): void {
+    if (depth > DEFAULT_BLOCK_NESTING_LIMIT || stack.includes(insert.blockName)) return;
+    const block = parsedDxf.blocks[insert.blockName];
+    if (!block) return;
+    const effectiveLayer = insert.layer === "0" && inheritedLayer ? inheritedLayer : insert.layer;
+    for (const entity of block.supported) {
+      if (entity.layer === "0" && effectiveLayer !== "0") {
+        count++;
+        summary[effectiveLayer] = (summary[effectiveLayer] ?? 0) + 1;
+      }
+    }
+    for (const nested of block.inserts) {
+      for (const _instance of expandInsertInstances(nested)) {
+        visit(nested, effectiveLayer, depth + 1, [...stack, insert.blockName]);
+      }
+    }
+  }
+
+  for (const insert of parsedDxf.entities.inserts) {
+    for (const _instance of expandInsertInstances(insert)) visit(insert, undefined, 1, []);
+  }
+  return { count, summary };
+}
 
 // ─── Format Report ────────────────────────────────────────────────────────────
 
@@ -27,6 +57,7 @@ export function buildFormatReport(params: {
     POLYMESH: 0,
     MESH: 0,
     INSERT: entities.inserts.length,
+    MINSERT: 0,
     "3DSOLID": 0,
     BODY: 0,
     REGION: 0,
@@ -34,7 +65,8 @@ export function buildFormatReport(params: {
   const allSupported = [...entities.supported, ...Object.values(blocks).flatMap((block) => block.supported)];
   const allAcis = [...entities.acis, ...Object.values(blocks).flatMap((block) => block.acis)];
   const allInserts = [...entities.inserts, ...Object.values(blocks).flatMap((block) => block.inserts)];
-  entityCounts.INSERT = allInserts.length;
+  entityCounts.MINSERT = allInserts.filter((insert) => insert.type === "MINSERT").length;
+  entityCounts.INSERT = allInserts.length - entityCounts.MINSERT;
   for (const e of allSupported) {
     if (e.type === "3DFACE") entityCounts["3DFACE"]++;
     else if (e.type === "POLYFACE_MESH") entityCounts["POLYFACE_MESH"]++;
@@ -52,7 +84,7 @@ export function buildFormatReport(params: {
   // Insert summary
   const insertsByBlock: Record<string, number> = {};
   for (const ins of entities.inserts) {
-    insertsByBlock[ins.blockName] = (insertsByBlock[ins.blockName] ?? 0) + 1;
+    insertsByBlock[ins.blockName] = (insertsByBlock[ins.blockName] ?? 0) + expandInsertInstances(ins).length;
   }
 
   // Layer summaries (referenced ones + "0")
@@ -98,12 +130,16 @@ export function buildFormatReport(params: {
   const meshEntities = allSupported.filter((entity) => entity.type === "MESH");
   const meshTriangleCount = meshEntities.reduce((sum, entity) => sum + entity.triangleCount, 0);
   const invalidMeshFaceCount = meshEntities.reduce((sum, entity) => sum + entity.invalidFaceCount, 0);
+  const meshDiagnostics = meshEntities.flatMap((entity) => entity.diagnostics.map((diagnostic) => ({
+    ...diagnostic,
+    handle: entity.handle,
+  })));
   if (meshEntityCount > 0) {
     if (meshTriangleCount > 0) {
       warnings.push(`${meshEntityCount} MESH entity/entities triangulated from R2010+ level-0 face lists (${meshTriangleCount} triangle(s)).`);
     }
-    if (invalidMeshFaceCount > 0) {
-      warnings.push(`${invalidMeshFaceCount} invalid or incomplete MESH face-list item(s) were skipped.`);
+    for (const diagnostic of meshDiagnostics) {
+      warnings.push(`MESH${diagnostic.handle ? ` ${diagnostic.handle}` : ""} [${diagnostic.code}]: ${diagnostic.message}`);
     }
   }
 
@@ -128,7 +164,10 @@ export function buildFormatReport(params: {
   } else if (!hasUsable3D) {
     conversionStatus = "no-usable-3d-geometry";
     const skippedTotal = Object.values(entities.skipped).reduce((a, b) => a + b, 0);
-    if (skippedTotal > 0) {
+    if (meshEntityCount > 0) {
+      warnings.push("DXF MESH entities contained no usable level-0 triangles; review the MESH diagnostics above.");
+      exportAdvice = "Re-export a level-0 polygon mesh or repair the malformed MESH vertex/face lists in the source application.";
+    } else if (skippedTotal > 0) {
       warnings.push("DXF contains only 2D or unsupported entities. No 3D mesh geometry found.");
       exportAdvice =
         "Ensure you are exporting a 3D view from Revit (not a floor plan). Check that the view contains visible solids or mesh elements.";
@@ -141,11 +180,13 @@ export function buildFormatReport(params: {
       `${acisEntityCount} ACIS solid(s) (3DSOLID/BODY/REGION) were detected and skipped. ` +
         `Re-export from Revit with "Solids (3D views)" set to "Polymesh" to include them.`
     );
-  } else if (traversal.cycleWarnings.length > 0 || traversal.depthLimitWarnings.length > 0 || invalidMeshFaceCount > 0) {
+  } else if (traversal.cycleWarnings.length > 0 || traversal.depthLimitWarnings.length > 0 || meshDiagnostics.length > 0) {
     conversionStatus = "partial-with-warnings";
   } else {
     conversionStatus = "ok";
   }
+
+  const layer0Inheritance = analyzeLayer0Inheritance(parsedDxf);
 
   return {
     schemaVersion: 1,
@@ -162,6 +203,8 @@ export function buildFormatReport(params: {
     blockCount: Object.keys(blocks).length,
     blocks: blockSummaries,
     insertCount: entities.inserts.length,
+    mInsertCount: entityCounts.MINSERT,
+    expandedMInsertInstanceCount: traversal.expandedMInsertInstanceCount,
     insertsByBlock,
     nestedInsertCount: traversal.nestedInsertCount,
     maxBlockNestingDepth: traversal.maxBlockNestingDepth,
@@ -173,7 +216,12 @@ export function buildFormatReport(params: {
       triangulatedEntityCount: meshEntities.filter((entity) => entity.triangleCount > 0).length,
       triangleCount: meshTriangleCount,
       invalidFaceCount: invalidMeshFaceCount,
+      malformedWarningCount: meshDiagnostics.length,
+      diagnostics: meshDiagnostics,
     },
+    malformedMeshWarningCount: meshDiagnostics.length,
+    layer0InheritedEntityCount: layer0Inheritance.count,
+    inheritedLayerSummary: layer0Inheritance.summary,
     ocs: {
       explicitExtrusionEntityCount: extrusionEntities.length,
       transformedEntityCount,
@@ -197,6 +245,7 @@ export function buildOptimizationReport(params: {
   materialsByLayer: Record<string, string[]>;
   timing: {
     parseMs: number;
+    traversalMs: number;
     meshOptimizationMs: number;
     glbBuildMs: number;
     totalMs: number;
@@ -225,6 +274,11 @@ export function buildOptimizationReport(params: {
     displayGlbSizeBytes !== null && rawGlbSizeBytes > 0
       ? Number(((1 - displayGlbSizeBytes / rawGlbSizeBytes) * 100).toFixed(2))
       : null;
+  const uniqueMaterials = Object.values(materialsByLayer).reduce((s, v) => s + v.length, 0);
+  const cardinalityWarning = uniqueMaterials > 256
+    ? `High DXF material cardinality (${uniqueMaterials}); consider consolidating source layers/colours before rollout.`
+    : null;
+  const reportWarnings = cardinalityWarning ? [...warnings, cardinalityWarning] : warnings;
 
   return {
     schemaVersion: 1,
@@ -247,10 +301,12 @@ export function buildOptimizationReport(params: {
       uniqueRenderedMeshes: blockReuse.uniqueRenderedMeshes,
       reusedBlockMeshCount: blockReuse.reusedBlockMeshCount,
       geometryDuplicationAvoidedTriangles: blockReuse.geometryDuplicationAvoidedTriangles,
+      expandedMInsertInstanceCount: traversal.expandedMInsertInstanceCount,
     },
     materials: {
-      uniqueMaterials: Object.values(materialsByLayer).reduce((s, v) => s + v.length, 0),
+      uniqueMaterials,
       materialsByLayer,
+      cardinalityWarning,
     },
     normals: { strategy: "flat", smoothAngleThreshold: null },
     glb: {
@@ -260,7 +316,7 @@ export function buildOptimizationReport(params: {
     },
     meshopt,
     timing,
-    warnings,
+    warnings: reportWarnings,
   };
 }
 

@@ -61,7 +61,7 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
   const ec = parsedDxf.entities;
   await appendLog(
     logPath,
-    `[DXF] ENTITIES: ${ec.supported.length} supported, ${ec.inserts.length} INSERT(s), ${ec.acis.length} ACIS\n`
+    `[DXF] ENTITIES: ${ec.supported.length} supported, ${ec.inserts.length} INSERT/MINSERT source entity/entities, ${ec.acis.length} ACIS\n`
   );
 
   if (ec.acis.length > 0) {
@@ -72,12 +72,22 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
   }
 
   // ── Build format report (early, before potentially throwing) ───────────────
+  const traversalStart = Date.now();
   const traversal = analyzeBlockTraversal(parsedDxf);
+  const traversalMs = Date.now() - traversalStart;
   const formatReport = buildFormatReport({ parsedDxf, sourcePath, sourceFileSizeBytes, traversal });
   await fs.promises.writeFile(formatReportPath, JSON.stringify(formatReport, null, 2) + "\n");
   await appendLog(
     logPath,
     `[DXF] Nested block traversal: ${traversal.nestedInsertCount} nested INSERT(s), max depth ${traversal.maxBlockNestingDepth}/${traversal.maxDepthLimit}\n`
+  );
+  await appendLog(
+    logPath,
+    `[DXF] MINSERT expansion: ${formatReport.mInsertCount} source entity/entities -> ${formatReport.expandedMInsertInstanceCount} instance(s)\n`
+  );
+  await appendLog(
+    logPath,
+    `[DXF] Layer 0 inheritance: ${formatReport.layer0InheritedEntityCount} rendered entity occurrence(s) across ${Object.keys(formatReport.inheritedLayerSummary).length} inherited layer(s)\n`
   );
   for (const warning of [...traversal.cycleWarnings, ...traversal.depthLimitWarnings]) {
     await appendLog(logPath, `[DXF] WARNING: ${warning}\n`);
@@ -86,6 +96,9 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
     logPath,
     `[DXF] MESH handling: ${formatReport.mesh.triangulationStatus}; ${formatReport.mesh.entityCount} entity/entities, ${formatReport.mesh.triangleCount} triangle(s)\n`
   );
+  for (const diagnostic of formatReport.mesh.diagnostics) {
+    await appendLog(logPath, `[DXF] WARNING: MESH${diagnostic.handle ? ` ${diagnostic.handle}` : ""} [${diagnostic.code}] ${diagnostic.message}\n`);
+  }
   await appendLog(
     logPath,
     `[DXF] OCS transforms: ${formatReport.ocs.explicitExtrusionEntityCount} explicit, ${formatReport.ocs.transformedEntityCount} transformed, ${formatReport.ocs.unsupportedEntityCount} unsupported\n`
@@ -229,7 +242,7 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
     rawGlbSizeBytes,
     displayGlbSizeBytes: optimization.displaySizeBytes,
     materialsByLayer,
-    timing: { parseMs, meshOptimizationMs, glbBuildMs, meshoptMs, totalMs },
+    timing: { parseMs, traversalMs, meshOptimizationMs, glbBuildMs, meshoptMs, totalMs },
     meshopt: {
       requestedMode: optimization.requestedMode,
       status: optimization.status,

@@ -1,5 +1,5 @@
 // FormatIQ DXF — triangle extraction from parsed entities
-import type { DxfSupportedEntity, Triangle, Dxf3DFace, DxfPolyfaceMesh, DxfMeshEntity, ResolvedColor } from "./types.js";
+import type { DxfSupportedEntity, Triangle, Dxf3DFace, DxfPolyfaceMesh, DxfMeshEntity, ResolvedColor, DxfLayer } from "./types.js";
 import { materialKey, resolveColor } from "./colors.js";
 
 function mkTriangle(
@@ -19,14 +19,33 @@ function mkTriangle(
   };
 }
 
-function effectiveColor(entity: Dxf3DFace | DxfPolyfaceMesh | DxfMeshEntity, inheritedByBlockColor?: ResolvedColor): ResolvedColor {
+function effectiveLayer(entityLayer: string, inheritedLayer?: string): string {
+  return entityLayer === "0" && inheritedLayer ? inheritedLayer : entityLayer;
+}
+
+function effectiveColor(
+  entity: Dxf3DFace | DxfPolyfaceMesh | DxfMeshEntity,
+  inheritedByBlockColor?: ResolvedColor,
+  inheritedLayer?: string,
+  layers?: Record<string, DxfLayer>
+): ResolvedColor {
+  if (layers) {
+    return resolveColor(
+      entity.colorIndex,
+      entity.trueColor,
+      effectiveLayer(entity.layer, inheritedLayer),
+      layers,
+      inheritedByBlockColor
+    );
+  }
   return entity.color.source === "byblock" && inheritedByBlockColor
     ? resolveColor(0, null, entity.layer, {}, inheritedByBlockColor)
     : entity.color;
 }
 
-function extractMesh(entity: DxfMeshEntity, inheritedByBlockColor?: ResolvedColor): Triangle[] {
-  const color = effectiveColor(entity, inheritedByBlockColor);
+function extractMesh(entity: DxfMeshEntity, inheritedByBlockColor?: ResolvedColor, inheritedLayer?: string, layers?: Record<string, DxfLayer>): Triangle[] {
+  const layer = effectiveLayer(entity.layer, inheritedLayer);
+  const color = effectiveColor(entity, inheritedByBlockColor, inheritedLayer, layers);
   const triangles: Triangle[] = [];
   for (const face of entity.faces) {
     const first = entity.positions[face[0]!];
@@ -35,16 +54,17 @@ function extractMesh(entity: DxfMeshEntity, inheritedByBlockColor?: ResolvedColo
       const second = entity.positions[face[i]!];
       const third = entity.positions[face[i + 1]!];
       if (second && third) {
-        triangles.push(mkTriangle(first, second, third, entity.layer, color.hex, color.rgb));
+        triangles.push(mkTriangle(first, second, third, layer, color.hex, color.rgb));
       }
     }
   }
   return triangles;
 }
 
-function extract3DFace(entity: Dxf3DFace, inheritedByBlockColor?: ResolvedColor): Triangle[] {
-  const { v0, v1, v2, v3, isTriangle, layer } = entity;
-  const color = effectiveColor(entity, inheritedByBlockColor);
+function extract3DFace(entity: Dxf3DFace, inheritedByBlockColor?: ResolvedColor, inheritedLayer?: string, layers?: Record<string, DxfLayer>): Triangle[] {
+  const { v0, v1, v2, v3, isTriangle } = entity;
+  const layer = effectiveLayer(entity.layer, inheritedLayer);
+  const color = effectiveColor(entity, inheritedByBlockColor, inheritedLayer, layers);
   const { hex: colorHex, rgb } = color;
   const tris: Triangle[] = [];
   tris.push(mkTriangle(v0, v1, v2, layer, colorHex, rgb));
@@ -55,9 +75,10 @@ function extract3DFace(entity: Dxf3DFace, inheritedByBlockColor?: ResolvedColor)
   return tris;
 }
 
-function extractPolyface(entity: DxfPolyfaceMesh, inheritedByBlockColor?: ResolvedColor): Triangle[] {
-  const { positions, faceRecords, layer } = entity;
-  const color = effectiveColor(entity, inheritedByBlockColor);
+function extractPolyface(entity: DxfPolyfaceMesh, inheritedByBlockColor?: ResolvedColor, inheritedLayer?: string, layers?: Record<string, DxfLayer>): Triangle[] {
+  const { positions, faceRecords } = entity;
+  const layer = effectiveLayer(entity.layer, inheritedLayer);
+  const color = effectiveColor(entity, inheritedByBlockColor, inheritedLayer, layers);
   const { hex: colorHex, rgb } = color;
   const tris: Triangle[] = [];
 
@@ -95,25 +116,35 @@ function extractPolyface(entity: DxfPolyfaceMesh, inheritedByBlockColor?: Resolv
 }
 
 // Extract triangles from a single supported entity.
-export function extractTrianglesFromEntity(entity: DxfSupportedEntity, inheritedByBlockColor?: ResolvedColor): Triangle[] {
+export function extractTrianglesFromEntity(
+  entity: DxfSupportedEntity,
+  inheritedByBlockColor?: ResolvedColor,
+  inheritedLayer?: string,
+  layers?: Record<string, DxfLayer>
+): Triangle[] {
   switch (entity.type) {
     case "3DFACE":
-      return extract3DFace(entity, inheritedByBlockColor);
+      return extract3DFace(entity, inheritedByBlockColor, inheritedLayer, layers);
     case "POLYFACE_MESH":
     case "POLYMESH":
-      return extractPolyface(entity as DxfPolyfaceMesh, inheritedByBlockColor);
+      return extractPolyface(entity as DxfPolyfaceMesh, inheritedByBlockColor, inheritedLayer, layers);
     case "MESH":
-      return extractMesh(entity, inheritedByBlockColor);
+      return extractMesh(entity, inheritedByBlockColor, inheritedLayer, layers);
     default:
       return [];
   }
 }
 
 // Extract all triangles from a list of entities.
-export function extractAllTriangles(entities: DxfSupportedEntity[], inheritedByBlockColor?: ResolvedColor): Triangle[] {
+export function extractAllTriangles(
+  entities: DxfSupportedEntity[],
+  inheritedByBlockColor?: ResolvedColor,
+  inheritedLayer?: string,
+  layers?: Record<string, DxfLayer>
+): Triangle[] {
   const result: Triangle[] = [];
   for (const entity of entities) {
-    result.push(...extractTrianglesFromEntity(entity, inheritedByBlockColor));
+    result.push(...extractTrianglesFromEntity(entity, inheritedByBlockColor, inheritedLayer, layers));
   }
   return result;
 }

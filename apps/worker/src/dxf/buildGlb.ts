@@ -14,6 +14,7 @@ import { optimizeMesh } from "./meshOptimize.js";
 import { hashBlockGeometry, insertRotationQuaternion } from "./blocks.js";
 import { resolveColor } from "./colors.js";
 import { analyzeBlockTraversal, DEFAULT_BLOCK_NESTING_LIMIT } from "./blockTraversal.js";
+import { expandInsertInstances } from "./insertInstances.js";
 
 export type BuildGlbResult = {
   glbBytes: Uint8Array;
@@ -91,12 +92,13 @@ export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = 
     geometryDuplicationAvoidedTriangles: 0,
   };
 
-  function directBlockMesh(blockName: string, insertColor: ResolvedColor): { mesh: Mesh; triangleCount: number } | null {
+  function directBlockMesh(blockName: string, insertColor: ResolvedColor, inheritedLayer: string): { mesh: Mesh; triangleCount: number } | null {
     const block = parsedDxf.blocks[blockName];
     if (!block || block.supported.length === 0) return null;
     const hasByBlock = block.supported.some((entity) => entity.color.source === "byblock");
+    const hasLayer0 = block.supported.some((entity) => entity.layer === "0");
     const geometryHash = hashBlockGeometry(block, parsedDxf.layers);
-    const cacheKey = `${geometryHash}|origin:${block.origin.join(",")}${hasByBlock ? `|byblock:${insertColor.hex}` : ""}`;
+    const cacheKey = `${geometryHash}|origin:${block.origin.join(",")}${hasByBlock ? `|byblock:${insertColor.hex}` : ""}${hasLayer0 ? `|layer0:${inheritedLayer}` : ""}`;
     const cached = directMeshCache.get(cacheKey);
     if (cached) {
       blockReuse.reusedBlockMeshCount++;
@@ -104,7 +106,10 @@ export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = 
       return cached;
     }
 
-    const triangles = offsetTriangles(extractAllTriangles(block.supported, insertColor), block.origin);
+    const triangles = offsetTriangles(
+      extractAllTriangles(block.supported, insertColor, inheritedLayer, parsedDxf.layers),
+      block.origin
+    );
     if (triangles.length === 0) return null;
     const { groups } = optimizeMesh(triangles);
     const mesh = buildMeshFromGroups(`Block:${blockName}${hasByBlock ? `:${insertColor.hex}` : ""}`, groups);
@@ -124,26 +129,32 @@ export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = 
     depth: number,
     stack: string[],
     inheritedColor: ResolvedColor | undefined,
+    inheritedLayer: string | undefined,
     parentBlockOrigin: [number, number, number],
-    indexPath: number[]
+    indexPath: number[],
+    instancePosition: [number, number, number],
+    rowIndex: number,
+    columnIndex: number
   ): void {
     if (depth > maxDepth || stack.includes(insert.blockName)) return;
     const block = parsedDxf.blocks[insert.blockName];
     if (!block) return;
 
+    const effectiveInsertLayer = insert.layer === "0" && inheritedLayer ? inheritedLayer : insert.layer;
     const insertColor = resolveColor(
       insert.colorIndex,
       insert.trueColor,
-      insert.layer,
+      effectiveInsertLayer,
       parsedDxf.layers,
       inheritedColor
     );
     const handle = insert.handle ?? `INSERT_${indexPath.join("_")}`;
-    const stableObjectId = depth === 1 ? handle : `${handle}@${indexPath.join(".")}`;
+    const arraySuffix = insert.type === "MINSERT" ? `@r${rowIndex}c${columnIndex}` : "";
+    const stableObjectId = depth === 1 ? `${handle}${arraySuffix}` : `${handle}${arraySuffix}@${indexPath.join(".")}`;
     const translation: [number, number, number] = [
-      insert.position[0] - parentBlockOrigin[0],
-      insert.position[1] - parentBlockOrigin[1],
-      insert.position[2] - parentBlockOrigin[2],
+      instancePosition[0] - parentBlockOrigin[0],
+      instancePosition[1] - parentBlockOrigin[1],
+      instancePosition[2] - parentBlockOrigin[2],
     ];
     const node = doc
       .createNode(`${insert.blockName}_${indexPath.join("_")}`)
@@ -154,9 +165,13 @@ export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = 
         stableObjectId,
         displayName: insert.blockName,
         sourceFormat: "dxf",
-        entityType: "INSERT",
+        entityType: insert.type,
+        sourceEntityType: insert.type,
         entityHandle: handle,
-        layer: insert.layer,
+        originalHandle: insert.handle,
+        layer: effectiveInsertLayer,
+        sourceLayer: insert.layer,
+        layer0Inherited: insert.layer === "0" && effectiveInsertLayer !== "0",
         blockName: insert.blockName,
         insertName: insert.blockName,
         blockPath: [...stack, insert.blockName],
@@ -165,11 +180,15 @@ export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = 
         extrusion: insert.extrusion,
         ocsApplied: insert.ocsApplied,
         byBlockColor: insertColor.hex,
+        rowIndex,
+        columnIndex,
+        rowCount: insert.rowCount,
+        columnCount: insert.columnCount,
       });
     parent.addChild(node);
     nodeCount++;
 
-    const direct = directBlockMesh(insert.blockName, insertColor);
+    const direct = directBlockMesh(insert.blockName, insertColor, effectiveInsertLayer);
     if (direct) {
       node.setMesh(direct.mesh);
       totalTriangleCount += direct.triangleCount;
@@ -177,12 +196,42 @@ export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = 
 
     const nextStack = [...stack, insert.blockName];
     block.inserts.forEach((nestedInsert, nestedIndex) => {
-      addInsertNode(node, nestedInsert, depth + 1, nextStack, insertColor, block.origin, [...indexPath, nestedIndex]);
+      addInsertSource(node, nestedInsert, depth + 1, nextStack, insertColor, effectiveInsertLayer, block.origin, [...indexPath, nestedIndex]);
     });
   }
 
+  function addInsertSource(
+    parent: Node,
+    insert: DxfInsert,
+    depth: number,
+    stack: string[],
+    inheritedColor: ResolvedColor | undefined,
+    inheritedLayer: string | undefined,
+    parentBlockOrigin: [number, number, number],
+    indexPath: number[]
+  ): void {
+    for (const instance of expandInsertInstances(insert)) {
+      const instancePath = insert.type === "MINSERT"
+        ? [...indexPath, instance.rowIndex, instance.columnIndex]
+        : indexPath;
+      addInsertNode(
+        parent,
+        insert,
+        depth,
+        stack,
+        inheritedColor,
+        inheritedLayer,
+        parentBlockOrigin,
+        instancePath,
+        instance.position,
+        instance.rowIndex,
+        instance.columnIndex
+      );
+    }
+  }
+
   parsedDxf.entities.inserts.forEach((insert, index) => {
-    addInsertNode(root, insert, 1, [], undefined, [0, 0, 0], [index]);
+    addInsertSource(root, insert, 1, [], undefined, undefined, [0, 0, 0], [index]);
   });
 
   const entityTriangles = extractAllTriangles(parsedDxf.entities.supported);

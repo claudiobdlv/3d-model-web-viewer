@@ -937,3 +937,72 @@ The full worker suite passes 75 tests, including existing STEP chunking, MeshIQ 
 - DXF upload, server job selection, UI guidance, and production rollout remain intentionally unwired.
 
 > Recommended Phase 2D prompt: Build a sanitized real-export compatibility corpus for Revit and AutoCAD DXF, add MINSERT row/column expansion and explicit block layer-0 inheritance tests, harden malformed MESH diagnostics and large-file limits, and benchmark recursive block/material cardinality. Keep DXF uploads hidden and do not deploy until the corpus and rollout plan are reviewed.
+
+---
+
+## Phase 2D — Real-Export Compatibility Hardening (DONE)
+
+**Branch:** `feature/formatiq-dxf-worker-backend`
+**Starting commit:** `6e8e18887c9d250f9d5bdda32104b12483300cf5`
+**Date:** 2026-06-28
+
+### Fixture and private-sample policy
+
+- `docs/formatiq-dxf-fixture-policy.md` defines the commit boundary: tiny hand-authored fixtures, synthetic geometry, and properly licensed public samples are allowed; coworker/customer exports, production models, and confidential geometry are forbidden.
+- Private samples belong in ignored `.tmp/formatiq-private-samples/`; results belong in `.tmp/formatiq-compatibility-results/`.
+- `npm run dxf:compat` processes every private `.dxf` locally and produces a console/JSON compatibility table without contacting the database, upload API, or production storage.
+
+### MINSERT
+
+- INSERT group codes `70`/`71` and `44`/`45` are parsed as column/row counts and spacing. An INSERT with more than one row or column is represented as source type `MINSERT`.
+- Arrays expand to lightweight GLB nodes. Block definitions and heavy Mesh objects remain shared through the existing geometry cache.
+- Array offsets follow rotated local row/column axes and are transformed through OCS when a non-default extrusion is present. INSERT scale remains on the shared block geometry transform.
+- Node extras preserve `sourceEntityType`, block name, original handle, display name, row/column index and counts, effective/source layer, and stable per-cell identity.
+
+### Layer 0 inheritance
+
+- Block geometry on layer `0` inherits the effective layer of its INSERT. The rule composes through nested layer-0 INSERTs.
+- Geometry on a nonzero block layer remains on that layer.
+- Colour is resolved at render time using the effective layer: true colour and explicit ACI remain authoritative, BYBLOCK uses INSERT colour context, and BYLAYER on layer `0` uses the inherited INSERT layer.
+- Mesh cache keys include the inherited layer only when a block contains layer-0 geometry, preserving reuse without cross-layer material leakage.
+
+### MESH diagnostics
+
+- Valid level-0 MESH fan triangulation remains unchanged.
+- Structured diagnostic codes cover missing vertices, declared-count mismatches, missing/malformed face lists, out-of-range indices, unsupported subdivision, and unsupported crease data.
+- A malformed MESH is skipped without crashing. Supported sibling geometry still converts with `partial-with-warnings`; malformed-MESH-only input reports `no-usable-3d-geometry` before the converter returns an error.
+- Subdivision/crease files may import the valid level-0 control cage, but reports explicitly state that subdivision and crease evaluation were not performed.
+
+### Reports and logs
+
+- `format-report.json` adds raw MINSERT count, expanded MINSERT instance count, inherited layer-0 occurrence count/summary, malformed MESH warning count, and structured MESH diagnostics.
+- `dxf-optimization-report.json` adds expanded MINSERT instances, traversal timing, material-cardinality warning above 256 materials, and retains reuse/avoided-duplication measurements.
+- `conversion.log` includes concise MINSERT expansion, layer-0 inheritance, and individual malformed-MESH diagnostic lines. Benchmark mode appends a synthetic benchmark summary to its ignored local report/log copy.
+
+### Synthetic benchmark tooling
+
+`npm run dxf:benchmark` manually generates and converts five safe cases under `.tmp/formatiq-benchmarks/`: repeated INSERTs, six-level nested blocks, an MINSERT grid, many layers/materials, and a curved level-0 MESH. `-- --quick` runs reduced cases for tooling verification. The summary records parse, traversal, mesh optimization, GLB build, meshopt, total time, sampled heap/RSS change, triangles, materials, and output size. Benchmark output is never part of the normal test suite or Git.
+
+Rough development-machine guardrails (not production SLAs):
+
+- quick suite completes in under 30 seconds;
+- default suite completes in under 2 minutes without an out-of-memory failure;
+- the 6,400-cell default MINSERT case retains one shared direct block mesh where colour/layer context permits;
+- parse plus traversal should not dominate total time for repeated-instance cases;
+- more than 256 generated materials produces an explicit cardinality warning for corpus review.
+
+### Fixtures and tests
+
+- `test-minsert-layer0.dxf` covers a 2×3 transformed MINSERT, nested layer-0 inheritance, BYLAYER colour through `PIPES`, nonzero `FIXED` layer preservation, per-cell metadata, and mesh reuse.
+- Missing-vertex, malformed-face-list, out-of-range-index, and subdivision/crease MESH fixtures cover actionable recovery and hard-error behavior.
+- Existing Phase 2A/2B/2C tests remain in the full worker suite, along with existing STEP/GLB paths.
+
+### Rollout state and remaining risks
+
+- DXF upload, server job selection, and admin/public accepted extensions remain intentionally unwired.
+- DWG and ACIS conversion remain out of scope; ACIS is still detected and rejected/reported only.
+- No private Revit/AutoCAD corpus was committed. Real exporter/version coverage still depends on running the local harness against authorized private samples and reproducing findings synthetically.
+- Advanced MESH subdivision, crease, edge, per-subentity property overrides, binary DXF, XREF resolution, and hostile-input resource limits remain unsupported.
+- Sampled memory deltas are coarse process observations, not a true peak-memory profiler. Very large (hundreds of MB) private exports still require controlled local benchmarking before rollout.
+
+> Recommended Phase 2E prompt: Run the local compatibility harness against an authorized set of real Revit and AutoCAD ASCII DXF exports, record only anonymized aggregate results, reproduce any failures as minimal synthetic fixtures, add parser resource ceilings/fuzz cases, and produce a reviewed upload/rollback plan behind a disabled feature flag. Keep DXF uploads hidden and do not deploy until the corpus, limits, and migration-free rollout plan are explicitly approved.

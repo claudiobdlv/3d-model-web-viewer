@@ -189,6 +189,88 @@ test("parseDxf: R2010+ MESH face list triangulates a quad", () => {
   assert.equal(extractAllTriangles([mesh]).length, 2);
 });
 
+test("parseDxf: MINSERT captures grid dimensions and spacing", () => {
+  const parsed = parseDxf(fix("test-minsert-layer0.dxf"));
+  const insert = parsed.entities.inserts[0]!;
+  assert.equal(insert.type, "MINSERT");
+  assert.equal(insert.rowCount, 3);
+  assert.equal(insert.columnCount, 2);
+  assert.equal(insert.rowSpacing, 20);
+  assert.equal(insert.columnSpacing, 10);
+  assert.equal(insert.rotation, 90);
+  assert.deepEqual(insert.scale, [2, 1, 1]);
+});
+
+test("MINSERT expands lightweight nodes while reusing nested block mesh", async () => {
+  const parsed = parseDxf(fix("test-minsert-layer0.dxf"));
+  const traversal = analyzeBlockTraversal(parsed);
+  assert.equal(traversal.mInsertCount, 1);
+  assert.equal(traversal.expandedMInsertInstanceCount, 6);
+  assert.equal(traversal.renderedInsertCount, 12);
+  assert.equal(traversal.nestedInsertCount, 6);
+
+  const result = await buildGlb(parsed, { traversal });
+  assert.equal(result.nodeCount, 12);
+  assert.equal(result.triangleCount, 12);
+  assert.equal(result.blockReuse.uniqueRenderedMeshes, 1);
+  assert.equal(result.blockReuse.reusedBlockMeshCount, 5);
+  assert.equal(result.blockReuse.geometryDuplicationAvoidedTriangles, 10);
+  assert.deepEqual(new Set(result.materials.map((material) => material.layer)), new Set(["PIPES", "FIXED"]));
+  assert.ok(result.materials.some((material) => material.layer === "PIPES" && material.colorHex === "#ff0000"));
+  assert.ok(result.materials.some((material) => material.layer === "FIXED" && material.colorHex === "#00ff00"));
+
+  const document = await new NodeIO().readBinary(result.glbBytes);
+  const arrayNodes = document.getRoot().listNodes().filter((node) => node.getExtras().sourceEntityType === "MINSERT");
+  assert.equal(arrayNodes.length, 6);
+  assert.deepEqual(
+    new Set(arrayNodes.map((node) => `${node.getExtras().rowIndex},${node.getExtras().columnIndex}`)),
+    new Set(["0,0", "0,1", "1,0", "1,1", "2,0", "2,1"])
+  );
+  assert.ok(arrayNodes.every((node) => node.getExtras().originalHandle === "ARRAY1"));
+  assert.ok(arrayNodes.every((node) => node.getExtras().displayName === "OUTER"));
+  assert.deepEqual(
+    new Set(arrayNodes.map((node) => node.getTranslation().map((value) => Math.round(value)).join(","))),
+    new Set(["0,0,0", "0,10,0", "-20,0,0", "-20,10,0", "-40,0,0", "-40,10,0"])
+  );
+  const nestedNodes = document.getRoot().listNodes().filter((node) => node.getExtras().blockName === "LEAF");
+  assert.equal(nestedNodes.length, 6);
+  assert.ok(nestedNodes.every((node) => node.getExtras().layer === "PIPES"));
+  assert.ok(nestedNodes.every((node) => node.getExtras().layer0Inherited === true));
+});
+
+test("layer-0 inheritance keeps explicit ACI and true colour authoritative", () => {
+  const parsed = parseDxf(fix("test-minsert-layer0.dxf"));
+  const layer0Face = parsed.blocks.LEAF!.supported.find((entity) => entity.layer === "0")!;
+  const byLayer = extractAllTriangles([layer0Face], undefined, "PIPES", parsed.layers);
+  assert.equal(byLayer[0]?.layer, "PIPES");
+  assert.equal(byLayer[0]?.colorHex, "#ff0000");
+  const explicitAci = extractAllTriangles([{ ...layer0Face, colorIndex: 5, trueColor: null }], undefined, "PIPES", parsed.layers);
+  assert.equal(explicitAci[0]?.colorHex, "#0000ff");
+  const trueColor = extractAllTriangles([{ ...layer0Face, colorIndex: 5, trueColor: 0x00ffff }], undefined, "PIPES", parsed.layers);
+  assert.equal(trueColor[0]?.colorHex, "#00ffff");
+});
+
+test("malformed MESH parser diagnostics distinguish missing, malformed, and out-of-range data", () => {
+  for (const [fixture, expectedCode] of [
+    ["test-mesh-missing-vertices.dxf", "missing-vertex-list"],
+    ["test-mesh-malformed-face-list.dxf", "malformed-face-list"],
+    ["test-mesh-out-of-range-with-face.dxf", "face-index-out-of-range"],
+  ] as const) {
+    const mesh = parseDxf(fix(fixture)).entities.supported.find((entity) => entity.type === "MESH");
+    assert.ok(mesh && mesh.type === "MESH");
+    assert.ok(mesh.diagnostics.some((diagnostic) => diagnostic.code === expectedCode));
+    assert.equal(mesh.triangleCount, 0);
+  }
+});
+
+test("subdivision and crease MESH data imports the level-0 cage with explicit warnings", () => {
+  const mesh = parseDxf(fix("test-mesh-subdivision-crease.dxf")).entities.supported[0];
+  assert.ok(mesh && mesh.type === "MESH");
+  assert.equal(mesh.triangleCount, 1);
+  assert.ok(mesh.diagnostics.some((diagnostic) => diagnostic.code === "unsupported-subdivision-data"));
+  assert.ok(mesh.diagnostics.some((diagnostic) => diagnostic.code === "unsupported-crease-data"));
+});
+
 test("nested BLOCK traversal composes hierarchy, colours, transforms, and mesh reuse", async () => {
   const parsed = parseDxf(fix("test-nested-blocks.dxf"));
   const traversal = analyzeBlockTraversal(parsed);
@@ -476,6 +558,85 @@ test("convertDxfToGlb: valid R2010+ MESH fixture is triangulated and reported", 
     const optimization = JSON.parse(await fs.promises.readFile(out.dxfOptimizationReportPath, "utf8"));
     assert.equal(optimization.geometry.rawTriangleCount, 2);
     assert.match(await fs.promises.readFile(out.conversionLogPath, "utf8"), /MESH handling: triangulated/);
+  });
+});
+
+test("convertDxfToGlb: MINSERT and nested layer-0 inheritance are visible in reports and logs", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({
+      sourcePath: fix("test-minsert-layer0.dxf"),
+      outputDir: dir,
+      slug: "test-minsert",
+      glbOptimizationMode: "disabled",
+    });
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+    assert.equal(report.conversionStatus, "ok");
+    assert.equal(report.entityCounts.MINSERT, 1);
+    assert.equal(report.mInsertCount, 1);
+    assert.equal(report.expandedMInsertInstanceCount, 6);
+    assert.equal(report.layer0InheritedEntityCount, 6);
+    assert.deepEqual(report.inheritedLayerSummary, { PIPES: 6 });
+    const optimization = JSON.parse(await fs.promises.readFile(out.dxfOptimizationReportPath, "utf8"));
+    assert.equal(optimization.blocks.totalInstanceCount, 12);
+    assert.equal(optimization.blocks.expandedMInsertInstanceCount, 6);
+    assert.equal(optimization.blocks.reusedBlockMeshCount, 5);
+    assert.equal(typeof optimization.timing.traversalMs, "number");
+    const log = await fs.promises.readFile(out.conversionLogPath, "utf8");
+    assert.match(log, /MINSERT expansion: 1 source entity\/entities -> 6 instance/);
+    assert.match(log, /Layer 0 inheritance: 6 rendered entity occurrence/);
+  });
+});
+
+test("convertDxfToGlb: malformed MESH warns while preserving supported geometry", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({
+      sourcePath: fix("test-mesh-out-of-range-with-face.dxf"),
+      outputDir: dir,
+      slug: "test-mesh-partial",
+      glbOptimizationMode: "disabled",
+    });
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+    assert.equal(report.conversionStatus, "partial-with-warnings");
+    assert.equal(report.mesh.triangulationStatus, "detected-invalid");
+    assert.equal(report.malformedMeshWarningCount, 1);
+    assert.equal(report.mesh.diagnostics[0].code, "face-index-out-of-range");
+    assert.match(report.mesh.diagnostics[0].message, /outside 0\.\.2/);
+    assert.match(await fs.promises.readFile(out.conversionLogPath, "utf8"), /face-index-out-of-range/);
+    assert.ok((await fs.promises.stat(out.displayGlbPath)).size > 0);
+  });
+});
+
+test("convertDxfToGlb: malformed MESH-only files return no-usable-3d-geometry", async () => {
+  await withTmpDir(async (dir) => {
+    for (const [fixture, slug, diagnosticCode] of [
+      ["test-mesh-missing-vertices.dxf", "missing-vertices", "missing-vertex-list"],
+      ["test-mesh-malformed-face-list.dxf", "malformed-faces", "malformed-face-list"],
+    ] as const) {
+      await assert.rejects(
+        () => convertDxfToGlb({ sourcePath: fix(fixture), outputDir: dir, slug, glbOptimizationMode: "disabled" }),
+        /No usable 3D geometry/i
+      );
+      const report = JSON.parse(await fs.promises.readFile(path.join(dir, slug, "format-report.json"), "utf8"));
+      assert.equal(report.conversionStatus, "no-usable-3d-geometry");
+      assert.ok(report.mesh.diagnostics.some((diagnostic: { code: string }) => diagnostic.code === diagnosticCode));
+      assert.match(report.warnings.join(" "), new RegExp(diagnosticCode));
+    }
+  });
+});
+
+test("convertDxfToGlb: unsupported MESH subdivision/crease data is explicit and non-fatal", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({
+      sourcePath: fix("test-mesh-subdivision-crease.dxf"),
+      outputDir: dir,
+      slug: "test-subdivision",
+      glbOptimizationMode: "disabled",
+    });
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+    assert.equal(report.conversionStatus, "partial-with-warnings");
+    assert.equal(report.mesh.triangleCount, 1);
+    assert.equal(report.malformedMeshWarningCount, 2);
+    assert.match(report.warnings.join(" "), /level-0 control cage/);
   });
 });
 

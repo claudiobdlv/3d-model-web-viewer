@@ -1,6 +1,6 @@
 // FormatIQ DXF — production-quality ASCII DXF parser (TypeScript)
-// Supports: 3DFACE, POLYFACE_MESH, POLYMESH, MESH (detect-only),
-//           INSERT, BLOCK/ENDBLK, LAYER table
+// Supports: 3DFACE, POLYFACE_MESH, POLYMESH, level-0 MESH,
+//           INSERT/MINSERT, BLOCK/ENDBLK, LAYER table
 // Detects and rejects: 3DSOLID, BODY, REGION (ACIS)
 import fs from "node:fs";
 import type {
@@ -276,6 +276,7 @@ function parseMeshEntity(
     positions: [],
     faces: [],
     invalidFaceCount: 0,
+    diagnostics: [],
     triangleCount: 0,
     note: "MESH (R2010+) level-0 face list parsed.",
   };
@@ -318,39 +319,86 @@ function parseMeshEntity(
     if (current) mesh.positions.push(current);
   }
 
+  if (vertexCountIndex < 0 || mesh.vertexCount <= 0 || mesh.positions.length === 0) {
+    mesh.diagnostics.push({
+      code: "missing-vertex-list",
+      message: "MESH is missing a usable vertex list (group 92 followed by 10/20/30 coordinates).",
+    });
+  } else if (mesh.vertexCount !== mesh.positions.length) {
+    mesh.diagnostics.push({
+      code: "vertex-count-mismatch",
+      message: `MESH declares ${mesh.vertexCount} vertices but ${mesh.positions.length} complete vertices were parsed.`,
+    });
+  }
+
   const faceItems: number[] = [];
   if (faceListCountIndex >= 0) {
     for (let j = faceListCountIndex + 1; j < entityTokens.length && faceItems.length < mesh.faceListCount; j++) {
       const token = entityTokens[j]!;
+      if (token.code === 94 || token.code === 95 || token.code === 140) break;
       if (token.code === 90) faceItems.push(parseInt(token.value, 10));
     }
+  }
+
+  if (faceListCountIndex < 0 || mesh.faceListCount <= 0 || faceItems.length === 0) {
+    mesh.diagnostics.push({
+      code: "missing-face-list",
+      message: "MESH is missing a usable face list (group 93 followed by group 90 face items).",
+    });
+  } else if (faceItems.length !== mesh.faceListCount) {
+    mesh.diagnostics.push({
+      code: "face-list-count-mismatch",
+      message: `MESH declares ${mesh.faceListCount} face-list items but ${faceItems.length} were parsed.`,
+    });
   }
 
   for (let cursor = 0; cursor < faceItems.length;) {
     const count = faceItems[cursor++] ?? 0;
     if (count < 3 || cursor + count > faceItems.length) {
       mesh.invalidFaceCount++;
+      mesh.diagnostics.push({
+        code: "malformed-face-list",
+        message: count < 3
+          ? `MESH face at item ${cursor - 1} declares ${count} vertices; at least 3 are required.`
+          : `MESH face at item ${cursor - 1} declares ${count} vertices but the face list ends early.`,
+      });
       break;
     }
     const face = faceItems.slice(cursor, cursor + count);
     cursor += count;
     if (face.some((index) => index < 0 || index >= mesh.positions.length)) {
       mesh.invalidFaceCount++;
+      mesh.diagnostics.push({
+        code: "face-index-out-of-range",
+        message: `MESH face references vertex index outside 0..${Math.max(0, mesh.positions.length - 1)}: [${face.join(", ")}].`,
+      });
       continue;
     }
     mesh.faces.push(face);
     mesh.triangleCount += face.length - 2;
   }
 
-  if (mesh.vertexCount !== mesh.positions.length || faceItems.length !== mesh.faceListCount) {
-    mesh.invalidFaceCount++;
+  if (mesh.subdivisionLevel > 0) {
+    mesh.diagnostics.push({
+      code: "unsupported-subdivision-data",
+      message: `MESH subdivision level ${mesh.subdivisionLevel} is not evaluated; only the level-0 control cage is imported.`,
+    });
+  }
+  const hasCreaseData = entityTokens.some((token) =>
+    token.code === 140 || ((token.code === 94 || token.code === 95) && (parseInt(token.value, 10) || 0) > 0)
+  );
+  if (mesh.blendCrease || hasCreaseData) {
+    mesh.diagnostics.push({
+      code: "unsupported-crease-data",
+      message: "MESH crease/edge data is present but is not evaluated; level-0 faces are imported without crease processing.",
+    });
   }
   if (mesh.hasExplicitExtrusion && !isDefaultExtrusion(mesh.extrusion)) {
     mesh.positions = mesh.positions.map((position) => ocsToWcs(position, mesh.extrusion));
     mesh.ocsApplied = true;
   }
-  if (mesh.invalidFaceCount > 0) {
-    mesh.note = `MESH face list contains ${mesh.invalidFaceCount} invalid or incomplete item(s).`;
+  if (mesh.diagnostics.length > 0) {
+    mesh.note = `MESH parsed with ${mesh.diagnostics.length} diagnostic warning(s).`;
   }
   mesh.color = resolveColor(mesh.colorIndex, mesh.trueColor, mesh.layer, layers);
   return { entity: mesh, nextIndex: i };
@@ -373,6 +421,10 @@ function parseInsert(
     position: [0, 0, 0],
     scale: [1, 1, 1],
     rotation: 0,
+    rowCount: 1,
+    columnCount: 1,
+    rowSpacing: 0,
+    columnSpacing: 0,
   };
   while (i < tokens.length && tokens[i]!.code !== 0) {
     const { code, value } = tokens[i]!;
@@ -392,6 +444,10 @@ function parseInsert(
       case 42: ins.scale[1] = parseFloat(value); break;
       case 43: ins.scale[2] = parseFloat(value); break;
       case 50: ins.rotation = parseFloat(value); break;
+      case 70: ins.columnCount = Math.max(1, parseInt(value, 10) || 1); break;
+      case 71: ins.rowCount = Math.max(1, parseInt(value, 10) || 1); break;
+      case 44: ins.columnSpacing = parseFloat(value) || 0; break;
+      case 45: ins.rowSpacing = parseFloat(value) || 0; break;
     }
     i++;
   }
@@ -399,6 +455,7 @@ function parseInsert(
     ins.position = ocsToWcs(ins.position, ins.extrusion);
     ins.ocsApplied = true;
   }
+  if (ins.rowCount > 1 || ins.columnCount > 1) ins.type = "MINSERT";
   // Skip optional ATTRIB sub-entities and SEQEND
   while (
     i < tokens.length &&

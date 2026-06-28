@@ -1,4 +1,5 @@
 import type { DxfBlockTraversalSummary, DxfInsert, ParsedDxf } from "./types.js";
+import { expandInsertInstances } from "./insertInstances.js";
 
 export const DEFAULT_BLOCK_NESTING_LIMIT = 10;
 
@@ -15,9 +16,11 @@ export function analyzeBlockTraversal(
     cycleWarnings: [],
     depthLimitWarnings: [],
     missingBlockWarnings: [],
+    mInsertCount: 0,
+    expandedMInsertInstanceCount: 0,
   };
 
-  function visit(insert: DxfInsert, depth: number, stack: string[]): void {
+  function visitInstance(insert: DxfInsert, depth: number, stack: string[]): void {
     const path = [...stack, insert.blockName];
     if (stack.includes(insert.blockName)) {
       summary.cycleWarnings.push(`Circular block reference skipped: ${path.join(" -> ")}.`);
@@ -41,13 +44,24 @@ export function analyzeBlockTraversal(
     summary.reachableTriangleCount += block.triangleCount;
 
     for (const nestedInsert of block.inserts) {
-      summary.nestedInsertCount++;
-      visit(nestedInsert, depth + 1, path);
+      visitSource(nestedInsert, depth + 1, path, true);
+    }
+  }
+
+  function visitSource(insert: DxfInsert, depth: number, stack: string[], nested: boolean): void {
+    const instances = expandInsertInstances(insert);
+    if (insert.type === "MINSERT") {
+      summary.mInsertCount++;
+      summary.expandedMInsertInstanceCount += instances.length;
+    }
+    for (const instance of instances) {
+      if (nested) summary.nestedInsertCount++;
+      visitInstance(instance.insert, depth, stack);
     }
   }
 
   for (const insert of parsedDxf.entities.inserts) {
-    visit(insert, 1, []);
+    visitSource(insert, 1, [], false);
   }
 
   return summary;

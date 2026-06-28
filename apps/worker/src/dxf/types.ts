@@ -68,12 +68,26 @@ export type DxfMeshEntity = DxfOcsMetadata & {
   positions: [number, number, number][];
   faces: number[][];
   invalidFaceCount: number;
+  diagnostics: DxfMeshDiagnostic[];
   triangleCount: number;
   note: string;
 };
 
+export type DxfMeshDiagnostic = {
+  code:
+    | "missing-vertex-list"
+    | "vertex-count-mismatch"
+    | "missing-face-list"
+    | "face-list-count-mismatch"
+    | "malformed-face-list"
+    | "face-index-out-of-range"
+    | "unsupported-subdivision-data"
+    | "unsupported-crease-data";
+  message: string;
+};
+
 export type DxfInsert = DxfOcsMetadata & {
-  type: "INSERT";
+  type: "INSERT" | "MINSERT";
   handle: string | null;
   layer: string;
   blockName: string;
@@ -82,6 +96,17 @@ export type DxfInsert = DxfOcsMetadata & {
   position: [number, number, number];
   scale: [number, number, number];
   rotation: number;  // degrees around Z
+  rowCount: number;
+  columnCount: number;
+  rowSpacing: number;
+  columnSpacing: number;
+};
+
+export type DxfInsertInstance = {
+  insert: DxfInsert;
+  position: [number, number, number];
+  rowIndex: number;
+  columnIndex: number;
 };
 
 export type DxfAcisEntity = {
@@ -126,6 +151,8 @@ export type DxfBlockTraversalSummary = {
   cycleWarnings: string[];
   depthLimitWarnings: string[];
   missingBlockWarnings: string[];
+  mInsertCount: number;
+  expandedMInsertInstanceCount: number;
 };
 
 export type DxfBlockReuseStats = {
@@ -185,6 +212,7 @@ export type DxfFormatReport = {
     POLYMESH: number;
     MESH: number;
     INSERT: number;
+    MINSERT: number;
     "3DSOLID": number;
     BODY: number;
     REGION: number;
@@ -196,6 +224,8 @@ export type DxfFormatReport = {
   blockCount: number;
   blocks: { name: string; entityCount: number; acisCount: number; triangleCount: number }[];
   insertCount: number;
+  mInsertCount: number;
+  expandedMInsertInstanceCount: number;
   insertsByBlock: Record<string, number>;
   nestedInsertCount: number;
   maxBlockNestingDepth: number;
@@ -207,7 +237,12 @@ export type DxfFormatReport = {
     triangulatedEntityCount: number;
     triangleCount: number;
     invalidFaceCount: number;
+    malformedWarningCount: number;
+    diagnostics: { code: DxfMeshDiagnostic["code"]; message: string; handle: string | null }[];
   };
+  malformedMeshWarningCount: number;
+  layer0InheritedEntityCount: number;
+  inheritedLayerSummary: Record<string, number>;
   ocs: {
     explicitExtrusionEntityCount: number;
     transformedEntityCount: number;
@@ -240,10 +275,12 @@ export type DxfOptimizationReport = {
     uniqueRenderedMeshes: number;
     reusedBlockMeshCount: number;
     geometryDuplicationAvoidedTriangles: number;
+    expandedMInsertInstanceCount: number;
   };
   materials: {
     uniqueMaterials: number;
     materialsByLayer: Record<string, string[]>;
+    cardinalityWarning: string | null;
   };
   normals: {
     strategy: "flat";
@@ -263,6 +300,7 @@ export type DxfOptimizationReport = {
   };
   timing: {
     parseMs: number;
+    traversalMs: number;
     meshOptimizationMs: number;
     glbBuildMs: number;
     meshoptMs: number;
