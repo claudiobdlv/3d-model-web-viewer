@@ -212,7 +212,12 @@ function parsePolylineAsMesh(
         }
         i++;
       }
-      if (v.flags & 128) {
+      // Polyface coordinate vertices may carry both the polyface-mesh (64)
+      // and polyface-vertex (128) bits. A face record carries 128 without 64.
+      // Check bit 64 first so combined flag 192 remains a position vertex.
+      if (meshType === "POLYFACE_MESH" && (v.flags & 64)) {
+        positions.push([v.x, v.y, v.z]);
+      } else if (meshType === "POLYFACE_MESH" && (v.flags & 128)) {
         faceRecords.push({ flags: v.flags, i71: v.i71, i72: v.i72, i73: v.i73, i74: v.i74 });
       } else {
         positions.push([v.x, v.y, v.z]);

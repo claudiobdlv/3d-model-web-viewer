@@ -26,6 +26,7 @@ import {
   resolveDisplayGlbPath
 } from "../storage.js";
 import { workerJobPayload } from "../workerPayload.js";
+import { isDxfUploadEnabled } from "../featureFlags.js";
 
 const developmentWorkerToken = "dev-worker-token";
 const workerToken = process.env.WORKER_API_TOKEN || developmentWorkerToken;
@@ -70,7 +71,7 @@ workerRouter.use((req, res, next) => {
 });
 
 workerRouter.get("/jobs/next", (_req, res) => {
-  const job = claimNextWorkerJob();
+  const job = claimNextWorkerJob(isDxfUploadEnabled());
   if (!job) {
     res.json({ job: null });
     return;
@@ -83,7 +84,7 @@ workerRouter.get("/jobs/next", (_req, res) => {
 
 workerRouter.post("/jobs/:jobId/start", (req, res) => {
   const jobId = Number(req.params.jobId);
-  const job = getValidStepJob(jobId);
+  const job = getValidConversionJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Worker job not found." });
     return;
@@ -100,7 +101,7 @@ workerRouter.post("/jobs/:jobId/start", (req, res) => {
 
 workerRouter.get("/jobs/:jobId/source", (req, res) => {
   const jobId = Number(req.params.jobId);
-  const job = getValidStepJob(jobId);
+  const job = getValidConversionJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Worker job not found." });
     return;
@@ -122,13 +123,13 @@ workerRouter.get("/jobs/:jobId/source", (req, res) => {
 });
 
 workerRouter.get("/jobs/:jobId/state", (req, res) => {
-  const job = getValidStepJob(Number(req.params.jobId));
+  const job = getValidConversionJob(Number(req.params.jobId));
   if (!job) return void res.status(404).json({ error: "Worker job not found." });
   res.json({ status: job.status, cancellationRequested: Boolean(job.cancellation_requested_at) });
 });
 
 workerRouter.post("/jobs/:jobId/progress", (req, res) => {
-  const job = getValidStepJob(Number(req.params.jobId));
+  const job = getValidConversionJob(Number(req.params.jobId));
   const percent = Number(req.body?.percent);
   const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
   if (!job) return void res.status(404).json({ error: "Worker job not found." });
@@ -139,7 +140,7 @@ workerRouter.post("/jobs/:jobId/progress", (req, res) => {
 
 workerRouter.post("/jobs/:jobId/cancelled", async (req, res, next) => {
   try {
-    const job = getValidStepJob(Number(req.params.jobId));
+    const job = getValidConversionJob(Number(req.params.jobId));
     if (!job) return void res.status(404).json({ error: "Worker job not found." });
     const model = markJobCancelled(job.id);
     if (model?.pending_delete_at) {
@@ -166,12 +167,16 @@ workerRouter.post(
     { name: "xcafReport", maxCount: 1 },
     { name: "mesh-report.json", maxCount: 1 },
     { name: "meshReport", maxCount: 1 },
+    { name: "format-report.json", maxCount: 1 },
+    { name: "formatReport", maxCount: 1 },
+    { name: "dxf-optimization-report.json", maxCount: 1 },
+    { name: "dxfOptimizationReport", maxCount: 1 },
     { name: "conversion.log", maxCount: 1 },
     { name: "conversionLog", maxCount: 1 }
   ]),
   (req, res) => {
     const jobId = Number(req.params.jobId);
-    const job = getValidStepJob(jobId);
+    const job = getValidConversionJob(jobId);
     if (!job) {
       res.status(404).json({ error: "Worker job not found." });
       return;
@@ -224,6 +229,16 @@ workerRouter.post(
       fs.writeFileSync(path.join(modelDir, "mesh-report.json"), meshReport.buffer);
     }
 
+    const formatReport = firstFile(files, "format-report.json", "formatReport");
+    if (formatReport) {
+      fs.writeFileSync(path.join(modelDir, "format-report.json"), formatReport.buffer);
+    }
+
+    const dxfOptimizationReport = firstFile(files, "dxf-optimization-report.json", "dxfOptimizationReport");
+    if (dxfOptimizationReport) {
+      fs.writeFileSync(path.join(modelDir, "dxf-optimization-report.json"), dxfOptimizationReport.buffer);
+    }
+
     const conversionLog = firstFile(files, "conversion.log", "conversionLog");
     if (conversionLog) {
       const logDir = getJobLogDir(job.model_slug, job.revision_id);
@@ -231,7 +246,8 @@ workerRouter.post(
       fs.writeFileSync(path.join(logDir, "conversion.log"), conversionLog.buffer);
     }
 
-    if (!markJobReady(job.id, "Worker completed STEP/STP conversion.", displayGlb.size)) {
+    const completedFormat = job.source_ext === ".dxf" ? "DXF" : "STEP/STP";
+    if (!markJobReady(job.id, `Worker completed ${completedFormat} conversion.`, displayGlb.size)) {
       fs.rmSync(modelDir, { recursive: true, force: true });
       const logDir = getJobLogDir(job.model_slug, job.revision_id);
       fs.rmSync(logDir, { recursive: true, force: true });
@@ -244,7 +260,7 @@ workerRouter.post(
 
 workerRouter.post("/jobs/:jobId/fail", failureUpload.single("conversion.log"), (req, res) => {
   const jobId = Number(req.params.jobId);
-  const job = getValidStepJob(jobId);
+  const job = getValidConversionJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Worker job not found." });
     return;
@@ -284,13 +300,14 @@ function firstFile(
   return undefined;
 }
 
-function getValidStepJob(jobId: number) {
+function getValidConversionJob(jobId: number) {
   if (!Number.isInteger(jobId) || jobId < 1) {
     return undefined;
   }
 
   const job = getJobForWorker(jobId);
-  if (!job || !isSafeSlug(job.model_slug) || ![".step", ".stp"].includes(job.source_ext)) {
+  const allowedExtensions = isDxfUploadEnabled() ? [".step", ".stp", ".dxf"] : [".step", ".stp"];
+  if (!job || !isSafeSlug(job.model_slug) || !allowedExtensions.includes(job.source_ext)) {
     return undefined;
   }
 

@@ -7,9 +7,11 @@ import type { AddressInfo } from "node:net";
 
 test("chunked uploads flow (init, upload chunk, complete, cancel, and validation)", async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "modelbase-chunked-test-"));
+  const previousDxfFlag = process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
   process.env.NODE_ENV = "test";
   process.env.DATA_DIR = dataDir;
   process.env.ADMIN_PASSWORD = "test-password";
+  delete process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
 
   const [{ app }, { db }] = await Promise.all([
     import("./server.js"),
@@ -28,6 +30,8 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });
+    if (previousDxfFlag === undefined) delete process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
+    else process.env.FORMATIQ_DXF_UPLOAD_ENABLED = previousDxfFlag;
   });
 
   // Helper fetch function
@@ -44,6 +48,50 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
     body: JSON.stringify({ name: "Test Project" })
   });
   const project = projectRes.body as { id: number };
+
+  const configOff = await jsonRequest(`${origin}/api/config`, { headers });
+  assert.equal(configOff.body.features.dxfUploadEnabled, false);
+
+  const blockedDxf = new FormData();
+  blockedDxf.set("modelFile", new Blob(["synthetic-dxf"]), "blocked.dxf");
+  const blockedDxfResponse = await fetch(`${origin}/api/models`, { method: "POST", headers, body: blockedDxf });
+  assert.equal(blockedDxfResponse.status, 400);
+  assert.match(await blockedDxfResponse.text(), /DXF upload is disabled/);
+
+  process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "true";
+  const configOn = await jsonRequest(`${origin}/api/config`, { headers });
+  assert.equal(configOn.body.features.dxfUploadEnabled, true);
+  const enabledDxf = new FormData();
+  enabledDxf.set("modelFile", new Blob(["synthetic-dxf"]), "enabled.dxf");
+  const enabledDxfResponse = await jsonRequest(`${origin}/api/models`, { method: "POST", headers, body: enabledDxf });
+  assert.equal(enabledDxfResponse.response.status, 201);
+  const dxfJob = db.prepare("SELECT type, status FROM jobs WHERE model_id = ?").get(enabledDxfResponse.body.id) as { type: string; status: string };
+  assert.equal(dxfJob.type, "dxf-to-glb");
+  assert.equal(dxfJob.status, "uploaded");
+  process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "false";
+  const workerHeaders = { authorization: "Bearer dev-worker-token", accept: "application/json" };
+  const disabledClaim = await jsonRequest(`${origin}/api/worker/jobs/next`, { headers: workerHeaders });
+  assert.equal(disabledClaim.body.job, null);
+  process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "true";
+  const enabledClaim = await jsonRequest(`${origin}/api/worker/jobs/next`, { headers: workerHeaders });
+  assert.equal(enabledClaim.body.job.sourceExtension, ".dxf");
+  const dxfArtifacts = new FormData();
+  dxfArtifacts.set("display.glb", new Blob(["valid-enough-for-route-test"]), "display.glb");
+  dxfArtifacts.set("manifest.json", new Blob(["{}"]), "manifest.json");
+  dxfArtifacts.set("stats.json", new Blob(["{}"]), "stats.json");
+  dxfArtifacts.set("material-debug.json", new Blob(["{}"]), "material-debug.json");
+  dxfArtifacts.set("format-report.json", new Blob(["{}"]), "format-report.json");
+  dxfArtifacts.set("dxf-optimization-report.json", new Blob(["{}"]), "dxf-optimization-report.json");
+  dxfArtifacts.set("conversion.log", new Blob(["Converter backend: dxf-js"]), "conversion.log");
+  const completedDxf = await jsonRequest(`${origin}/api/worker/jobs/${enabledClaim.body.job.id}/complete`, {
+    method: "POST", headers: workerHeaders, body: dxfArtifacts
+  });
+  assert.equal(completedDxf.response.status, 200);
+  const dxfRevision = db.prepare("SELECT display_glb_path FROM model_revisions WHERE model_id = ?").get(enabledDxfResponse.body.id) as { display_glb_path: string };
+  const dxfArtifactDir = path.dirname(path.join(dataDir, dxfRevision.display_glb_path));
+  assert.equal(fs.existsSync(path.join(dxfArtifactDir, "format-report.json")), true);
+  assert.equal(fs.existsSync(path.join(dxfArtifactDir, "dxf-optimization-report.json")), true);
+  process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "false";
 
   // 1. Test init validation - invalid extension
   const initFailExt = await jsonRequest(`${origin}/api/uploads/chunked/init`, {

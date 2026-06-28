@@ -867,7 +867,7 @@ export type WorkerJobRecord = JobRecord & {
   source_ext: string;
 };
 
-export function claimNextWorkerJob(): WorkerJobRecord | undefined {
+export function claimNextWorkerJob(includeDxf = false): WorkerJobRecord | undefined {
   db.exec("BEGIN IMMEDIATE");
   try {
     const job = db
@@ -879,24 +879,26 @@ export function claimNextWorkerJob(): WorkerJobRecord | undefined {
                 WHEN lower(model_revisions.source_filename) LIKE '%.stp' THEN '.stp'
                 WHEN lower(model_revisions.source_filename) LIKE '%.glb' THEN '.glb'
                 WHEN lower(model_revisions.source_filename) LIKE '%.gltf' THEN '.gltf'
+                WHEN lower(model_revisions.source_filename) LIKE '%.dxf' THEN '.dxf'
                 ELSE models.source_ext
               END AS source_ext
        FROM jobs
        JOIN models ON models.id = jobs.model_id
        LEFT JOIN model_revisions ON model_revisions.id = jobs.revision_id
-       WHERE jobs.type = 'step-to-glb'
+       WHERE (jobs.type = 'step-to-glb' OR (? = 1 AND jobs.type = 'dxf-to-glb'))
          AND jobs.status IN ('uploaded', 'queued')
          AND jobs.cancellation_requested_at IS NULL
          AND CASE
                WHEN lower(model_revisions.source_filename) LIKE '%.step' THEN '.step'
                WHEN lower(model_revisions.source_filename) LIKE '%.stp' THEN '.stp'
+               WHEN lower(model_revisions.source_filename) LIKE '%.dxf' THEN '.dxf'
                ELSE models.source_ext
-             END IN ('.step', '.stp')
+             END IN ('.step', '.stp', CASE WHEN ? = 1 THEN '.dxf' ELSE '' END)
          AND models.deleted_at IS NULL
        ORDER BY jobs.created_at ASC, jobs.id ASC
        LIMIT 1`
       )
-      .get() as WorkerJobRecord | undefined;
+      .get(includeDxf ? 1 : 0, includeDxf ? 1 : 0) as WorkerJobRecord | undefined;
 
     if (!job) {
       db.exec("COMMIT");
@@ -951,6 +953,7 @@ export function getJobForWorker(jobId: number): WorkerJobRecord | undefined {
                 WHEN lower(model_revisions.source_filename) LIKE '%.stp' THEN '.stp'
                 WHEN lower(model_revisions.source_filename) LIKE '%.glb' THEN '.glb'
                 WHEN lower(model_revisions.source_filename) LIKE '%.gltf' THEN '.gltf'
+                WHEN lower(model_revisions.source_filename) LIKE '%.dxf' THEN '.dxf'
                 ELSE models.source_ext
               END AS source_ext
        FROM jobs

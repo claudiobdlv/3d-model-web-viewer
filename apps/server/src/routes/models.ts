@@ -45,8 +45,7 @@ import {
 import { parseConversionQuality, type ConversionQuality } from "../quality.js";
 import { parseMeshiqAdaptiveSmoothing, type MeshiqAdaptiveSmoothing } from "../meshiq.js";
 import { getLargeStepChunkingSummary } from "../utils/largeStepChunkingSummary.js";
-
-const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
+import { isUploadExtensionAllowed, uploadExtensionError } from "../featureFlags.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -55,8 +54,8 @@ const upload = multer({
   },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (!allowedExtensions.has(ext)) {
-      cb(new Error("Only .step, .stp, .glb, and .gltf files are accepted."));
+    if (!isUploadExtensionAllowed(ext)) {
+      cb(new Error(uploadExtensionError(ext)));
       return;
     }
     cb(null, true);
@@ -205,9 +204,11 @@ export async function registerModelAndJob({
   makeCurrent?: boolean;
   allowPublicSelectable?: boolean;
 }) {
+  validateUploadSize(sourceExt, originalSizeBytes);
   const slug = createSlug(sourceFilename);
   const isGlb = sourceExt === ".glb";
   const isStep = sourceExt === ".step" || sourceExt === ".stp";
+  const isDxf = sourceExt === ".dxf";
   const status = isGlb ? "ready" : "uploaded";
   const model = createModel({
     slug,
@@ -264,11 +265,11 @@ export async function registerModelAndJob({
       modelId: model.id,
       modelSlug: model.slug,
       revisionId: revision.id,
-      type: isStep ? "step-to-glb" : "viewer-ready",
+      type: isStep ? "step-to-glb" : isDxf ? "dxf-to-glb" : "viewer-ready",
       status,
       quality,
       meshiqAdaptiveSmoothing,
-      message: uploadJobMessage(isGlb, isStep)
+      message: uploadJobMessage(isGlb, isStep, isDxf)
     });
     setRevisionConversionJob(revision.id, job.id);
     return getModelBySlug(model.slug)!;
@@ -301,6 +302,7 @@ modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
 
     const isStep = sourceExt === ".step" || sourceExt === ".stp";
     const isGlb = sourceExt === ".glb" || sourceExt === ".gltf";
+    const isDxf = sourceExt === ".dxf";
 
     if (isGlb && req.file.size > 262144000) {
       res.status(400).send("GLB/GLTF files must be under 250 MB.");
@@ -308,6 +310,10 @@ modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
     }
     if (isStep && req.file.size > 524288000) {
       res.status(400).send("STEP/STP files must be under 500 MB.");
+      return;
+    }
+    if (isDxf && req.file.size > 524288000) {
+      res.status(400).send("DXF files must be under 500 MB.");
       return;
     }
 
@@ -386,6 +392,7 @@ export async function registerRevisionAndJob(input: {
   }
   const isGlb = sourceExt === ".glb";
   const isStep = sourceExt === ".step" || sourceExt === ".stp";
+  const isDxf = sourceExt === ".dxf";
   const status = isGlb ? "ready" : "uploaded";
   let revisionId: number | null = null;
   try {
@@ -420,11 +427,11 @@ export async function registerRevisionAndJob(input: {
       modelId: model.id,
       modelSlug: model.slug,
       revisionId: revision.id,
-      type: isStep ? "step-to-glb" : "viewer-ready",
+      type: isStep ? "step-to-glb" : isDxf ? "dxf-to-glb" : "viewer-ready",
       status,
       quality: input.quality,
       meshiqAdaptiveSmoothing: input.meshiqAdaptiveSmoothing,
-      message: uploadJobMessage(isGlb, isStep)
+      message: uploadJobMessage(isGlb, isStep, isDxf)
     });
     setRevisionConversionJob(revision.id, job.id);
     return { revision: getRevisionForModel(model.id, revision.id), job };
@@ -463,6 +470,7 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
       : null;
     const isGlb = sourceExt === ".glb";
     const isStep = sourceExt === ".step" || sourceExt === ".stp";
+    const isDxf = sourceExt === ".dxf";
     const version = getNextRevisionFileVersionNumber(revisionId);
     const uploadDir = getRevisionVersionUploadDir(slug, revisionId, version);
     const modelDir = getRevisionVersionModelDir(slug, revisionId, version);
@@ -496,11 +504,11 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
         modelId: model.id,
         modelSlug: slug,
         revisionId,
-        type: isStep ? "step-to-glb" : "viewer-ready",
+        type: isStep ? "step-to-glb" : isDxf ? "dxf-to-glb" : "viewer-ready",
         status: isGlb ? "ready" : "uploaded",
         quality,
         meshiqAdaptiveSmoothing,
-        message: uploadJobMessage(isGlb, isStep)
+        message: uploadJobMessage(isGlb, isStep, isDxf)
       });
       setRevisionConversionJob(revisionId, job.id);
       if (isGlb) {
@@ -857,20 +865,23 @@ function getRevisionRouteContext(slugValue: string, revisionIdValue: string) {
 }
 
 function validateUploadSize(sourceExt: string, sizeBytes: number): void {
-  if (!allowedExtensions.has(sourceExt)) {
-    throw new Error("Only .step, .stp, .glb, and .gltf files are accepted.");
+  if (!isUploadExtensionAllowed(sourceExt)) {
+    throw new Error(uploadExtensionError(sourceExt));
   }
   const isStep = sourceExt === ".step" || sourceExt === ".stp";
   const isGlb = sourceExt === ".glb" || sourceExt === ".gltf";
   if (isStep && sizeBytes > 524288000) throw new Error("STEP/STP files must be under 500 MB.");
   if (isGlb && sizeBytes > 262144000) throw new Error("GLB/GLTF files must be under 250 MB.");
+  if (sourceExt === ".dxf" && sizeBytes > 524288000) throw new Error("DXF files must be under 500 MB.");
 }
 
-function uploadJobMessage(isGlb: boolean, isStep: boolean): string {
+function uploadJobMessage(isGlb: boolean, isStep: boolean, isDxf: boolean): string {
   return isGlb
     ? "Uploaded GLB is ready for viewing."
     : isStep
       ? "Uploaded source model is queued for conversion."
+      : isDxf
+        ? "Uploaded DXF is queued for FormatIQ conversion."
       : "Uploaded GLTF source is stored without conversion.";
 }
 

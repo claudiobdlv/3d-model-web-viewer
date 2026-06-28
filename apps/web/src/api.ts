@@ -1,5 +1,6 @@
 import type {
   BatchAction,
+  AppConfig,
   BatchResult,
   ConversionQuality,
   MeshiqAdaptiveSmoothing,
@@ -128,6 +129,10 @@ export async function deleteProject(projectId: number): Promise<void> {
 
 export function getStorageQuota(): Promise<StorageQuota> {
   return request<StorageQuota>("/api/storage/quota", { cache: "no-store" });
+}
+
+export function getAppConfig(): Promise<AppConfig> {
+  return request<AppConfig>("/api/config", { cache: "no-store" });
 }
 
 export function batchModels(action: BatchAction, slugs: string[], projectId?: number | null): Promise<BatchResult> {

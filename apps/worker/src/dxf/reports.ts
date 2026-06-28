@@ -157,10 +157,10 @@ export function buildFormatReport(params: {
     conversionStatus = "acis-only-hard-error";
     warnings.push(
       `This DXF contains ${acisEntityCount} ACIS solid(s) (3DSOLID/BODY/REGION) with no supported mesh geometry. ` +
-        "Re-export from Revit with solids as polymesh and display colours enabled."
+        "Re-export a dedicated Revit 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids."
     );
     exportAdvice =
-      'In Revit DXF export options: set "Solids (3D views)" to "Polymesh" and enable element display colours.';
+      "Export a dedicated Revit 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids.";
   } else if (!hasUsable3D) {
     conversionStatus = "no-usable-3d-geometry";
     const skippedTotal = Object.values(entities.skipped).reduce((a, b) => a + b, 0);
@@ -170,7 +170,8 @@ export function buildFormatReport(params: {
     } else if (skippedTotal > 0) {
       warnings.push("DXF contains only 2D or unsupported entities. No 3D mesh geometry found.");
       exportAdvice =
-        "Ensure you are exporting a 3D view from Revit (not a floor plan). Check that the view contains visible solids or mesh elements.";
+        "Export a dedicated Revit 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids.";
+      warnings.push(exportAdvice);
     } else {
       warnings.push("DXF appears to contain no geometry entities at all.");
     }

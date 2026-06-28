@@ -90,8 +90,10 @@ async function setupTestDir(dir: string) {
 test("config parsing and defaults", () => {
   const previousAdaptive = process.env.MESHIQ_ADAPTIVE_MESH;
   const previousProfile = process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
+  const previousDxfFlag = process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
   delete process.env.MESHIQ_ADAPTIVE_MESH;
   delete process.env.MESHIQ_ADAPTIVE_MESH_PROFILE;
+  delete process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
   try {
   const config = loadConfig([]);
   assert.equal(config.largeStepChunkingMode, "disabled");
@@ -103,6 +105,7 @@ test("config parsing and defaults", () => {
   assert.equal(config.largeStepChunkFallbackMode, "fail");
   assert.equal(config.meshiqAdaptiveMesh, "off");
   assert.equal(config.meshiqAdaptiveMeshProfile, "standard");
+  assert.equal(config.dxfUploadEnabled, false);
   } finally {
     if (previousAdaptive === undefined) {
       delete process.env.MESHIQ_ADAPTIVE_MESH;
@@ -114,6 +117,21 @@ test("config parsing and defaults", () => {
     } else {
       process.env.MESHIQ_ADAPTIVE_MESH_PROFILE = previousProfile;
     }
+    if (previousDxfFlag === undefined) delete process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
+    else process.env.FORMATIQ_DXF_UPLOAD_ENABLED = previousDxfFlag;
+  }
+});
+
+test("config enables FormatIQ DXF only for true", () => {
+  const previous = process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
+  try {
+    process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "true";
+    assert.equal(loadConfig([]).dxfUploadEnabled, true);
+    process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "false";
+    assert.equal(loadConfig([]).dxfUploadEnabled, false);
+  } finally {
+    if (previous === undefined) delete process.env.FORMATIQ_DXF_UPLOAD_ENABLED;
+    else process.env.FORMATIQ_DXF_UPLOAD_ENABLED = previous;
   }
 });
 

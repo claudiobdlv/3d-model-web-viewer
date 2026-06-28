@@ -103,6 +103,7 @@ export type StorageQuota = {
 };
 
 export type BatchAction = "trash" | "restore" | "deleteForever" | "moveToProject";
+export type AppConfig = { features: { dxfUploadEnabled: boolean } };
 export type BatchResult = { updated: string[]; failed: Array<{ slug: string; reason: string }> };
 
 export type FolderRecord = {

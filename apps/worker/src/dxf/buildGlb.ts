@@ -114,7 +114,7 @@ export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = 
     const { groups } = optimizeMesh(triangles);
     const mesh = buildMeshFromGroups(`Block:${blockName}${hasByBlock ? `:${insertColor.hex}` : ""}`, groups);
     if (!mesh) return null;
-    const entry = { mesh, triangleCount: triangles.length };
+    const entry = { mesh, triangleCount: groups.reduce((sum, group) => sum + group.triangleCount, 0) };
     directMeshCache.set(cacheKey, entry);
     blockReuse.uniqueRenderedMeshes++;
     return entry;

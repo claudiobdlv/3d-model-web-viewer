@@ -17,6 +17,7 @@ export type WorkerConfig = {
   runOnce: boolean;
   keepWorkerOutput: boolean;
   maxModelArtifactBytes: number;
+  dxfUploadEnabled: boolean;
   largeStepChunkingMode: "disabled" | "auto" | "direct-filter";
   largeStepChunkConcurrencyMode: "fixed" | "adaptive";
   largeStepFileSizeThresholdMb: number;
@@ -125,6 +126,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
       262144000,
       "MAX_MODEL_ARTIFACT_BYTES"
     ),
+    dxfUploadEnabled: parseBoolean(process.env.FORMATIQ_DXF_UPLOAD_ENABLED, false),
     largeStepChunkingMode: largeStepChunkingMode as "disabled" | "auto" | "direct-filter",
     largeStepChunkConcurrencyMode: largeStepChunkConcurrencyMode as "fixed" | "adaptive",
     largeStepFileSizeThresholdMb: positiveInteger(

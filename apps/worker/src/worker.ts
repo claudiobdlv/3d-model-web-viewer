@@ -27,6 +27,7 @@ if (config.converterBackend === "xcaf-baseline") {
 console.log(`Keep worker output: ${config.keepWorkerOutput}`);
 console.log(`Maximum model artifact: ${config.maxModelArtifactBytes} bytes`);
 console.log(`GLB optimization mode: ${config.glbOptimizationMode}`);
+console.log(`FormatIQ DXF upload: ${config.dxfUploadEnabled ? "enabled" : "disabled"}`);
 console.log(`Run once: ${config.runOnce}`);
 
 const activeJobs = new Set<Promise<void>>();
@@ -93,16 +94,23 @@ function requestShutdown(): void {
 }
 
 async function processJob(job: WorkerJob): Promise<void> {
+  const sourceExtension = (job.sourceExtension || path.extname(job.sourceFilename)).toLowerCase();
+  const isDxf = sourceExtension === ".dxf";
+  const converterBackend = isDxf ? "dxf-js" : config.converterBackend;
   const quality = resolveSemanticQuality(job.quality, config.quality);
   const nativePreset = nativeQualityPreset(quality);
   const meshiqAdaptiveSmoothing = job.meshiqAdaptiveSmoothing ?? "off";
   console.log(`Processing claimed job ${job.id} for ${job.modelSlug}`);
+  console.log(`Source format: ${isDxf ? "DXF" : "STEP/STP"}; converter backend: ${converterBackend}`);
   console.log(`Job quality: ${quality}; native XCAF preset: ${nativePreset}`);
   console.log(`Job MeshIQ adaptive smoothing: ${meshiqAdaptiveSmoothing}`);
   const controller = new AbortController();
   let monitorStopped = false;
   const monitor = monitorCancellation(job.id, controller, () => monitorStopped);
   try {
+    if (isDxf && !config.dxfUploadEnabled) {
+      throw new Error("DXF job rejected because FORMATIQ_DXF_UPLOAD_ENABLED is false.");
+    }
     const jobDir = path.join(config.outputDir, job.modelSlug);
     const sourcePath = path.join(jobDir, job.sourceFilename);
     await client.updateProgress(job.id, 10, "Converting - downloading source");
@@ -113,7 +121,7 @@ async function processJob(job: WorkerJob): Promise<void> {
       slug: job.modelSlug,
       sourcePath,
       outputDir: config.outputDir,
-      converterBackend: config.converterBackend,
+      converterBackend,
       converterCli: config.converterCli,
       xcafConverterBin: config.xcafConverterBin,
       xcafColourMode: config.xcafColourMode,

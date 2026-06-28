@@ -48,6 +48,7 @@ import {
   resolveDisplayGlbPath,
   resolveSourcePath
 } from "./storage.js";
+import { isDxfUploadEnabled } from "./featureFlags.js";
 
 const port = Number(process.env.PORT || 3009);
 export const app = express();
@@ -101,6 +102,11 @@ app.get("/health", (_req, res) => {
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "3d-model-web-viewer" });
+});
+
+app.get("/api/config", requireAdmin, (_req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.json({ features: { dxfUploadEnabled: isDxfUploadEnabled() } });
 });
 
 app.get("/admin", requireAdmin, (_req, res) => {

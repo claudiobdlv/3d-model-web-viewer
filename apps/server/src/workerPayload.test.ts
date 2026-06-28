@@ -16,6 +16,7 @@ test("worker job payload includes immutable stored quality", () => {
       id: 42,
       modelSlug: "quality-test",
       sourceFilename: "part.step",
+      sourceExtension: ".step",
       quality: "high",
       meshiqAdaptiveSmoothing: "strong",
       revisionId: 7,
@@ -35,5 +36,18 @@ test("worker job payload treats old or null MeshIQ values as off", () => {
       revision_id: null
     }).meshiqAdaptiveSmoothing,
     "off"
+  );
+});
+
+test("worker job payload carries DXF extension for backend dispatch", () => {
+  assert.equal(
+    workerJobPayload({
+      id: 44,
+      model_slug: "format-test",
+      source_filename: "generic.dxf",
+      source_ext: ".dxf",
+      quality: "medium"
+    }).sourceExtension,
+    ".dxf"
   );
 });

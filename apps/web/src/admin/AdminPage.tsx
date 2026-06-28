@@ -6,7 +6,7 @@ import {
   RefreshCw, Replace, Search, Share2, Sun, Trash2, Upload, X
 } from "lucide-react";
 import {
-  batchModels, createProject, createPublicShare, deleteProject, getPublicShareSettings, getStorageQuota,
+  batchModels, createProject, createPublicShare, deleteProject, getAppConfig, getPublicShareSettings, getStorageQuota,
   listLibraryModels, listProjects, renameModel, renameProject, uploadModel,
   initChunkedUpload, uploadChunk, completeChunkedUpload, deleteChunkedUpload,
   getModel, makeRevisionCurrent, replaceRevision, updateRevisionPublicSelectable, uploadNewRevision
@@ -29,7 +29,8 @@ const columnDefinitions: Array<{ key: ColumnKey; label: string; sortKey?: SortBy
   { key: "created", label: "Date", sortKey: "created_at", defaultWidth: 145, minWidth: 120, maxWidth: 220 }
 ];
 const columnWidthsKey = "modelbase.assetTable.columnWidths.v1";
-const supportedModelFile = /\.(step|stp|glb|gltf)$/i;
+const supportedModelFile = (filename: string, dxfUploadEnabled: boolean) =>
+  (dxfUploadEnabled ? /\.(step|stp|glb|gltf|dxf)$/i : /\.(step|stp|glb|gltf)$/i).test(filename);
 const validSortKeys = new Set<SortBy>(["name", "project", "status", "glb_size_bytes", "created_at"]);
 
 function initialAdminState() {
@@ -77,6 +78,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   const [stagedFile, setStagedFile] = useState<File | null>(null);
   const [uploadProjectId, setUploadProjectId] = useState<number | null>(null);
   const [uploadHint, setUploadHint] = useState<string | null>(null);
+  const [dxfUploadEnabled, setDxfUploadEnabled] = useState(false);
   const [revisionDialog, setRevisionDialog] = useState<{ kind: "new" | "replace" | "manage" | "share"; model: ModelRecord; revisionId?: number } | null>(null);
   const [dragState, setDragState] = useState<{ active: boolean; projectId: number | null; label: string; blocked: boolean }>({ active: false, projectId: null, label: "Unsorted", blocked: false });
   const polling = useRef<number | undefined>(undefined);
@@ -115,6 +117,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   };
 
   useEffect(() => { setSelected(new Set()); void refresh(true); }, [view, debouncedQuery, sortBy, sortDir]);
+  useEffect(() => { void getAppConfig().then(config => setDxfUploadEnabled(config.features.dxfUploadEnabled)).catch(() => setDxfUploadEnabled(false)); }, []);
   useEffect(() => {
     window.clearTimeout(polling.current);
     polling.current = window.setTimeout(() => void refresh(false), models.some((m) => activeStatuses.has(m.status.split("|")[1] ?? m.status)) ? 3000 : 15000);
@@ -194,8 +197,8 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
     if (target.blocked) { setError("Choose a project or All Models to upload."); return; }
     const files = Array.from(event.dataTransfer.files);
     const file = files[0];
-    if (!file || !supportedModelFile.test(file.name)) {
-      setError("That file type is not supported. Choose a STEP, STP, GLB, or GLTF file.");
+    if (!file || !supportedModelFile(file.name, dxfUploadEnabled)) {
+      setError(`That file type is not supported. Choose a STEP, STP, GLB, or GLTF file${dxfUploadEnabled ? ", or a DXF file" : ""}.`);
       return;
     }
     openUpload(file, target.projectId, files.length > 1 ? `Only ${file.name} was staged; ${files.length - 1} additional file${files.length === 2 ? " was" : "s were"} ignored.` : null);
@@ -241,11 +244,11 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
       </main>
     </div>
     {dragState.active && <DropUploadOverlay label={dragState.label} blocked={dragState.blocked}/>}
-    {(uploadOpen || uploadInFlight) && <UploadDialog visible={uploadOpen} projects={projects} defaultProjectId={uploadProjectId} initialFile={stagedFile} hint={uploadHint} onClose={()=>setUploadOpen(false)} onBusyChange={setUploadInFlight} onTask={(task)=>{setUploadTasks(current=>{const exists=current.some(item=>item.clientUploadId===task.clientUploadId);return exists?current.map(item=>item.clientUploadId===task.clientUploadId?task:item):[task,...current]});if(task.stage==="queued")window.setTimeout(()=>setUploadTasks(current=>current.filter(item=>item.clientUploadId!==task.clientUploadId)),2000)}} onDone={async()=>{setUploadOpen(false);setUploadInFlight(false);setStagedFile(null);setUploadHint(null);await refresh();}}/>}
+    {(uploadOpen || uploadInFlight) && <UploadDialog visible={uploadOpen} dxfUploadEnabled={dxfUploadEnabled} projects={projects} defaultProjectId={uploadProjectId} initialFile={stagedFile} hint={uploadHint} onClose={()=>setUploadOpen(false)} onBusyChange={setUploadInFlight} onTask={(task)=>{setUploadTasks(current=>{const exists=current.some(item=>item.clientUploadId===task.clientUploadId);return exists?current.map(item=>item.clientUploadId===task.clientUploadId?task:item):[task,...current]});if(task.stage==="queued")window.setTimeout(()=>setUploadTasks(current=>current.filter(item=>item.clientUploadId!==task.clientUploadId)),2000)}} onDone={async()=>{setUploadOpen(false);setUploadInFlight(false);setStagedFile(null);setUploadHint(null);await refresh();}}/>}
     {moveOpen && <MoveDialog projects={projects} busy={busy} onClose={()=>setMoveOpen(false)} onMove={(id)=>void runBatch("moveToProject",id)}/>}
     {deleteForeverOpen && <ConfirmDialog count={selected.size} busy={busy} onClose={()=>setDeleteForeverOpen(false)} onConfirm={()=>void runBatch("deleteForever")}/>}
-    {revisionDialog?.kind === "new" && <UploadRevisionDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
-    {revisionDialog?.kind === "replace" && <ReplaceRevisionDialog model={revisionDialog.model} initialRevisionId={revisionDialog.revisionId} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
+    {revisionDialog?.kind === "new" && <UploadRevisionDialog model={revisionDialog.model} dxfUploadEnabled={dxfUploadEnabled} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
+    {revisionDialog?.kind === "replace" && <ReplaceRevisionDialog model={revisionDialog.model} dxfUploadEnabled={dxfUploadEnabled} initialRevisionId={revisionDialog.revisionId} onClose={()=>setRevisionDialog(null)} onDone={async(message)=>{setRevisionDialog(null);setNotice(message);await refresh(false)}}/>}
     {revisionDialog?.kind === "manage" && <ManageRevisionsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)} onReplace={(revisionId)=>setRevisionDialog({kind:"replace",model:revisionDialog.model,revisionId})} onChanged={async()=>refresh(false)}/>}
     {revisionDialog?.kind === "share" && <ShareSettingsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)}/>}
   </div>;
@@ -566,6 +569,7 @@ async function copyText(value:string){
 function DropUploadOverlay({label,blocked}:{label:string;blocked:boolean}){return <div className={`drop-upload-overlay ${blocked?"blocked":""}`}><div><Upload/><strong>{blocked?"Uploads aren't available here":"Drop to upload"}</strong><span>{blocked?"Choose a project or All Models to upload.":`to ${label}`}</span></div></div>}
 function UploadDialog({
   visible,
+  dxfUploadEnabled,
   projects,
   defaultProjectId,
   initialFile,
@@ -576,6 +580,7 @@ function UploadDialog({
   onDone
 }: {
   visible: boolean;
+  dxfUploadEnabled: boolean;
   projects: ProjectRecord[];
   defaultProjectId: number | null;
   initialFile: File | null;
@@ -749,16 +754,17 @@ function UploadDialog({
           <span>
             {file
               ? `File staged (${(file.size / (1024 * 1024)).toFixed(1)} MB) — review below.`
-              : "STEP/STP up to 500 MB; GLB/GLTF up to 250 MB"}
+              : `STEP/STP${dxfUploadEnabled ? "/DXF" : ""} up to 500 MB; GLB/GLTF up to 250 MB`}
           </span>
           <input
             type="file"
-            accept=".step,.stp,.glb,.gltf"
+            accept={dxfUploadEnabled ? ".step,.stp,.glb,.gltf,.dxf" : ".step,.stp,.glb,.gltf"}
             disabled={busy}
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           />
         </label>
         {hint && <div className="upload-hint">{hint}</div>}
+        {dxfUploadEnabled && <div className="upload-hint"><strong>DXF export guide</strong><p>Revit users: export DXF from a dedicated 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids.</p></div>}
         <label>
           Project
           <select
@@ -812,7 +818,7 @@ function UploadDialog({
   );
 }
 
-function UploadRevisionDialog({model,onClose,onDone}:{model:ModelRecord;onClose:()=>void;onDone:(message:string)=>void}) {
+function UploadRevisionDialog({model,dxfUploadEnabled,onClose,onDone}:{model:ModelRecord;dxfUploadEnabled:boolean;onClose:()=>void;onDone:(message:string)=>void}) {
   const [file,setFile]=useState<File|null>(null);
   const [revisionLabel,setRevisionLabel]=useState("");
   const [issuedDate,setIssuedDate]=useState(todayLocal());
@@ -832,7 +838,7 @@ function UploadRevisionDialog({model,onClose,onDone}:{model:ModelRecord;onClose:
     }catch(reason){setError(reason instanceof Error?reason.message:"Revision upload failed.");setBusy(false)}
   };
   return <Dialog title={`Upload new revision — ${model.name}`} onClose={busy?()=>{}:onClose}><form className="dialog-form" onSubmit={submit}>
-    <FilePicker file={file} busy={busy} onChange={setFile}/>
+    <FilePicker file={file} busy={busy} dxfUploadEnabled={dxfUploadEnabled} onChange={setFile}/>
     <div className="revision-fields">
       <label>Revision<input className="field" value={revisionLabel} disabled={busy} maxLength={100} onChange={e=>setRevisionLabel(e.target.value)} placeholder="Auto-number"/><small>Leave blank to auto-number.</small></label>
       <label>Date issued<input className="field" type="date" value={issuedDate} disabled={busy} onChange={e=>setIssuedDate(e.target.value)}/></label>
@@ -935,7 +941,7 @@ function ShareSettingsDialog({model,onClose}:{model:ModelRecord;onClose:()=>void
   </Dialog>;
 }
 
-function ReplaceRevisionDialog({model,initialRevisionId,onClose,onDone}:{model:ModelRecord;initialRevisionId?:number;onClose:()=>void;onDone:(message:string)=>void}) {
+function ReplaceRevisionDialog({model,dxfUploadEnabled,initialRevisionId,onClose,onDone}:{model:ModelRecord;dxfUploadEnabled:boolean;initialRevisionId?:number;onClose:()=>void;onDone:(message:string)=>void}) {
   const [revisions,setRevisions]=useState<ModelRevisionRecord[]>([]);
   const [revisionId,setRevisionId]=useState(initialRevisionId?String(initialRevisionId):"");
   const [reason,setReason]=useState("");
@@ -960,7 +966,7 @@ function ReplaceRevisionDialog({model,initialRevisionId,onClose,onDone}:{model:M
     <label>Revision to replace<select className="field" value={revisionId} disabled={busy} onChange={e=>setRevisionId(e.target.value)}><option value="">Select a revision</option>{revisions.map(revision=><option key={revision.id} value={revision.id}>Rev {revision.revision_label}{revision.is_current?" — Current":""}</option>)}</select></label>
     <label>Replacement reason<textarea className="field textarea-field" value={reason} disabled={busy} maxLength={2000} onChange={e=>setReason(e.target.value)} placeholder="What was corrected?"/></label>
     <fieldset disabled={busy}><legend>Quality</legend><QualityOptions value={quality} onChange={setQuality}/></fieldset>
-    <FilePicker file={file} busy={busy} onChange={setFile}/>
+    <FilePicker file={file} busy={busy} dxfUploadEnabled={dxfUploadEnabled} onChange={setFile}/>
     {replacementTooLarge&&<div className="alert error">This replacement is over 80 MB. Chunked replacement upload is deferred, so this screen cannot upload it safely yet. Use a smaller export or wait for chunked replacement support.</div>}
     {busy&&<UploadProgress percent={progress} text={progress<100?"Uploading replacement…":"Upload complete. Creating conversion job…"}/>}
     {error&&<div className="alert error">{error}</div>}
@@ -986,8 +992,8 @@ function ManageRevisionsDialog({model,onClose,onReplace,onChanged}:{model:ModelR
   </div></Dialog>;
 }
 
-function FilePicker({file,busy,onChange}:{file:File|null;busy:boolean;onChange:(file:File|null)=>void}) {
-  return <label className={`upload-drop compact ${busy?"disabled":""}`}><Upload/><strong>{file?.name??"Choose a model file"}</strong><span>{file?`${(file.size/(1024*1024)).toFixed(1)} MB`:"STEP, STP, GLB, or GLTF"}</span><input type="file" accept=".step,.stp,.glb,.gltf" disabled={busy} onChange={e=>onChange(e.target.files?.[0]??null)}/></label>;
+function FilePicker({file,busy,dxfUploadEnabled,onChange}:{file:File|null;busy:boolean;dxfUploadEnabled:boolean;onChange:(file:File|null)=>void}) {
+  return <label className={`upload-drop compact ${busy?"disabled":""}`}><Upload/><strong>{file?.name??"Choose a model file"}</strong><span>{file?`${(file.size/(1024*1024)).toFixed(1)} MB`:`STEP, STP, GLB, GLTF${dxfUploadEnabled?", or DXF":""}`}</span><input type="file" accept={dxfUploadEnabled?".step,.stp,.glb,.gltf,.dxf":".step,.stp,.glb,.gltf"} disabled={busy} onChange={e=>onChange(e.target.files?.[0]??null)}/></label>;
 }
 
 function QualityOptions({value,onChange}:{value:ConversionQuality;onChange:(quality:ConversionQuality)=>void}) {

@@ -49,6 +49,18 @@ test("parseDxf: POLYFACE_MESH fixture parses 4 triangles", () => {
   assert.equal(poly.triangleCount, 4);
 });
 
+test("parseDxf: combined polyface coordinate vertex flags remain positions", () => {
+  const result = parseDxf(fix("test-polyface-combined-vertex-flags.dxf"));
+  assert.equal(result.entities.supported.length, 1);
+  const poly = result.entities.supported[0]!;
+  assert.equal(poly.type, "POLYFACE_MESH");
+  if (poly.type !== "POLYFACE_MESH") assert.fail("expected POLYFACE_MESH");
+  assert.equal(poly.positions.length, 3);
+  assert.equal(poly.faceRecords.length, 1);
+  assert.equal(poly.triangleCount, 1);
+  assert.equal(extractAllTriangles([poly]).length, 1);
+});
+
 test("parseDxf: block-insert fixture reports 3 inserts and 1 block", () => {
   const result = parseDxf(fix("test-block-insert.dxf"));
   assert.equal(result.entities.inserts.length, 3);
@@ -138,6 +150,17 @@ test("extractAllTriangles: POLYFACE_MESH gives 4 triangles", () => {
   const result = parseDxf(fix("test-polyface.dxf"));
   const tris = extractAllTriangles(result.entities.supported);
   assert.equal(tris.length, 4);
+});
+
+test("buildGlb reports rendered block triangles after degenerate removal", async () => {
+  const parsed = parseDxf(fix("test-block-insert.dxf"));
+  const block = parsed.blocks["TRIANGLE"]!;
+  const valid = block.supported[0]!;
+  assert.equal(valid.type, "3DFACE");
+  if (valid.type !== "3DFACE") assert.fail("expected 3DFACE");
+  block.supported.push({ ...valid, handle: "SYNTHETIC_DEGENERATE", v1: valid.v0, v2: valid.v0, v3: valid.v0 });
+  const result = await buildGlb(parsed);
+  assert.equal(result.triangleCount, 3);
 });
 
 test("extractAllTriangles: layer-color fixture triangles have correct material keys", () => {

@@ -8,12 +8,12 @@ import { chunkedUploadsRoot } from "../storage.js";
 import { parseRevisionMetadata, registerModelAndJob, registerRevisionAndJob } from "./models.js";
 import { parseConversionQuality } from "../quality.js";
 import { parseMeshiqAdaptiveSmoothing } from "../meshiq.js";
+import { isUploadExtensionAllowed, uploadExtensionError } from "../featureFlags.js";
 
 const MAX_UPLOAD_BYTES = 524288000;       // 500 MB
 const MAX_UPLOAD_CHUNK_BYTES = 52428800; // 50 MB
 const MAX_GLB_BYTES = 262144000;         // 250 MB
 
-const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
 const uuidRegex = /^[a-f0-9-]{36}$/;
 
 /**
@@ -56,8 +56,8 @@ uploadsRouter.post("/init", (req, res) => {
 
     const cleanFilename = path.basename(filename);
     const ext = path.extname(cleanFilename).toLowerCase();
-    if (!allowedExtensions.has(ext)) {
-      res.status(400).json({ error: "Only .step, .stp, .glb, and .gltf files are accepted." });
+    if (!isUploadExtensionAllowed(ext)) {
+      res.status(400).json({ error: uploadExtensionError(ext) });
       return;
     }
 
@@ -69,6 +69,7 @@ uploadsRouter.post("/init", (req, res) => {
 
     const isStep = ext === ".step" || ext === ".stp";
     const isGlb = ext === ".glb" || ext === ".gltf";
+    const isDxf = ext === ".dxf";
 
     if (isStep && size > MAX_UPLOAD_BYTES) {
       res.status(400).json({ error: "STEP/STP files must be under 500 MB." });
@@ -76,6 +77,10 @@ uploadsRouter.post("/init", (req, res) => {
     }
     if (isGlb && size > MAX_GLB_BYTES) {
       res.status(400).json({ error: "GLB/GLTF files must be under 250 MB." });
+      return;
+    }
+    if (isDxf && size > MAX_UPLOAD_BYTES) {
+      res.status(400).json({ error: "DXF files must be under 500 MB." });
       return;
     }
 

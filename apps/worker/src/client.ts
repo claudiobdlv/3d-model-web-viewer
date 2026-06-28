@@ -6,6 +6,7 @@ export type WorkerJob = {
   id: number;
   modelSlug: string;
   sourceFilename: string;
+  sourceExtension?: string;
   quality?: "low" | "medium" | "high";
   meshiqAdaptiveSmoothing?: "off" | "standard" | "strong";
   revisionId?: number | null;
@@ -52,6 +53,8 @@ export class WorkerClient {
     conversionLogPath: string;
     xcafReportPath?: string;
     meshReportPath?: string;
+    formatReportPath?: string;
+    dxfOptimizationReportPath?: string;
   }): Promise<void> {
     const displayGlbBytes = (await fs.promises.stat(output.displayGlbPath)).size;
     if (displayGlbBytes > this.config.maxModelArtifactBytes) {
@@ -72,6 +75,12 @@ export class WorkerClient {
     }
     if (output.meshReportPath) {
       form.set("mesh-report.json", await fileBlob(output.meshReportPath), "mesh-report.json");
+    }
+    if (output.formatReportPath) {
+      form.set("format-report.json", await fileBlob(output.formatReportPath), "format-report.json");
+    }
+    if (output.dxfOptimizationReportPath) {
+      form.set("dxf-optimization-report.json", await fileBlob(output.dxfOptimizationReportPath), "dxf-optimization-report.json");
     }
 
     await this.request(`/api/worker/jobs/${jobId}/complete`, {
