@@ -1682,6 +1682,93 @@ need.
 4. MeshIQ global env remains absent/off; per-upload Strong will now produce the
    Candidate A values instead of Phase 3E values when the branch is deployed.
 
+### Phase 3H: Production rollout — finite adaptive bounds fix + Low+Strong Candidate A
+
+Rolled out on 2026-06-28. The PR chain (PR #2 then PR #3) was merged and the
+combined change deployed to EliteDesk production. MeshIQ global env remained
+absent/off throughout; per-upload MeshIQ stays the only path that enables adaptive
+smoothing.
+
+**Merges**
+
+- PR #2 `feature/meshiq-low-strong-threshold-tuning` → `feature/meshiq-finite-adaptive-bounds`:
+  merged (merge commit `2ac32c4`), bringing tuning commit `453ffef` onto the bounds branch.
+- PR #3 `feature/meshiq-finite-adaptive-bounds` → `main`: merged (merge commit `405f793`).
+- Previous production commit: `ca5db5f`. New deployed commit: `405f793`.
+
+**Pre-merge / post-merge checks**
+
+- Server, worker, converter, and web type-check / build / test all passed on the final
+  tuning branch and again on merged `main` (server 19/19, worker 41/41, converter smoke,
+  web `tsc --noEmit` + build). `git diff --check` clean. Compose `config --quiet` validated
+  on EliteDesk (local Docker unavailable). Diff sanity confirmed: no Medium/High threshold
+  changes, no tiny-dense coarsening, no simplification (report fields remain
+  `simplificationEnabled: false`), no public/QR route changes, no production env changes.
+
+**Backup**
+
+- DB backup before deploy: `/home/claudio/backups/3d-model-web-viewer/meshiq-bounds-tuning-20260628-172731/app.sqlite`
+  via `VACUUM INTO` (read-only snapshot). Backup verified: `PRAGMA integrity_check = ok`,
+  `PRAGMA foreign_key_check` empty.
+- Predeploy baseline: models 53 (active 51, deleted 2), revisions 55 (active 55),
+  jobs 69 (ready 56, failed 11, cancelling 2 — stale from 2026-06-22), shares 15 (active 10),
+  storage dirs models 51 / uploads 53 / worker-output 78.
+
+**Production .env**
+
+- Unchanged. No `MESHIQ_` keys before or after. `MESHIQ_ADAPTIVE_MESH` absent on host
+  `.env` and on both server and worker containers, before and after deploy.
+  Global MeshIQ was **not** enabled.
+
+**Deploy**
+
+- EliteDesk worktree was found on `feature/meshiq-low-strong-threshold-tuning` (not deployed —
+  running containers predated it); confirmed clean with no active jobs and switched back to
+  `main` before deploy. `git pull --ff-only origin main` fast-forwarded `ca5db5f..405f793`;
+  `scripts/deploy-elitedesk.sh` rebuilt only the server and worker images (native XCAF
+  recompiled) and recreated only those two containers. Server healthy, worker polling.
+  No global Docker restart, no reboot (host uptime continuous). Unrelated services
+  (Immich, Plex, Homepage, Portainer, Dozzle, Uptime Kuma) untouched.
+
+**Compatibility checks (post-deploy)**
+
+- `/health` and `/api/health` 200. Admin page (auth 200 / no-auth 401), `/api/models` 200,
+  model detail `/api/models/:slug` 200 with RevVault revisions array. Existing admin viewer
+  `/3dviewer/:slug` 200, GLB `/model-files/:slug/display.glb` 200, downloads original + GLB 200,
+  existing mesh-report 200, old-model mesh-report 404 (absent, as expected). One existing
+  active public share (locked_revision, `allow_revision_switching=0`) verified: `/public/:token`,
+  `/public/:token/model.json`, `/public/:token/model.glb` all 200 (token redacted; revision
+  switching remained disabled on the locked share). DB integrity ok, foreign_key_check empty,
+  counts unchanged vs baseline, storage dirs unchanged (no existing files moved/renamed/deleted).
+
+**Smoke (Off vs Strong, quality Low)**
+
+Safe non-sensitive curved STEP `dm1-id-214.stp` (occt-import-js CAD-IF test asset) uploaded as
+two fresh admin-visible models (no public shares created):
+
+- Off (job 178): reached ready; worker + native logs `Adaptive mesh: off / profile standard`;
+  mesh-report `adaptiveEnabled=false, adaptiveMode=off, appliedPartCount=0`. GLB 29,228 bytes.
+- Strong (job 179): reached ready; worker logs `MeshIQ adaptive mesh: on / profile strong`;
+  native logs `Adaptive mesh: large_sparse_smoothing / profile strong` and
+  `Adaptive assembly bounds: source=global_bnd_box fallbackUsed=false finiteLeafBoxes=0 invalidLeafBoxes=0`
+  (finite bounds fix confirmed). mesh-report `adaptiveEnabled=true,
+  adaptiveMode=large_sparse_smoothing, adaptiveProfile=strong, adaptiveBoundsSource=global_bnd_box,
+  adaptiveBoundsFallbackUsed=false, adaptiveAppliedPartCount=2, adaptiveFallbackPartCount=0`.
+  GLB 35,812 bytes — **not** byte-identical to Off (smoothing applied, +560 triangles on 2 parts).
+- Off/Strong viewer, source, and GLB routes all returned 200.
+
+**Remaining risks / notes**
+
+- The smoke model is small (≈146 mm diagonal, 7 parts) and not large-sparse geometry, so the
+  smoke proves the **pipeline** (per-upload flag plumbing, finite bounds resolution, strong
+  profile application, distinct output) but **not** visual quality on genuinely large sparse
+  models like U826. Candidate A visual quality on U826 remains validated only by the earlier
+  isolated Phase 3E/3F work, not by a production large-model conversion.
+- Two stale `cancelling` jobs from 2026-06-22 remain in the queue (pre-existing, worker idle,
+  not touched by this rollout).
+- Smoke added 2 models, 2 revisions, and 2 jobs to production counts (expected, retained as
+  evidence).
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.
