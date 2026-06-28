@@ -12,7 +12,6 @@ services:
       DATA_DIR: /app/data
       WORKER_OUTPUT_DIR: /app/data/worker-output
       MAX_MODEL_ARTIFACT_BYTES: ${MAX_MODEL_ARTIFACT_BYTES:-262144000}
-      FORMATIQ_DXF_UPLOAD_ENABLED: ${FORMATIQ_DXF_UPLOAD_ENABLED:-false}
     ports:
       - "3009:3009"
     volumes:
@@ -38,7 +37,6 @@ services:
       XCAF_CONVERTER_BIN: /app/bin/xcaf-step-to-glb
       MATERIAL_RULES_PATH: /app/config/material-rules.json
       MAX_MODEL_ARTIFACT_BYTES: ${MAX_MODEL_ARTIFACT_BYTES:-262144000}
-      FORMATIQ_DXF_UPLOAD_ENABLED: ${FORMATIQ_DXF_UPLOAD_ENABLED:-false}
       LARGE_STEP_CHUNKING_MODE: auto
       LARGE_STEP_CHUNK_FALLBACK_MODE: fail
       LARGE_STEP_CHUNK_CONCURRENCY_MODE: adaptive
