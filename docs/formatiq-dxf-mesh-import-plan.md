@@ -551,16 +551,109 @@ Key log lines:
 - [x] All 5 fixture DXF files (3DFACE, POLYFACE_MESH, block/insert, layer colour, ACIS detection).
 - [x] This design document.
 
-### Phase 2 — Production Parser and GLB Builder
-- [ ] `apps/worker/src/dxf/dxfParser.ts` — TypeScript port of spike parser.
-- [ ] Full 256-entry ACI colour table.
-- [ ] `apps/worker/src/dxf/dxfToGltf.ts` — `@gltf-transform` Document builder.
-- [ ] Block cache + geometry hash.
-- [ ] Vertex welding + degenerate removal + flat normals.
-- [ ] Material grouping.
-- [ ] `apps/worker/src/dxf/dxfReporter.ts` — format-report.json + optimization-report.json.
-- [ ] Wire into `converterProcessor.ts` as `converterBackend: "dxf-js"`.
-- [ ] Unit tests for parser, colour resolver, ACIS detector.
+### Phase 2A — Core DXF Worker Backend (DONE — `feature/formatiq-dxf-worker-backend`)
+
+**Branch:** `feature/formatiq-dxf-worker-backend`
+**Starting commit:** `edb8822`
+**Date:** 2026-06-28
+
+#### Module structure (`apps/worker/src/dxf/`)
+
+| File | Purpose |
+|------|---------|
+| `types.ts` | All shared types: DxfLayer, DxfBlock, Dxf3DFace, DxfPolyfaceMesh, DxfMeshEntity, DxfInsert, DxfAcisEntity, Triangle, MaterialGroup, OptimizationStats, DxfFormatReport, DxfOptimizationReport |
+| `colors.ts` | Full 256-entry ACI colour table (generated from hue-wheel formula), resolveColor(), rgbToHex(), materialKey() |
+| `parseDxf.ts` | Production TypeScript DXF parser: tokenize, splitSections, parseLayers, parse3DFace, parsePolylineAsMesh, parseMeshEntity, parseInsert, parseAcisEntity, parseEntitySection, parseBlocks, parseDxf() |
+| `geometry.ts` | extractTrianglesFromEntity(), extractAllTriangles() — handles 3DFACE, POLYFACE_MESH, POLYMESH, skips MESH |
+| `meshOptimize.ts` | optimizeMesh(): vertex welding (spatial grid, 1e-6 tolerance), degenerate triangle removal (area threshold 1e-12), flat normal generation, material grouping |
+| `blocks.ts` | hashBlockGeometry() (SHA-256 for future dedup), insertRotationQuaternion() (Z-axis rotation to quaternion) |
+| `buildGlb.ts` | buildGlb(): @gltf-transform Document builder — shared Mesh per block def, instance Nodes per INSERT, material cache, POSITION + NORMAL accessors, extras on nodes |
+| `reports.ts` | buildFormatReport(), buildOptimizationReport(), buildStats(), buildManifest() |
+| `convertDxfToGlb.ts` | Top-level orchestrator: parse → format-report → validate → optimize → GLB → all artifact files |
+| `fixtures/` | Test DXF fixtures (copied from spike) |
+
+#### Supported entities (Phase 2A)
+- [x] `3DFACE` — triangle and quad (split to 2 triangles)
+- [x] `POLYFACE_MESH` (POLYLINE bit 64) — face record triangulation
+- [x] `POLYMESH` (POLYLINE bit 16) — face record triangulation
+- [x] `INSERT` — block instance with translation/scale/Z-rotation
+- [x] `BLOCK`/`ENDBLK` — block definitions
+- [x] `LAYER` table — name, ACI colour, true colour, frozen flag
+- [x] ACI colour (full 256-entry table with hue-wheel formula)
+- [x] True colour (group 420, 24-bit packed RGB)
+- [x] BYLAYER colour resolution
+- [x] BYBLOCK colour resolution (sentinel, grey fallback in Phase 2A)
+- [x] Layer names, block names, entity handles in GLB extras
+
+#### Detected and reported (not converted)
+- [x] `3DSOLID` → `acis-only-hard-error` or `partial-with-warnings`
+- [x] `BODY` → same
+- [x] `REGION` → same
+- [x] `MESH` (R2010+) → detected, triangleCount=0, warning in format-report
+- [x] 2D POLYLINE → counted as skipped
+- [x] Unknown entities → counted in skippedEntitySummary
+
+#### GLB generation
+- Shared Mesh per block definition (block reuse via INSERT nodes)
+- One Node per INSERT with T/R/S transform from DXF INSERT attributes
+- Ungrouped 3DFACE/POLYFACE_MESH entities as a single Mesh with multiple primitives per material
+- Materials from (layer, colour) pairs: `baseColorFactor`, `metallicFactor=0`, `roughnessFactor=0.8`
+- Node `extras`: `stableObjectId`, `displayName`, `layer`, `blockName`, `sourceFormat`, `entityType`, `entityHandle`, `insertName`
+
+#### Block/instance reuse
+- Block definitions built as GLB Mesh objects once each
+- Multiple INSERT Nodes reference the same Mesh (GLB block instancing)
+- `hashBlockGeometry()` computes SHA-256 for future geometry-hash dedup (Phase 2B)
+
+#### Mesh optimization
+- Vertex welding: spatial grid at 1e-6 tolerance per material group
+- Degenerate triangle removal: cross-product area < 1e-12
+- Flat normal generation (correct for CAD models)
+- Material grouping: one primitive per (layer, colourHex) pair
+- Stats: rawTriangleCount, degenerateTrianglesRemoved, outputTriangleCount, duplicateVerticesWelded
+
+#### Artifact files written
+- `display.glb` — valid GLTF binary
+- `format-report.json` — DXF entity/layer/block/insert/ACIS counts, status, warnings, Revit export advice
+- `dxf-optimization-report.json` — geometry stats, block stats, material stats, timing
+- `manifest.json` — converterBackend=dxf-js, sourceFormat=dxf, artifact list
+- `stats.json` — triangleCount, nodeCount, materialCount, blockCount, instanceCount
+- `material-debug.json` — placeholder
+- `conversion.log` — structured log lines
+
+#### Test fixtures (in `apps/worker/src/dxf/fixtures/`)
+- `test-3dface.dxf` — 1 triangle (3DFACE), ACI green
+- `test-polyface.dxf` — 4-triangle tetrahedron (POLYFACE_MESH)
+- `test-block-insert.dxf` — block TRIANGLE + 3 INSERTs
+- `test-layer-color.dxf` — 3 faces on 3 layers, BYLAYER + entity trueColor
+- `test-acis-only.dxf` — 2 ACIS entities (3DSOLID + BODY), no mesh
+
+#### Tests (59 total, all pass — `apps/worker/src/dxf.test.ts`)
+- 5 parseDxf unit tests
+- 5 resolveColor unit tests
+- 3 extractAllTriangles unit tests
+- 5 convertDxfToGlb integration tests (one per fixture)
+
+#### Local development CLI
+- `apps/worker/scripts/convert-dxf-fixture.ts` — accepts DXF path, writes artifacts to temp dir, prints log
+
+#### What is NOT yet wired
+- `.dxf` NOT in production `allowedExtensions`
+- DXF NOT in production worker job dispatch
+- No production deploy
+- No UI changes
+
+#### Remaining risks for Phase 2B+
+- OCS extrusion (group 210/220/230) not yet applied — entities with non-Z extrusion will have wrong orientation
+- `MESH` entity (R2010+) not triangulated — detected, reported, skipped
+- BYBLOCK colour full resolution (INSERT→block colour chain) — simplified to grey in Phase 2A
+- No meshopt compression applied to DXF GLB yet (Phase 3 wiring)
+- Circular/nested block references not guarded against (depth limit planned)
+
+#### Recommended Phase 2B prompt
+> "Implement FormatIQ Phase 2B: wire the DXF converter into the worker job dispatch in `converterProcessor.ts` as a new `dxf-js` backend path. Extend `ConverterProcessorInput` to support `converterBackend: "dxf-js"`. When source format is DXF, call `convertDxfToGlb` and return the `ConverterProcessorOutput` interface. Also apply existing meshopt GLB optimization (`optimizeDisplayGlb`) to the DXF output. Do not add DXF to the upload route yet."
+
+---
 
 ### Phase 3 — Upload and Worker Integration
 - [ ] Add `.dxf` to `allowedExtensions` in `uploads.ts`.
