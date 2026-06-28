@@ -10,13 +10,21 @@ export type DxfLayer = {
 };
 
 export type ResolvedColor = {
-  source: "entity-truecolor" | "entity-aci" | "byblock" | "layer-truecolor" | "layer-aci" | "default";
+  source: "entity-truecolor" | "entity-aci" | "byblock" | "insert-truecolor" | "insert-aci" | "insert-layer" | "layer-truecolor" | "layer-aci" | "default";
   rgb: [number, number, number];
   hex: string;
   aci?: number;
 };
 
-export type Dxf3DFace = {
+export type DxfExtrusion = [number, number, number];
+
+export type DxfOcsMetadata = {
+  extrusion: DxfExtrusion;
+  hasExplicitExtrusion: boolean;
+  ocsApplied: boolean;
+};
+
+export type Dxf3DFace = DxfOcsMetadata & {
   type: "3DFACE";
   handle: string | null;
   layer: string;
@@ -33,7 +41,7 @@ export type Dxf3DFace = {
 
 export type DxfFaceRecord = { flags: number; i71: number; i72: number; i73: number; i74: number };
 
-export type DxfPolyfaceMesh = {
+export type DxfPolyfaceMesh = DxfOcsMetadata & {
   type: "POLYFACE_MESH" | "POLYMESH";
   handle: string | null;
   layer: string;
@@ -45,7 +53,7 @@ export type DxfPolyfaceMesh = {
   triangleCount: number;
 };
 
-export type DxfMeshEntity = {
+export type DxfMeshEntity = DxfOcsMetadata & {
   type: "MESH";
   handle: string | null;
   layer: string;
@@ -59,7 +67,7 @@ export type DxfMeshEntity = {
   note: string;
 };
 
-export type DxfInsert = {
+export type DxfInsert = DxfOcsMetadata & {
   type: "INSERT";
   handle: string | null;
   layer: string;
@@ -167,6 +175,11 @@ export type DxfFormatReport = {
   blocks: { name: string; entityCount: number; acisCount: number; triangleCount: number }[];
   insertCount: number;
   insertsByBlock: Record<string, number>;
+  ocs: {
+    explicitExtrusionEntityCount: number;
+    transformedEntityCount: number;
+    unsupportedEntityCount: number;
+  };
   conversionStatus: DxfConversionStatus;
   warnings: string[];
   exportAdvice: string | null;
@@ -203,10 +216,18 @@ export type DxfOptimizationReport = {
     displaySizeBytes: number | null;
     reductionPercent: number | null;
   };
+  meshopt: {
+    requestedMode: "disabled" | "meshopt";
+    status: "applied" | "failed" | "disabled" | "skipped-not-smaller";
+    validationPassed: boolean;
+    fallbackUsed: boolean;
+    message: string;
+  };
   timing: {
     parseMs: number;
     meshOptimizationMs: number;
     glbBuildMs: number;
+    meshoptMs: number;
     totalMs: number;
   };
   warnings: string[];
@@ -218,6 +239,9 @@ export type ConvertDxfInput = {
   sourcePath: string;
   outputDir: string;
   slug: string;
+  glbOptimizationMode?: "disabled" | "meshopt";
+  signal?: AbortSignal;
+  onProgress?: (percent: number, label: string) => void | Promise<void>;
 };
 
 export type ConvertDxfOutput = {

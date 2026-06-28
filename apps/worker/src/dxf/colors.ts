@@ -102,7 +102,8 @@ export function resolveColor(
   entityColorIndex: number | null,
   entityTrueColor: number | null,
   layerName: string,
-  layers: Record<string, DxfLayer>
+  layers: Record<string, DxfLayer>,
+  inheritedByBlockColor?: ResolvedColor
 ): ResolvedColor {
   if (entityTrueColor !== null && entityTrueColor !== undefined) {
     const rgb = trueColorToRgb(entityTrueColor);
@@ -112,6 +113,14 @@ export function resolveColor(
   const aci = entityColorIndex;
 
   if (aci === 0) {
+    if (inheritedByBlockColor) {
+      const source = inheritedByBlockColor.source === "entity-truecolor"
+        ? "insert-truecolor"
+        : inheritedByBlockColor.source === "entity-aci"
+          ? "insert-aci"
+          : "insert-layer";
+      return { ...inheritedByBlockColor, source };
+    }
     return { source: "byblock", rgb: [200, 200, 200], hex: "#c8c8c8" };
   }
 

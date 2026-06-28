@@ -37,7 +37,7 @@ export type ConverterProcessorInput = {
   slug: string;
   sourcePath: string;
   outputDir: string;
-  converterBackend: "occt-js" | "xcaf-baseline";
+  converterBackend: "occt-js" | "xcaf-baseline" | "dxf-js";
   converterCli: string;
   xcafConverterBin: string;
   xcafColourMode: "xcaf-baseline" | "step-presentation";
@@ -83,12 +83,30 @@ export type ConverterProcessorOutput = {
   conversionLogPath: string;
   xcafReportPath?: string;
   meshReportPath?: string;
+  formatReportPath?: string;
+  dxfOptimizationReportPath?: string;
 };
 
 export async function convertStepJob(input: ConverterProcessorInput): Promise<ConverterProcessorOutput> {
   const jobStartTime = Date.now();
   const jobDir = path.join(input.outputDir, input.slug);
   fs.mkdirSync(jobDir, { recursive: true });
+
+  if (input.converterBackend === "dxf-js") {
+    if (path.extname(input.sourcePath).toLowerCase() !== ".dxf") {
+      throw new Error("dxf-js backend requires an internal .dxf source path.");
+    }
+    throwIfAborted(input.signal);
+    const { convertDxfToGlb } = await import("./dxf/convertDxfToGlb.js");
+    return convertDxfToGlb({
+      sourcePath: input.sourcePath,
+      outputDir: input.outputDir,
+      slug: input.slug,
+      glbOptimizationMode: input.glbOptimizationMode,
+      signal: input.signal,
+      onProgress: input.onProgress,
+    });
+  }
 
   const largeStepChunkingMode = input.largeStepChunkingMode ?? "disabled";
   const largeStepChunkConcurrencyMode = input.largeStepChunkConcurrencyMode ?? "adaptive";

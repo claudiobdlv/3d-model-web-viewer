@@ -637,21 +637,21 @@ Key log lines:
 #### Local development CLI
 - `apps/worker/scripts/convert-dxf-fixture.ts` — accepts DXF path, writes artifacts to temp dir, prints log
 
-#### What is NOT yet wired
+#### What remained unwired after Phase 2A
 - `.dxf` NOT in production `allowedExtensions`
 - DXF NOT in production worker job dispatch
 - No production deploy
 - No UI changes
 
-#### Remaining risks for Phase 2B+
-- OCS extrusion (group 210/220/230) not yet applied — entities with non-Z extrusion will have wrong orientation
-- `MESH` entity (R2010+) not triangulated — detected, reported, skipped
-- BYBLOCK colour full resolution (INSERT→block colour chain) — simplified to grey in Phase 2A
-- No meshopt compression applied to DXF GLB yet (Phase 3 wiring)
-- Circular/nested block references not guarded against (depth limit planned)
+#### Phase 2A risks addressed or carried into Phase 2B
+- OCS extrusion: simple supported entities and INSERTs now use the arbitrary-axis transform; broader real-file coverage remains a risk.
+- `MESH` entity (R2010+): still detected, reported, and skipped rather than faked.
+- BYBLOCK colour: simple INSERT inheritance is implemented; recursive nested inheritance remains deferred.
+- Meshopt: integrated with semantic validation and raw fallback.
+- Circular/nested block references: detected through nested INSERT counts but recursive rendering remains deferred.
 
-#### Recommended Phase 2B prompt
-> "Implement FormatIQ Phase 2B: wire the DXF converter into the worker job dispatch in `converterProcessor.ts` as a new `dxf-js` backend path. Extend `ConverterProcessorInput` to support `converterBackend: "dxf-js"`. When source format is DXF, call `convertDxfToGlb` and return the `ConverterProcessorOutput` interface. Also apply existing meshopt GLB optimization (`optimizeDisplayGlb`) to the DXF output. Do not add DXF to the upload route yet."
+#### Phase 2B status
+Completed internally; see the Phase 2B implementation notes at the end of this document.
 
 ---
 
@@ -769,3 +769,83 @@ Expected outcomes:
 - `test-block-insert.dxf`: status=`ok`, 0 entities in ENTITIES, 3 INSERTs, 1 block `TRIANGLE`.
 - `test-layer-color.dxf`: status=`ok`, 3 × `3DFACE`; Walls → `#ff0000`, Floor → `#00ff00`, Ceiling face → `#00ff00` (entity true-colour 65280).
 - `test-acis-only.dxf`: status=`acis-only-hard-error`, 2 ACIS entities, 0 supported.
+
+---
+
+## Phase 2B — Internal Worker Wiring and Geometry Correctness (DONE)
+
+**Branch:** `feature/formatiq-dxf-worker-backend`
+
+**Starting commit:** `e0b294d`
+**Date:** 2026-06-28
+
+### Backend wiring result
+
+- `ConverterProcessorInput.converterBackend` accepts `"dxf-js"` for direct internal calls.
+- `convertStepJob()` dispatches that backend to `convertDxfToGlb()` before STEP chunking or native converter logic.
+- The environment-backed production worker configuration remains restricted to `occt-js` and `xcaf-baseline`, preventing DXF jobs from being selected by the polling worker.
+- Server/admin allow-lists remain `.step`, `.stp`, `.glb`, and `.gltf`; `.dxf` is still hidden from users.
+- STEP and GLB paths are unchanged.
+
+### Generated artifacts
+
+Successful internal DXF jobs write `display.glb`, `manifest.json`, `stats.json`, `format-report.json`, `dxf-optimization-report.json`, `material-debug.json`, and `conversion.log`. `display.raw.glb` is retained as optimizer input, matching the existing generated-GLB worker convention.
+
+### Meshopt result
+
+- DXF output now runs through the existing `optimizeDisplayGlb()` path when `glbOptimizationMode` is `meshopt`.
+- The semantic validator guards hierarchy counts, names, extras and selection IDs, material assignments and PBR colours, triangle counts, and quantized bounds.
+- A validated candidate that is not smaller falls back to raw GLB with `skipped-not-smaller`. Optimization or validation failure falls back with `failed` and an explicit message.
+- `stats.json` and `dxf-optimization-report.json` record mode, outcome, raw/display byte counts, reduction, validation, fallback, and timing.
+
+### OCS/extrusion handling
+
+- Group codes 210/220/230 are parsed for `3DFACE`, mesh `POLYLINE`, `MESH`, and `INSERT`.
+- Non-default extrusion vectors on supported faces/polyfaces are transformed from OCS to WCS with the arbitrary-axis algorithm.
+- INSERT translation and orientation use the same OCS basis.
+- `format-report.json` records explicit, transformed, and unsupported extrusion counts.
+- OCS data on detect-only `MESH` entities is reported but cannot affect geometry because `MESH` is not triangulated.
+
+### Colour inheritance
+
+- Entity true colour remains highest priority, followed by explicit entity ACI and BYLAYER lookup.
+- A BYBLOCK entity in a simple block inherits the resolved colour of its INSERT. Block mesh caching is keyed by inherited colour only when the block contains BYBLOCK geometry.
+- Nested block INSERTs are detected and warned about. Recursive nested geometry and recursive BYBLOCK inheritance remain deferred rather than represented incorrectly.
+
+### MESH and ACIS handling
+
+- R2010+ `MESH` remains detected/skipped; no fake triangulation was added.
+- MESH counts and warnings appear in `format-report.json`. MESH-only/2D-only input returns `no-usable-3d-geometry`.
+- ACIS-only input still fails with re-export guidance. Supported mesh plus ACIS succeeds as `partial-with-warnings` and reports skipped solids.
+- DWG and ACIS conversion remain out of scope.
+
+### Internal CLI
+
+The CLI uses the same `converterProcessor` dispatch as tests and does not access the app database or production storage:
+
+```sh
+cd apps/worker
+npm run dxf:convert -- path/to/model.dxf path/to/output-folder
+```
+
+The output folder receives a slug subdirectory. Omitting it uses a temporary directory.
+
+### Tests added
+
+- Internal `converterProcessor` dispatch and seven-artifact contract.
+- Non-empty GLB and meshopt/fallback reporting.
+- Non-default OCS transform and report counts.
+- BYLAYER, true-colour override, and simple BYBLOCK INSERT inheritance.
+- ACIS-only rejection and mesh-plus-ACIS partial warning.
+- MESH-only detection, warning, and `no-usable-3d-geometry` rejection.
+- Existing STEP/chunking, optimizer, merge, quality, and worker-pool tests remain in the full worker suite.
+
+### Remaining risks and recommended Phase 2C
+
+- Nested block geometry and recursive BYBLOCK/BYLAYER context are not rendered yet.
+- Real-world OCS combinations need larger Revit/AutoCAD fixtures; current coverage proves one non-default arbitrary-axis path.
+- R2010+ `MESH` triangulation needs a fixture proving vertex/face-list semantics before implementation.
+- Large real DXF performance and material cardinality have not been benchmarked.
+- Upload/server job selection, worker artifact upload fields, and UI warnings remain intentionally unwired.
+
+> Recommended Phase 2C prompt: Implement recursive nested BLOCK/INSERT traversal with a depth limit and cycle detection, complete nested BYBLOCK/BYLAYER context inheritance, and add larger representative OCS and R2010+ MESH fixtures. Implement MESH triangulation only if face-list tests prove correctness. Keep `.dxf` out of server/admin upload allow-lists, do not deploy, and preserve existing STEP/GLB paths.

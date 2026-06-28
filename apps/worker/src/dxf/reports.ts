@@ -27,19 +27,23 @@ export function buildFormatReport(params: {
     BODY: 0,
     REGION: 0,
   };
-  for (const e of entities.supported) {
+  const allSupported = [...entities.supported, ...Object.values(blocks).flatMap((block) => block.supported)];
+  const allAcis = [...entities.acis, ...Object.values(blocks).flatMap((block) => block.acis)];
+  const allInserts = [...entities.inserts, ...Object.values(blocks).flatMap((block) => block.inserts)];
+  entityCounts.INSERT = allInserts.length;
+  for (const e of allSupported) {
     if (e.type === "3DFACE") entityCounts["3DFACE"]++;
     else if (e.type === "POLYFACE_MESH") entityCounts["POLYFACE_MESH"]++;
     else if (e.type === "POLYMESH") entityCounts["POLYMESH"]++;
     else if (e.type === "MESH") entityCounts["MESH"]++;
   }
-  for (const e of entities.acis) {
+  for (const e of allAcis) {
     if (e.type === "3DSOLID") entityCounts["3DSOLID"]++;
     else if (e.type === "BODY") entityCounts["BODY"]++;
     else if (e.type === "REGION") entityCounts["REGION"]++;
   }
 
-  const acisEntityCount = entities.acis.length;
+  const acisEntityCount = allAcis.length;
 
   // Insert summary
   const insertsByBlock: Record<string, number> = {};
@@ -75,13 +79,11 @@ export function buildFormatReport(params: {
   }));
 
   // Determine status + warnings
-  const hasSupportedEntities = entities.supported.length > 0;
+  const hasSupportedEntities = entities.supported.some((entity) => entity.triangleCount > 0);
   const hasInserts = entities.inserts.length > 0;
   const hasAcis = acisEntityCount > 0;
-  const hasAny3D = hasSupportedEntities || hasInserts;
-
   // Also check if any block definitions have geometry (accessed via inserts)
-  const anyBlockHasGeometry = hasInserts && Object.values(blocks).some((b) => b.triangleCount > 0);
+  const anyBlockHasGeometry = hasInserts && entities.inserts.some((insert) => (blocks[insert.blockName]?.triangleCount ?? 0) > 0);
   const hasUsable3D = hasSupportedEntities || anyBlockHasGeometry;
 
   let conversionStatus: DxfConversionStatus;
@@ -94,6 +96,17 @@ export function buildFormatReport(params: {
       `${meshEntityCount} MESH entity/entities (DXF R2010+) detected but not yet triangulated. ` +
         "Full MESH support is planned for a future release."
     );
+  }
+
+  const extrusionEntities = [...allSupported, ...allInserts].filter((entity) => entity.hasExplicitExtrusion);
+  const transformedEntityCount = extrusionEntities.filter((entity) => entity.ocsApplied).length;
+  const unsupportedEntityCount = extrusionEntities.filter((entity) => entity.type === "MESH").length;
+  if (unsupportedEntityCount > 0) {
+    warnings.push(`${unsupportedEntityCount} unsupported MESH entity/entities include OCS extrusion data; orientation is reported but geometry is not converted.`);
+  }
+  const nestedInsertCount = Object.values(blocks).reduce((sum, block) => sum + block.inserts.length, 0);
+  if (nestedInsertCount > 0) {
+    warnings.push(`${nestedInsertCount} nested block INSERT(s) detected. Nested block rendering and recursive BYBLOCK inheritance are deferred to Phase 2C.`);
   }
 
   if (!hasUsable3D && hasAcis) {
@@ -140,6 +153,11 @@ export function buildFormatReport(params: {
     blocks: blockSummaries,
     insertCount: entities.inserts.length,
     insertsByBlock,
+    ocs: {
+      explicitExtrusionEntityCount: extrusionEntities.length,
+      transformedEntityCount,
+      unsupportedEntityCount,
+    },
     conversionStatus,
     warnings,
     exportAdvice,
@@ -160,10 +178,12 @@ export function buildOptimizationReport(params: {
     meshOptimizationMs: number;
     glbBuildMs: number;
     totalMs: number;
+    meshoptMs: number;
   };
+  meshopt: DxfOptimizationReport["meshopt"];
   warnings: string[];
 }): DxfOptimizationReport {
-  const { parsedDxf, stats, rawGlbSizeBytes, displayGlbSizeBytes, materialsByLayer, timing, warnings, sourcePath } = params;
+  const { parsedDxf, stats, rawGlbSizeBytes, displayGlbSizeBytes, materialsByLayer, timing, warnings, sourcePath, meshopt } = params;
   const blocks = parsedDxf.blocks;
 
   const uniqueBlockDefinitions = Object.keys(blocks).length;
@@ -203,6 +223,7 @@ export function buildOptimizationReport(params: {
       displaySizeBytes: displayGlbSizeBytes,
       reductionPercent,
     },
+    meshopt,
     timing,
     warnings,
   };

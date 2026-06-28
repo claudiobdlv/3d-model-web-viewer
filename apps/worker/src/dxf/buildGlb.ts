@@ -5,12 +5,14 @@ import type { ParsedDxf, MaterialGroup } from "./types.js";
 import { extractAllTriangles } from "./geometry.js";
 import { optimizeMesh } from "./meshOptimize.js";
 import { insertRotationQuaternion } from "./blocks.js";
+import { resolveColor } from "./colors.js";
 
 export type BuildGlbResult = {
   glbBytes: Uint8Array;
   nodeCount: number;
   materialCount: number;
   triangleCount: number;
+  materials: { layer: string; colorHex: string; rgb: [number, number, number] }[];
 };
 
 export async function buildGlb(parsedDxf: ParsedDxf): Promise<BuildGlbResult> {
@@ -74,28 +76,33 @@ export async function buildGlb(parsedDxf: ParsedDxf): Promise<BuildGlbResult> {
   // ── Block definitions: build one Mesh per named block ─────────────────────
   const blockMeshes = new Map<string, Mesh>();
 
-  for (const [blockName, block] of Object.entries(parsedDxf.blocks)) {
-    const blockTriangles = extractAllTriangles(block.supported);
-    if (blockTriangles.length === 0) continue;
+  function blockMeshForInsert(blockName: string, insertColor: ReturnType<typeof resolveColor>): Mesh | null {
+    const block = parsedDxf.blocks[blockName];
+    if (!block) return null;
+    const hasByBlock = block.supported.some((entity) => entity.color.source === "byblock");
+    const cacheKey = hasByBlock ? `${blockName}|${insertColor.hex}` : blockName;
+    const cached = blockMeshes.get(cacheKey);
+    if (cached) return cached;
+    const blockTriangles = extractAllTriangles(block.supported, insertColor);
+    if (blockTriangles.length === 0) return null;
     const { groups } = optimizeMesh(blockTriangles);
-    const mesh = buildMeshFromGroups(`Block:${blockName}`, groups);
-    if (mesh) {
-      blockMeshes.set(blockName, mesh);
-      // Track triangles from block definitions (counted per-instance below)
-    }
+    const mesh = buildMeshFromGroups(`Block:${blockName}${hasByBlock ? `:${insertColor.hex}` : ""}`, groups);
+    if (mesh) blockMeshes.set(cacheKey, mesh);
+    return mesh;
   }
 
   // ── INSERT instances ───────────────────────────────────────────────────────
   let insertIndex = 0;
   for (const insert of parsedDxf.entities.inserts) {
-    const mesh = blockMeshes.get(insert.blockName);
+    const insertColor = resolveColor(insert.colorIndex, insert.trueColor, insert.layer, parsedDxf.layers);
+    const mesh = blockMeshForInsert(insert.blockName, insertColor);
     if (!mesh) {
       // Unknown or empty block — skip silently
       insertIndex++;
       continue;
     }
 
-    const rotation = insertRotationQuaternion(insert.rotation);
+    const rotation = insertRotationQuaternion(insert.rotation, insert.extrusion);
     const handle = insert.handle ?? `INSERT_${insertIndex}`;
     const nodeName = `${insert.blockName}_${insertIndex}`;
 
@@ -114,6 +121,9 @@ export async function buildGlb(parsedDxf: ParsedDxf): Promise<BuildGlbResult> {
         layer: insert.layer,
         blockName: insert.blockName,
         insertName: insert.blockName,
+        extrusion: insert.extrusion,
+        ocsApplied: insert.ocsApplied,
+        byBlockColor: insertColor.hex,
       });
 
     root.addChild(node);
@@ -155,5 +165,14 @@ export async function buildGlb(parsedDxf: ParsedDxf): Promise<BuildGlbResult> {
     nodeCount,
     materialCount: materialCache.size,
     triangleCount: totalTriangleCount,
+    materials: [...materialCache.entries()].map(([key, material]) => {
+      const separator = key.lastIndexOf("|");
+      const factor = material.getBaseColorFactor();
+      return {
+        layer: key.slice(0, separator),
+        colorHex: key.slice(separator + 1),
+        rgb: [Math.round(factor[0] * 255), Math.round(factor[1] * 255), Math.round(factor[2] * 255)],
+      };
+    }),
   };
 }

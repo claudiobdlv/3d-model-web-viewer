@@ -9,6 +9,7 @@ import type {
   ParsedDxf, DxfFaceRecord,
 } from "./types.js";
 import { resolveColor } from "./colors.js";
+import { defaultExtrusion, isDefaultExtrusion, ocsToWcs } from "./ocs.js";
 
 // ─── Tokenizer ────────────────────────────────────────────────────────────────
 
@@ -119,6 +120,9 @@ function parse3DFace(
     layer: "0",
     colorIndex: null,
     trueColor: null,
+    extrusion: defaultExtrusion(),
+    hasExplicitExtrusion: false,
+    ocsApplied: false,
     color: { source: "default", rgb: [200, 200, 200], hex: "#c8c8c8" },
     v0: [0, 0, 0],
     v1: [0, 0, 0],
@@ -135,6 +139,9 @@ function parse3DFace(
       case 8: face.layer = value; break;
       case 62: face.colorIndex = parseInt(value, 10); break;
       case 420: face.trueColor = parseInt(value, 10); break;
+      case 210: face.extrusion[0] = parseFloat(value); face.hasExplicitExtrusion = true; break;
+      case 220: face.extrusion[1] = parseFloat(value); face.hasExplicitExtrusion = true; break;
+      case 230: face.extrusion[2] = parseFloat(value); face.hasExplicitExtrusion = true; break;
       case 10: face.v0[0] = parseFloat(value); break;
       case 20: face.v0[1] = parseFloat(value); break;
       case 30: face.v0[2] = parseFloat(value); break;
@@ -158,6 +165,13 @@ function parse3DFace(
   face.isTriangle = isTriangle;
   face.triangleCount = isTriangle ? 1 : 2;
   face.color = resolveColor(face.colorIndex, face.trueColor, face.layer, layers);
+  if (face.hasExplicitExtrusion && !isDefaultExtrusion(face.extrusion)) {
+    face.v0 = ocsToWcs(face.v0, face.extrusion);
+    face.v1 = ocsToWcs(face.v1, face.extrusion);
+    face.v2 = ocsToWcs(face.v2, face.extrusion);
+    face.v3 = ocsToWcs(face.v3, face.extrusion);
+    face.ocsApplied = true;
+  }
 
   return { entity: face, nextIndex: i };
 }
@@ -168,6 +182,8 @@ function parsePolylineAsMesh(
   polylineLayer: string,
   polylineColorIndex: number | null,
   polylineTrueColor: number | null,
+  extrusion: [number, number, number],
+  hasExplicitExtrusion: boolean,
   layers: Record<string, DxfLayer>,
   meshType: "POLYFACE_MESH" | "POLYMESH"
 ): { entity: DxfPolyfaceMesh; nextIndex: number } {
@@ -218,14 +234,19 @@ function parsePolylineAsMesh(
   }
 
   const color = resolveColor(polylineColorIndex, polylineTrueColor, polylineLayer, layers);
+  const ocsApplied = hasExplicitExtrusion && !isDefaultExtrusion(extrusion);
+  const wcsPositions = ocsApplied ? positions.map((position) => ocsToWcs(position, extrusion)) : positions;
   const entity: DxfPolyfaceMesh = {
     type: meshType,
     handle: null,
     layer: polylineLayer,
     colorIndex: polylineColorIndex,
     trueColor: polylineTrueColor,
+    extrusion,
+    hasExplicitExtrusion,
+    ocsApplied,
     color,
-    positions,
+    positions: wcsPositions,
     faceRecords,
     triangleCount,
   };
@@ -243,6 +264,9 @@ function parseMeshEntity(
     layer: "0",
     colorIndex: null,
     trueColor: null,
+    extrusion: defaultExtrusion(),
+    hasExplicitExtrusion: false,
+    ocsApplied: false,
     color: { source: "default", rgb: [200, 200, 200], hex: "#c8c8c8" },
     subdivisionLevel: 0,
     vertexCount: 0,
@@ -257,6 +281,9 @@ function parseMeshEntity(
       case 8: mesh.layer = value; break;
       case 62: mesh.colorIndex = parseInt(value, 10); break;
       case 420: mesh.trueColor = parseInt(value, 10); break;
+      case 210: mesh.extrusion[0] = parseFloat(value); mesh.hasExplicitExtrusion = true; break;
+      case 220: mesh.extrusion[1] = parseFloat(value); mesh.hasExplicitExtrusion = true; break;
+      case 230: mesh.extrusion[2] = parseFloat(value); mesh.hasExplicitExtrusion = true; break;
       case 71: mesh.subdivisionLevel = parseInt(value, 10); break;
       case 72: mesh.vertexCount = parseInt(value, 10); break;
       case 93: mesh.faceListCount = parseInt(value, 10); break;
@@ -278,6 +305,9 @@ function parseInsert(
     blockName: "",
     colorIndex: null,
     trueColor: null,
+    extrusion: defaultExtrusion(),
+    hasExplicitExtrusion: false,
+    ocsApplied: false,
     position: [0, 0, 0],
     scale: [1, 1, 1],
     rotation: 0,
@@ -290,6 +320,9 @@ function parseInsert(
       case 2: ins.blockName = value; break;
       case 62: ins.colorIndex = parseInt(value, 10); break;
       case 420: ins.trueColor = parseInt(value, 10); break;
+      case 210: ins.extrusion[0] = parseFloat(value); ins.hasExplicitExtrusion = true; break;
+      case 220: ins.extrusion[1] = parseFloat(value); ins.hasExplicitExtrusion = true; break;
+      case 230: ins.extrusion[2] = parseFloat(value); ins.hasExplicitExtrusion = true; break;
       case 10: ins.position[0] = parseFloat(value); break;
       case 20: ins.position[1] = parseFloat(value); break;
       case 30: ins.position[2] = parseFloat(value); break;
@@ -299,6 +332,10 @@ function parseInsert(
       case 50: ins.rotation = parseFloat(value); break;
     }
     i++;
+  }
+  if (ins.hasExplicitExtrusion && !isDefaultExtrusion(ins.extrusion)) {
+    ins.position = ocsToWcs(ins.position, ins.extrusion);
+    ins.ocsApplied = true;
   }
   // Skip optional ATTRIB sub-entities and SEQEND
   while (
@@ -356,6 +393,8 @@ function parseEntitySection(
 
       case "POLYLINE": {
         let flags = 0, layerName = "0", colorIndex: number | null = null, trueColor: number | null = null;
+        const extrusion = defaultExtrusion();
+        let hasExplicitExtrusion = false;
         let j = i;
         while (j < tokens.length && tokens[j]!.code !== 0) {
           const { code, value } = tokens[j]!;
@@ -363,14 +402,17 @@ function parseEntitySection(
           else if (code === 8) layerName = value;
           else if (code === 62) colorIndex = parseInt(value, 10);
           else if (code === 420) trueColor = parseInt(value, 10);
+          else if (code === 210) { extrusion[0] = parseFloat(value); hasExplicitExtrusion = true; }
+          else if (code === 220) { extrusion[1] = parseFloat(value); hasExplicitExtrusion = true; }
+          else if (code === 230) { extrusion[2] = parseFloat(value); hasExplicitExtrusion = true; }
           j++;
         }
         if (flags & 64) {
-          const { entity, nextIndex } = parsePolylineAsMesh(tokens, j, layerName, colorIndex, trueColor, layers, "POLYFACE_MESH");
+          const { entity, nextIndex } = parsePolylineAsMesh(tokens, j, layerName, colorIndex, trueColor, extrusion, hasExplicitExtrusion, layers, "POLYFACE_MESH");
           supported.push(entity);
           i = nextIndex;
         } else if (flags & 16) {
-          const { entity, nextIndex } = parsePolylineAsMesh(tokens, j, layerName, colorIndex, trueColor, layers, "POLYMESH");
+          const { entity, nextIndex } = parsePolylineAsMesh(tokens, j, layerName, colorIndex, trueColor, extrusion, hasExplicitExtrusion, layers, "POLYMESH");
           supported.push(entity);
           i = nextIndex;
         } else {

@@ -11,6 +11,7 @@ import { parseDxf } from "./dxf/parseDxf.js";
 import { resolveColor } from "./dxf/colors.js";
 import { extractAllTriangles } from "./dxf/geometry.js";
 import { convertDxfToGlb } from "./dxf/convertDxfToGlb.js";
+import { convertStepJob } from "./converterProcessor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(__dirname, "dxf", "fixtures");
@@ -145,6 +146,26 @@ test("extractAllTriangles: layer-color fixture triangles have correct material k
   assert.equal(ceilTris[0]!.colorHex, "#00ff00"); // entity trueColor 65280
 });
 
+test("parseDxf: non-default extrusion is transformed from OCS to WCS", () => {
+  const result = parseDxf(fix("test-ocs-extrusion.dxf"));
+  const face = result.entities.supported[0]!;
+  assert.equal(face.type, "3DFACE");
+  assert.equal(face.hasExplicitExtrusion, true);
+  assert.equal(face.ocsApplied, true);
+  if (face.type !== "3DFACE") assert.fail("expected 3DFACE");
+  assert.deepEqual(face.v1.map((value) => Math.round(value)), [-1, 0, 0]);
+  assert.deepEqual(face.v2.map((value) => Math.round(value)), [0, 0, 1]);
+});
+
+test("BYBLOCK geometry inherits a simple INSERT ACI colour", () => {
+  const result = parseDxf(fix("test-byblock-color.dxf"));
+  const block = result.blocks.BYBLOCK_TRIANGLE!;
+  assert.equal(block.supported[0]?.color.source, "byblock");
+  const inherited = resolveColor(result.entities.inserts[0]!.colorIndex, null, "0", result.layers);
+  const triangles = extractAllTriangles(block.supported, inherited);
+  assert.equal(triangles[0]?.colorHex, "#0000ff");
+});
+
 // ─── Integration: convertDxfToGlb ────────────────────────────────────────────
 
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -185,6 +206,16 @@ test("convertDxfToGlb: 3DFACE fixture produces all output files", async () => {
     const stats = JSON.parse(await fs.promises.readFile(out.statsPath, "utf8"));
     assert.equal(stats.sourceFormat, "dxf");
     assert.equal(stats.converterBackend, "dxf-js");
+    assert.ok(["applied", "skipped-not-smaller"].includes(stats.optimization.status), stats.optimization.message);
+    assert.ok(stats.optimization.message, "meshopt outcome must be explained");
+    assert.equal(stats.optimization.validation.passed, true);
+    assert.ok(stats.optimization.validation.gates.includes("node extras"));
+    assert.ok(stats.optimization.validation.gates.includes("material names and PBR factors"));
+
+    const optimizationReport = JSON.parse(await fs.promises.readFile(out.dxfOptimizationReportPath, "utf8"));
+    assert.equal(optimizationReport.glb.rawSizeBytes, stats.optimization.rawSizeBytes);
+    assert.equal(optimizationReport.glb.displaySizeBytes, stats.optimization.displaySizeBytes);
+    assert.equal(optimizationReport.meshopt.status, stats.optimization.status);
   });
 });
 
@@ -223,6 +254,69 @@ test("convertDxfToGlb: layer-color fixture reports ok status", async () => {
     assert.equal(report.conversionStatus, "ok");
     assert.equal(report.entityCounts["3DFACE"], 3);
     assert.ok(report.layerCount >= 3);
+  });
+});
+
+test("converterProcessor invokes dxf-js internally and returns normal artifacts", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertStepJob({
+      sourcePath: fix("test-3dface.dxf"),
+      outputDir: dir,
+      slug: "processor-dxf",
+      converterBackend: "dxf-js",
+      converterCli: "unused",
+      xcafConverterBin: "unused",
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "meshopt",
+    });
+    assert.ok(out.formatReportPath);
+    assert.ok(out.dxfOptimizationReportPath);
+    for (const name of ["display.glb", "manifest.json", "stats.json", "format-report.json", "dxf-optimization-report.json", "material-debug.json", "conversion.log"]) {
+      const stat = await fs.promises.stat(path.join(dir, "processor-dxf", name));
+      assert.ok(stat.isFile(), `${name} should be produced`);
+    }
+    assert.ok((await fs.promises.stat(out.displayGlbPath)).size > 0);
+  });
+});
+
+test("convertDxfToGlb: OCS report records transformed extrusion", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({ sourcePath: fix("test-ocs-extrusion.dxf"), outputDir: dir, slug: "test-ocs" });
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+    assert.equal(report.ocs.explicitExtrusionEntityCount, 1);
+    assert.equal(report.ocs.transformedEntityCount, 1);
+  });
+});
+
+test("convertDxfToGlb: BYBLOCK INSERT colour is present in generated materials", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({ sourcePath: fix("test-byblock-color.dxf"), outputDir: dir, slug: "test-byblock" });
+    const materialDebug = JSON.parse(await fs.promises.readFile(out.materialDebugPath, "utf8"));
+    assert.ok(materialDebug.materials.some((material: { colorHex: string }) => material.colorHex === "#0000ff"));
+  });
+});
+
+test("convertDxfToGlb: mixed supported mesh and ACIS succeeds with partial warning", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({ sourcePath: fix("test-mixed-mesh-acis.dxf"), outputDir: dir, slug: "test-mixed" });
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+    assert.equal(report.conversionStatus, "partial-with-warnings");
+    assert.equal(report.acisEntityCount, 1);
+    assert.match(report.warnings.join(" "), /skipped/i);
+  });
+});
+
+test("convertDxfToGlb: MESH-only input is reported and rejected without fake geometry", async () => {
+  await withTmpDir(async (dir) => {
+    await assert.rejects(
+      () => convertDxfToGlb({ sourcePath: fix("test-mesh-only.dxf"), outputDir: dir, slug: "test-mesh-only" }),
+      /no 3D mesh geometry|no usable 3D geometry/i
+    );
+    const report = JSON.parse(await fs.promises.readFile(path.join(dir, "test-mesh-only", "format-report.json"), "utf8"));
+    assert.equal(report.entityCounts.MESH, 1);
+    assert.equal(report.conversionStatus, "no-usable-3d-geometry");
+    assert.match(report.warnings.join(" "), /detected but not yet triangulated/i);
   });
 });
 

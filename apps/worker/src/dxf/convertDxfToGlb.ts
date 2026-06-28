@@ -8,6 +8,7 @@ import { extractAllTriangles } from "./geometry.js";
 import { optimizeMesh } from "./meshOptimize.js";
 import { buildGlb } from "./buildGlb.js";
 import { buildFormatReport, buildOptimizationReport, buildStats, buildManifest } from "./reports.js";
+import { optimizeDisplayGlb } from "../glbOptimizer.js";
 
 async function appendLog(logPath: string, msg: string): Promise<void> {
   await fs.promises.appendFile(logPath, msg).catch(() => {});
@@ -16,12 +17,14 @@ async function appendLog(logPath: string, msg: string): Promise<void> {
 export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDxfOutput> {
   const totalStart = Date.now();
   const { sourcePath, outputDir, slug } = input;
+  const glbOptimizationMode = input.glbOptimizationMode ?? "meshopt";
 
   const jobDir = path.join(outputDir, slug);
   await fs.promises.mkdir(jobDir, { recursive: true });
 
   const logPath = path.join(jobDir, "conversion.log");
   const displayGlbPath = path.join(jobDir, "display.glb");
+  const rawGlbPath = path.join(jobDir, "display.raw.glb");
   const manifestPath = path.join(jobDir, "manifest.json");
   const statsPath = path.join(jobDir, "stats.json");
   const materialDebugPath = path.join(jobDir, "material-debug.json");
@@ -29,6 +32,8 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
   const dxfOptimizationReportPath = path.join(jobDir, "dxf-optimization-report.json");
 
   await fs.promises.writeFile(logPath, "");
+  throwIfAborted(input.signal);
+  await input.onProgress?.(15, "Converting DXF - parsing geometry");
 
   const sourceStat = await fs.promises.stat(sourcePath);
   const sourceFileSizeBytes = sourceStat.size;
@@ -83,7 +88,7 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
   }
 
   if (formatReport.conversionStatus === "no-usable-3d-geometry") {
-    const warning = formatReport.warnings[0] ?? "No usable 3D geometry.";
+    const warning = `No usable 3D geometry. ${formatReport.warnings.join(" ")}`;
     await appendLog(logPath, `[DXF] ERROR: ${warning}\n`);
     throw new Error(`DXF conversion failed: ${warning}`);
   }
@@ -116,42 +121,72 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
 
   // ── Build GLB ─────────────────────────────────────────────────────────────
   const glbStart = Date.now();
+  throwIfAborted(input.signal);
+  await input.onProgress?.(55, "Converting DXF - building GLB");
   const glbResult = await buildGlb(parsedDxf);
   const glbBuildMs = Date.now() - glbStart;
   const rawGlbSizeBytes = glbResult.glbBytes.length;
 
-  await fs.promises.writeFile(displayGlbPath, glbResult.glbBytes);
-  const totalMs = Date.now() - totalStart;
+  await fs.promises.writeFile(rawGlbPath, glbResult.glbBytes);
 
   await appendLog(
     logPath,
     `[DXF] GLB built: ${glbResult.nodeCount} nodes, ${glbResult.materialCount} materials, ${glbResult.triangleCount} triangles, ${rawGlbSizeBytes} bytes\n`
   );
+  throwIfAborted(input.signal);
+  await input.onProgress?.(80, glbOptimizationMode === "meshopt" ? "Optimizing DXF GLB" : "Publishing DXF GLB");
+  const meshoptStart = Date.now();
+  const optimization = await optimizeDisplayGlb({
+    requestedMode: glbOptimizationMode,
+    rawGlbPath,
+    displayGlbPath,
+    conversionLogPath: logPath,
+  });
+  const meshoptMs = Date.now() - meshoptStart;
+  const totalMs = Date.now() - totalStart;
+  await appendLog(logPath, `[DXF] GLB optimization: ${optimization.status}; ${optimization.rawSizeBytes} -> ${optimization.displaySizeBytes} bytes\n`);
   await appendLog(logPath, `[DXF] Completed in ${(totalMs / 1000).toFixed(2)}s\n`);
 
   // ── Material debug ────────────────────────────────────────────────────────
   const materialsByLayer: Record<string, string[]> = {};
-  for (const layer of Object.values(parsedDxf.layers)) {
-    // Collect unique colours used per layer (approximation: from format report)
-    materialsByLayer[layer.name] = [];
+  for (const material of glbResult.materials) {
+    const colors = materialsByLayer[material.layer] ?? [];
+    if (!colors.includes(material.colorHex)) colors.push(material.colorHex);
+    materialsByLayer[material.layer] = colors;
   }
-  const materialDebug = { converterBackend: "dxf-js", materialRules: "dxf-layer-color", materials: [] };
+  const materialDebug = { converterBackend: "dxf-js", materialRules: "dxf-layer-color-with-byblock-inheritance", materials: glbResult.materials };
   await fs.promises.writeFile(materialDebugPath, JSON.stringify(materialDebug, null, 2) + "\n");
 
   // ── Stats ─────────────────────────────────────────────────────────────────
   const statsObj = buildStats({
     sourcePath,
     sourceFileSizeBytes,
-    glbSizeBytes: rawGlbSizeBytes,
+    glbSizeBytes: optimization.displaySizeBytes,
     parsedDxf,
     triangleCount: glbResult.triangleCount,
     nodeCount: glbResult.nodeCount,
     materialCount: glbResult.materialCount,
   });
+  Object.assign(statsObj, {
+    optimization: {
+      requestedMode: optimization.requestedMode,
+      status: optimization.status,
+      rawSizeBytes: optimization.rawSizeBytes,
+      displaySizeBytes: optimization.displaySizeBytes,
+      reductionPercent: optimization.rawSizeBytes > 0
+        ? Number(((1 - optimization.displaySizeBytes / optimization.rawSizeBytes) * 100).toFixed(2))
+        : 0,
+      validation: optimization.validation,
+      fallbackUsed: optimization.fallbackUsed,
+      message: optimization.message,
+    },
+    warningMessages: formatReport.warnings,
+  });
   await fs.promises.writeFile(statsPath, JSON.stringify(statsObj, null, 2) + "\n");
 
   // ── Manifest ──────────────────────────────────────────────────────────────
-  const manifest = buildManifest({ slug, glbSizeBytes: rawGlbSizeBytes, parsedDxf, hasMeshoptReport: false });
+  const manifest = buildManifest({ slug, glbSizeBytes: optimization.displaySizeBytes, parsedDxf, hasMeshoptReport: optimization.status === "applied" });
+  Object.assign(manifest, { optimization: (statsObj as Record<string, unknown>).optimization });
   await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 
   // ── DXF optimization report ───────────────────────────────────────────────
@@ -160,9 +195,16 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
     parsedDxf,
     stats: combinedStats,
     rawGlbSizeBytes,
-    displayGlbSizeBytes: rawGlbSizeBytes, // same in Phase 2A (no meshopt yet for DXF)
+    displayGlbSizeBytes: optimization.displaySizeBytes,
     materialsByLayer,
-    timing: { parseMs, meshOptimizationMs, glbBuildMs, totalMs },
+    timing: { parseMs, meshOptimizationMs, glbBuildMs, meshoptMs, totalMs },
+    meshopt: {
+      requestedMode: optimization.requestedMode,
+      status: optimization.status,
+      validationPassed: optimization.validation.passed,
+      fallbackUsed: optimization.fallbackUsed,
+      message: optimization.message,
+    },
     warnings: formatReport.warnings,
   });
   await fs.promises.writeFile(dxfOptimizationReportPath, JSON.stringify(optReport, null, 2) + "\n");
@@ -176,4 +218,8 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
     dxfOptimizationReportPath,
     conversionLogPath: logPath,
   };
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException("DXF conversion cancelled.", "AbortError");
 }

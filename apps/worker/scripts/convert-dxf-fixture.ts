@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { convertDxfToGlb } from "../src/dxf/convertDxfToGlb.js";
+import { convertStepJob } from "../src/converterProcessor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,7 +39,17 @@ async function main(): Promise<void> {
   console.log("");
 
   try {
-    const result = await convertDxfToGlb({ sourcePath: inputPath, outputDir, slug });
+    const result = await convertStepJob({
+      sourcePath: inputPath,
+      outputDir,
+      slug,
+      converterBackend: "dxf-js",
+      converterCli: "",
+      xcafConverterBin: "",
+      xcafColourMode: "xcaf-baseline",
+      quality: "medium",
+      glbOptimizationMode: "meshopt",
+    });
     console.log("Artifacts written:");
     for (const [key, filePath] of Object.entries(result)) {
       const stat = fs.statSync(filePath).size;

@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/*.test.ts",
     "dev": "tsx src/worker.ts",
-    "start": "tsx src/worker.ts"
+    "start": "tsx src/worker.ts",
+    "dxf:convert": "tsx scripts/convert-dxf-fixture.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
