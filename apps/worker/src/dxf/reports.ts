@@ -2,9 +2,11 @@
 import path from "node:path";
 import type {
   ParsedDxf, DxfFormatReport, DxfOptimizationReport, DxfConversionStatus,
-  OptimizationStats,
+  OptimizationStats, DxfBlockTraversalSummary, DxfBlockReuseStats,
 } from "./types.js";
 import { resolveColor } from "./colors.js";
+import { analyzeBlockTraversal } from "./blockTraversal.js";
+import { isDefaultExtrusion } from "./ocs.js";
 
 // ─── Format Report ────────────────────────────────────────────────────────────
 
@@ -12,9 +14,11 @@ export function buildFormatReport(params: {
   parsedDxf: ParsedDxf;
   sourcePath: string;
   sourceFileSizeBytes: number;
+  traversal?: DxfBlockTraversalSummary;
 }): DxfFormatReport {
   const { parsedDxf, sourcePath, sourceFileSizeBytes } = params;
   const { entities, blocks, layers, dxfVersion } = parsedDxf;
+  const traversal = params.traversal ?? analyzeBlockTraversal(parsedDxf);
 
   // Entity counts
   const entityCounts = {
@@ -83,7 +87,7 @@ export function buildFormatReport(params: {
   const hasInserts = entities.inserts.length > 0;
   const hasAcis = acisEntityCount > 0;
   // Also check if any block definitions have geometry (accessed via inserts)
-  const anyBlockHasGeometry = hasInserts && entities.inserts.some((insert) => (blocks[insert.blockName]?.triangleCount ?? 0) > 0);
+  const anyBlockHasGeometry = hasInserts && traversal.reachableTriangleCount > 0;
   const hasUsable3D = hasSupportedEntities || anyBlockHasGeometry;
 
   let conversionStatus: DxfConversionStatus;
@@ -91,23 +95,27 @@ export function buildFormatReport(params: {
   let exportAdvice: string | null = null;
 
   const meshEntityCount = entityCounts.MESH;
+  const meshEntities = allSupported.filter((entity) => entity.type === "MESH");
+  const meshTriangleCount = meshEntities.reduce((sum, entity) => sum + entity.triangleCount, 0);
+  const invalidMeshFaceCount = meshEntities.reduce((sum, entity) => sum + entity.invalidFaceCount, 0);
   if (meshEntityCount > 0) {
-    warnings.push(
-      `${meshEntityCount} MESH entity/entities (DXF R2010+) detected but not yet triangulated. ` +
-        "Full MESH support is planned for a future release."
-    );
+    if (meshTriangleCount > 0) {
+      warnings.push(`${meshEntityCount} MESH entity/entities triangulated from R2010+ level-0 face lists (${meshTriangleCount} triangle(s)).`);
+    }
+    if (invalidMeshFaceCount > 0) {
+      warnings.push(`${invalidMeshFaceCount} invalid or incomplete MESH face-list item(s) were skipped.`);
+    }
   }
 
   const extrusionEntities = [...allSupported, ...allInserts].filter((entity) => entity.hasExplicitExtrusion);
   const transformedEntityCount = extrusionEntities.filter((entity) => entity.ocsApplied).length;
-  const unsupportedEntityCount = extrusionEntities.filter((entity) => entity.type === "MESH").length;
+  const unsupportedEntityCount = extrusionEntities.filter(
+    (entity) => !entity.ocsApplied && !isDefaultExtrusion(entity.extrusion)
+  ).length;
   if (unsupportedEntityCount > 0) {
     warnings.push(`${unsupportedEntityCount} unsupported MESH entity/entities include OCS extrusion data; orientation is reported but geometry is not converted.`);
   }
-  const nestedInsertCount = Object.values(blocks).reduce((sum, block) => sum + block.inserts.length, 0);
-  if (nestedInsertCount > 0) {
-    warnings.push(`${nestedInsertCount} nested block INSERT(s) detected. Nested block rendering and recursive BYBLOCK inheritance are deferred to Phase 2C.`);
-  }
+  warnings.push(...traversal.cycleWarnings, ...traversal.depthLimitWarnings, ...traversal.missingBlockWarnings);
 
   if (!hasUsable3D && hasAcis) {
     conversionStatus = "acis-only-hard-error";
@@ -133,6 +141,8 @@ export function buildFormatReport(params: {
       `${acisEntityCount} ACIS solid(s) (3DSOLID/BODY/REGION) were detected and skipped. ` +
         `Re-export from Revit with "Solids (3D views)" set to "Polymesh" to include them.`
     );
+  } else if (traversal.cycleWarnings.length > 0 || traversal.depthLimitWarnings.length > 0 || invalidMeshFaceCount > 0) {
+    conversionStatus = "partial-with-warnings";
   } else {
     conversionStatus = "ok";
   }
@@ -153,10 +163,22 @@ export function buildFormatReport(params: {
     blocks: blockSummaries,
     insertCount: entities.inserts.length,
     insertsByBlock,
+    nestedInsertCount: traversal.nestedInsertCount,
+    maxBlockNestingDepth: traversal.maxBlockNestingDepth,
+    blockCycleWarningCount: traversal.cycleWarnings.length,
+    blockDepthLimitWarningCount: traversal.depthLimitWarnings.length,
+    mesh: {
+      triangulationStatus: meshEntityCount === 0 ? "not-present" : meshTriangleCount > 0 ? "triangulated" : "detected-invalid",
+      entityCount: meshEntityCount,
+      triangulatedEntityCount: meshEntities.filter((entity) => entity.triangleCount > 0).length,
+      triangleCount: meshTriangleCount,
+      invalidFaceCount: invalidMeshFaceCount,
+    },
     ocs: {
       explicitExtrusionEntityCount: extrusionEntities.length,
       transformedEntityCount,
       unsupportedEntityCount,
+      unsupportedWarningCount: unsupportedEntityCount,
     },
     conversionStatus,
     warnings,
@@ -181,14 +203,23 @@ export function buildOptimizationReport(params: {
     meshoptMs: number;
   };
   meshopt: DxfOptimizationReport["meshopt"];
+  traversal: DxfBlockTraversalSummary;
+  blockReuse: DxfBlockReuseStats;
   warnings: string[];
 }): DxfOptimizationReport {
-  const { parsedDxf, stats, rawGlbSizeBytes, displayGlbSizeBytes, materialsByLayer, timing, warnings, sourcePath, meshopt } = params;
+  const { parsedDxf, stats, rawGlbSizeBytes, displayGlbSizeBytes, materialsByLayer, timing, warnings, sourcePath, meshopt, traversal, blockReuse } = params;
   const blocks = parsedDxf.blocks;
 
   const uniqueBlockDefinitions = Object.keys(blocks).length;
-  const blockDefinitionsWithGeometry = Object.values(blocks).filter((b) => b.triangleCount > 0).length;
-  const totalInstanceCount = parsedDxf.entities.inserts.length;
+  function blockHasReachableGeometry(blockName: string, stack: string[] = []): boolean {
+    if (stack.includes(blockName)) return false;
+    const block = blocks[blockName];
+    if (!block) return false;
+    if (block.triangleCount > 0) return true;
+    return block.inserts.some((insert) => blockHasReachableGeometry(insert.blockName, [...stack, blockName]));
+  }
+  const blockDefinitionsWithGeometry = Object.keys(blocks).filter((name) => blockHasReachableGeometry(name)).length;
+  const totalInstanceCount = traversal.renderedInsertCount;
 
   const reductionPercent =
     displayGlbSizeBytes !== null && rawGlbSizeBytes > 0
@@ -210,8 +241,12 @@ export function buildOptimizationReport(params: {
     blocks: {
       uniqueBlockDefinitions,
       totalInstanceCount,
+      nestedInstanceCount: traversal.nestedInsertCount,
       blockDefinitionsWithGeometry,
       emptyBlockDefinitions: uniqueBlockDefinitions - blockDefinitionsWithGeometry,
+      uniqueRenderedMeshes: blockReuse.uniqueRenderedMeshes,
+      reusedBlockMeshCount: blockReuse.reusedBlockMeshCount,
+      geometryDuplicationAvoidedTriangles: blockReuse.geometryDuplicationAvoidedTriangles,
     },
     materials: {
       uniqueMaterials: Object.values(materialsByLayer).reduce((s, v) => s + v.length, 0),

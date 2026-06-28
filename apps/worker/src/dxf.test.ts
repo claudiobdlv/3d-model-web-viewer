@@ -6,11 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { NodeIO, getBounds } from "@gltf-transform/core";
 
 import { parseDxf } from "./dxf/parseDxf.js";
 import { resolveColor } from "./dxf/colors.js";
 import { extractAllTriangles } from "./dxf/geometry.js";
 import { convertDxfToGlb } from "./dxf/convertDxfToGlb.js";
+import { buildGlb } from "./dxf/buildGlb.js";
+import { analyzeBlockTraversal } from "./dxf/blockTraversal.js";
 import { convertStepJob } from "./converterProcessor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -18,6 +21,13 @@ const FIXTURES = path.join(__dirname, "dxf", "fixtures");
 
 function fix(name: string): string {
   return path.join(FIXTURES, name);
+}
+
+function assertVectorClose(actual: number[], expected: number[], tolerance = 1e-6): void {
+  assert.equal(actual.length, expected.length);
+  actual.forEach((value, index) => {
+    assert.ok(Math.abs(value - expected[index]!) <= tolerance, `${value} != ${expected[index]} at index ${index}`);
+  });
 }
 
 // ─── Unit: parseDxf ──────────────────────────────────────────────────────────
@@ -157,6 +167,87 @@ test("parseDxf: non-default extrusion is transformed from OCS to WCS", () => {
   assert.deepEqual(face.v2.map((value) => Math.round(value)), [0, 0, 1]);
 });
 
+test("parseDxf: representative OCS face has stable transformed bounds", () => {
+  const result = parseDxf(fix("test-ocs-face-transform.dxf"));
+  const triangles = extractAllTriangles(result.entities.supported);
+  const points = triangles.flatMap((triangle) => triangle.v);
+  const min = [0, 1, 2].map((axis) => Math.min(...points.map((point) => point[axis]!)));
+  const max = [0, 1, 2].map((axis) => Math.max(...points.map((point) => point[axis]!)));
+  assertVectorClose(min, [-2, 0, 0]);
+  assertVectorClose(max, [0, 0, 3]);
+});
+
+test("parseDxf: R2010+ MESH face list triangulates a quad", () => {
+  const result = parseDxf(fix("test-mesh-only.dxf"));
+  const mesh = result.entities.supported[0];
+  assert.ok(mesh && mesh.type === "MESH");
+  assert.equal(mesh.vertexCount, 4);
+  assert.equal(mesh.positions.length, 4);
+  assert.deepEqual(mesh.faces, [[0, 1, 2, 3]]);
+  assert.equal(mesh.invalidFaceCount, 0);
+  assert.equal(mesh.triangleCount, 2);
+  assert.equal(extractAllTriangles([mesh]).length, 2);
+});
+
+test("nested BLOCK traversal composes hierarchy, colours, transforms, and mesh reuse", async () => {
+  const parsed = parseDxf(fix("test-nested-blocks.dxf"));
+  const traversal = analyzeBlockTraversal(parsed);
+  assert.equal(traversal.nestedInsertCount, 4);
+  assert.equal(traversal.renderedInsertCount, 6);
+  assert.equal(traversal.maxBlockNestingDepth, 3);
+  assert.deepEqual(traversal.cycleWarnings, []);
+
+  const result = await buildGlb(parsed, { traversal });
+  assert.equal(result.triangleCount, 6);
+  assert.equal(result.blockReuse.uniqueRenderedMeshes, 1);
+  assert.equal(result.blockReuse.reusedBlockMeshCount, 1);
+  assert.equal(result.blockReuse.geometryDuplicationAvoidedTriangles, 3);
+  assert.deepEqual(new Set(result.materials.map((material) => material.colorHex)), new Set(["#0000ff", "#00ff00", "#ff0000"]));
+
+  const document = await new NodeIO().readBinary(result.glbBytes);
+  const scene = document.getRoot().listScenes()[0]!;
+  const bounds = getBounds(scene);
+  assertVectorClose(bounds.min, [86, 10, 0]);
+  assertVectorClose(bounds.max, [206, 10.5, 0]);
+  const leafNodes = document.getRoot().listNodes().filter((node) => node.getExtras().blockName === "LEAF");
+  assert.equal(leafNodes.length, 2);
+  assert.ok(leafNodes.every((node) => node.getExtras().nestingDepth === 3));
+  assert.ok(leafNodes.every((node) => node.getExtras().displayName === "LEAF"));
+});
+
+test("identical differently named block definitions share direct mesh data", async () => {
+  const parsed = parseDxf(fix("test-block-insert.dxf"));
+  const original = parsed.blocks.TRIANGLE!;
+  parsed.blocks.TRIANGLE_COPY = { ...original, name: "TRIANGLE_COPY" };
+  parsed.entities.inserts.push({
+    ...parsed.entities.inserts[0]!,
+    handle: "COPY_INSERT",
+    blockName: "TRIANGLE_COPY",
+    position: [30, 0, 0],
+  });
+  const result = await buildGlb(parsed);
+  assert.equal(result.triangleCount, 4);
+  assert.equal(result.blockReuse.uniqueRenderedMeshes, 1);
+  assert.equal(result.blockReuse.reusedBlockMeshCount, 3);
+  assert.equal(result.blockReuse.geometryDuplicationAvoidedTriangles, 3);
+});
+
+test("recursive block traversal detects cycles without recursing forever", () => {
+  const traversal = analyzeBlockTraversal(parseDxf(fix("test-block-cycle.dxf")));
+  assert.equal(traversal.renderedInsertCount, 2);
+  assert.equal(traversal.maxBlockNestingDepth, 2);
+  assert.equal(traversal.cycleWarnings.length, 1);
+  assert.match(traversal.cycleWarnings[0]!, /A -> B -> A/);
+});
+
+test("recursive block traversal enforces the default depth limit", () => {
+  const traversal = analyzeBlockTraversal(parseDxf(fix("test-block-depth-limit.dxf")));
+  assert.equal(traversal.maxDepthLimit, 10);
+  assert.equal(traversal.maxBlockNestingDepth, 10);
+  assert.equal(traversal.depthLimitWarnings.length, 1);
+  assert.match(traversal.depthLimitWarnings[0]!, /depth limit 10 exceeded/i);
+});
+
 test("BYBLOCK geometry inherits a simple INSERT ACI colour", () => {
   const result = parseDxf(fix("test-byblock-color.dxf"));
   const block = result.blocks.BYBLOCK_TRIANGLE!;
@@ -241,6 +332,11 @@ test("convertDxfToGlb: block-insert fixture reports block reuse", async () => {
     assert.deepEqual(report.insertsByBlock, { TRIANGLE: 3 });
     assert.equal(report.blocks[0].name, "TRIANGLE");
 
+    const optimizationReport = JSON.parse(await fs.promises.readFile(out.dxfOptimizationReportPath, "utf8"));
+    assert.equal(optimizationReport.blocks.totalInstanceCount, 3);
+    assert.equal(optimizationReport.blocks.reusedBlockMeshCount, 2);
+    assert.equal(optimizationReport.blocks.geometryDuplicationAvoidedTriangles, 2);
+
     // GLB must be present and non-empty
     const glbStat = await fs.promises.stat(out.displayGlbPath);
     assert.ok(glbStat.size > 0, "display.glb must be non-empty");
@@ -289,6 +385,67 @@ test("convertDxfToGlb: OCS report records transformed extrusion", async () => {
   });
 });
 
+test("convertDxfToGlb: OCS INSERT rotation and scale produce stable world bounds", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({
+      sourcePath: fix("test-ocs-insert-transform.dxf"),
+      outputDir: dir,
+      slug: "test-ocs-insert",
+      glbOptimizationMode: "disabled",
+    });
+    const document = await new NodeIO().read(out.displayGlbPath);
+    const bounds = getBounds(document.getRoot().listScenes()[0]!);
+    assertVectorClose(bounds.min, [-4, 6, 5]);
+    assertVectorClose(bounds.max, [-1, 6, 7]);
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+    assert.equal(report.ocs.explicitExtrusionEntityCount, 1);
+    assert.equal(report.ocs.transformedEntityCount, 1);
+    assert.equal(report.ocs.unsupportedWarningCount, 0);
+  });
+});
+
+test("convertDxfToGlb: nested blocks report hierarchy, guards, colours, and reuse", async () => {
+  await withTmpDir(async (dir) => {
+    const out = await convertDxfToGlb({
+      sourcePath: fix("test-nested-blocks.dxf"),
+      outputDir: dir,
+      slug: "test-nested",
+      glbOptimizationMode: "disabled",
+    });
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+    assert.equal(report.nestedInsertCount, 4);
+    assert.equal(report.maxBlockNestingDepth, 3);
+    assert.equal(report.blockCycleWarningCount, 0);
+    assert.equal(report.blockDepthLimitWarningCount, 0);
+    const optimization = JSON.parse(await fs.promises.readFile(out.dxfOptimizationReportPath, "utf8"));
+    assert.equal(optimization.blocks.totalInstanceCount, 6);
+    assert.equal(optimization.blocks.nestedInstanceCount, 4);
+    assert.equal(optimization.blocks.blockDefinitionsWithGeometry, 3);
+    assert.equal(optimization.blocks.emptyBlockDefinitions, 0);
+    assert.equal(optimization.blocks.reusedBlockMeshCount, 1);
+    assert.equal(optimization.blocks.geometryDuplicationAvoidedTriangles, 3);
+    const log = await fs.promises.readFile(out.conversionLogPath, "utf8");
+    assert.match(log, /Nested block traversal: 4 nested INSERT/);
+    assert.match(log, /Block mesh reuse: 1 reuse/);
+  });
+});
+
+test("convertDxfToGlb: cycle and depth guards are reported and logged", async () => {
+  await withTmpDir(async (dir) => {
+    for (const [fixture, slug, warningField, warningPattern] of [
+      ["test-block-cycle.dxf", "cycle", "blockCycleWarningCount", /circular block reference/i],
+      ["test-block-depth-limit.dxf", "depth", "blockDepthLimitWarningCount", /depth limit 10 exceeded/i],
+    ] as const) {
+      const out = await convertDxfToGlb({ sourcePath: fix(fixture), outputDir: dir, slug, glbOptimizationMode: "disabled" });
+      const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
+      assert.equal(report.conversionStatus, "partial-with-warnings");
+      assert.equal(report[warningField], 1);
+      assert.match(report.warnings.join(" "), warningPattern);
+      assert.match(await fs.promises.readFile(out.conversionLogPath, "utf8"), warningPattern);
+    }
+  });
+});
+
 test("convertDxfToGlb: BYBLOCK INSERT colour is present in generated materials", async () => {
   await withTmpDir(async (dir) => {
     const out = await convertDxfToGlb({ sourcePath: fix("test-byblock-color.dxf"), outputDir: dir, slug: "test-byblock" });
@@ -307,16 +464,18 @@ test("convertDxfToGlb: mixed supported mesh and ACIS succeeds with partial warni
   });
 });
 
-test("convertDxfToGlb: MESH-only input is reported and rejected without fake geometry", async () => {
+test("convertDxfToGlb: valid R2010+ MESH fixture is triangulated and reported", async () => {
   await withTmpDir(async (dir) => {
-    await assert.rejects(
-      () => convertDxfToGlb({ sourcePath: fix("test-mesh-only.dxf"), outputDir: dir, slug: "test-mesh-only" }),
-      /no 3D mesh geometry|no usable 3D geometry/i
-    );
-    const report = JSON.parse(await fs.promises.readFile(path.join(dir, "test-mesh-only", "format-report.json"), "utf8"));
+    const out = await convertDxfToGlb({ sourcePath: fix("test-mesh-only.dxf"), outputDir: dir, slug: "test-mesh-only" });
+    const report = JSON.parse(await fs.promises.readFile(out.formatReportPath, "utf8"));
     assert.equal(report.entityCounts.MESH, 1);
-    assert.equal(report.conversionStatus, "no-usable-3d-geometry");
-    assert.match(report.warnings.join(" "), /detected but not yet triangulated/i);
+    assert.equal(report.conversionStatus, "ok");
+    assert.equal(report.mesh.triangulationStatus, "triangulated");
+    assert.equal(report.mesh.triangleCount, 2);
+    assert.equal(report.mesh.invalidFaceCount, 0);
+    const optimization = JSON.parse(await fs.promises.readFile(out.dxfOptimizationReportPath, "utf8"));
+    assert.equal(optimization.geometry.rawTriangleCount, 2);
+    assert.match(await fs.promises.readFile(out.conversionLogPath, "utf8"), /MESH handling: triangulated/);
   });
 });
 

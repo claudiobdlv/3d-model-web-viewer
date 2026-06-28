@@ -268,14 +268,21 @@ function parseMeshEntity(
     hasExplicitExtrusion: false,
     ocsApplied: false,
     color: { source: "default", rgb: [200, 200, 200], hex: "#c8c8c8" },
+    version: 0,
+    blendCrease: false,
     subdivisionLevel: 0,
     vertexCount: 0,
     faceListCount: 0,
+    positions: [],
+    faces: [],
+    invalidFaceCount: 0,
     triangleCount: 0,
-    note: "MESH (R2010+) detected — full triangulation not yet implemented.",
+    note: "MESH (R2010+) level-0 face list parsed.",
   };
+  const entityTokens: DxfToken[] = [];
   while (i < tokens.length && tokens[i]!.code !== 0) {
     const { code, value } = tokens[i]!;
+    entityTokens.push(tokens[i]!);
     switch (code) {
       case 5: mesh.handle = value; break;
       case 8: mesh.layer = value; break;
@@ -284,11 +291,66 @@ function parseMeshEntity(
       case 210: mesh.extrusion[0] = parseFloat(value); mesh.hasExplicitExtrusion = true; break;
       case 220: mesh.extrusion[1] = parseFloat(value); mesh.hasExplicitExtrusion = true; break;
       case 230: mesh.extrusion[2] = parseFloat(value); mesh.hasExplicitExtrusion = true; break;
-      case 71: mesh.subdivisionLevel = parseInt(value, 10); break;
-      case 72: mesh.vertexCount = parseInt(value, 10); break;
+      case 71: mesh.version = parseInt(value, 10); break;
+      case 72: mesh.blendCrease = parseInt(value, 10) !== 0; break;
+      case 91: mesh.subdivisionLevel = parseInt(value, 10); break;
+      case 92: mesh.vertexCount = parseInt(value, 10); break;
       case 93: mesh.faceListCount = parseInt(value, 10); break;
     }
     i++;
+  }
+
+  const vertexCountIndex = entityTokens.findIndex((token) => token.code === 92);
+  const faceListCountIndex = entityTokens.findIndex((token) => token.code === 93);
+  if (vertexCountIndex >= 0 && faceListCountIndex > vertexCountIndex) {
+    let current: [number, number, number] | null = null;
+    for (let j = vertexCountIndex + 1; j < faceListCountIndex; j++) {
+      const token = entityTokens[j]!;
+      if (token.code === 10) {
+        if (current) mesh.positions.push(current);
+        current = [parseFloat(token.value), 0, 0];
+      } else if (token.code === 20 && current) {
+        current[1] = parseFloat(token.value);
+      } else if (token.code === 30 && current) {
+        current[2] = parseFloat(token.value);
+      }
+    }
+    if (current) mesh.positions.push(current);
+  }
+
+  const faceItems: number[] = [];
+  if (faceListCountIndex >= 0) {
+    for (let j = faceListCountIndex + 1; j < entityTokens.length && faceItems.length < mesh.faceListCount; j++) {
+      const token = entityTokens[j]!;
+      if (token.code === 90) faceItems.push(parseInt(token.value, 10));
+    }
+  }
+
+  for (let cursor = 0; cursor < faceItems.length;) {
+    const count = faceItems[cursor++] ?? 0;
+    if (count < 3 || cursor + count > faceItems.length) {
+      mesh.invalidFaceCount++;
+      break;
+    }
+    const face = faceItems.slice(cursor, cursor + count);
+    cursor += count;
+    if (face.some((index) => index < 0 || index >= mesh.positions.length)) {
+      mesh.invalidFaceCount++;
+      continue;
+    }
+    mesh.faces.push(face);
+    mesh.triangleCount += face.length - 2;
+  }
+
+  if (mesh.vertexCount !== mesh.positions.length || faceItems.length !== mesh.faceListCount) {
+    mesh.invalidFaceCount++;
+  }
+  if (mesh.hasExplicitExtrusion && !isDefaultExtrusion(mesh.extrusion)) {
+    mesh.positions = mesh.positions.map((position) => ocsToWcs(position, mesh.extrusion));
+    mesh.ocsApplied = true;
+  }
+  if (mesh.invalidFaceCount > 0) {
+    mesh.note = `MESH face list contains ${mesh.invalidFaceCount} invalid or incomplete item(s).`;
   }
   mesh.color = resolveColor(mesh.colorIndex, mesh.trueColor, mesh.layer, layers);
   return { entity: mesh, nextIndex: i };

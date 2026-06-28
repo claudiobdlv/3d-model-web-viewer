@@ -1,11 +1,19 @@
-// FormatIQ DXF — GLB builder using @gltf-transform/core
-// Produces a valid GLB from processed DXF scene data.
-import { Document, NodeIO, type Mesh, type Material } from "@gltf-transform/core";
-import type { ParsedDxf, MaterialGroup } from "./types.js";
+// FormatIQ DXF — recursive GLB builder using @gltf-transform/core.
+import { Document, NodeIO, type Material, type Mesh, type Node } from "@gltf-transform/core";
+import type {
+  DxfBlockReuseStats,
+  DxfBlockTraversalSummary,
+  DxfInsert,
+  MaterialGroup,
+  ParsedDxf,
+  ResolvedColor,
+  Triangle,
+} from "./types.js";
 import { extractAllTriangles } from "./geometry.js";
 import { optimizeMesh } from "./meshOptimize.js";
-import { insertRotationQuaternion } from "./blocks.js";
+import { hashBlockGeometry, insertRotationQuaternion } from "./blocks.js";
 import { resolveColor } from "./colors.js";
+import { analyzeBlockTraversal, DEFAULT_BLOCK_NESTING_LIMIT } from "./blockTraversal.js";
 
 export type BuildGlbResult = {
   glbBytes: Uint8Array;
@@ -13,107 +21,137 @@ export type BuildGlbResult = {
   materialCount: number;
   triangleCount: number;
   materials: { layer: string; colorHex: string; rgb: [number, number, number] }[];
+  traversal: DxfBlockTraversalSummary;
+  blockReuse: DxfBlockReuseStats;
 };
 
-export async function buildGlb(parsedDxf: ParsedDxf): Promise<BuildGlbResult> {
+export type BuildGlbOptions = {
+  maxBlockNestingDepth?: number;
+  traversal?: DxfBlockTraversalSummary;
+};
+
+export async function buildGlb(parsedDxf: ParsedDxf, options: BuildGlbOptions = {}): Promise<BuildGlbResult> {
+  const maxDepth = options.maxBlockNestingDepth ?? DEFAULT_BLOCK_NESTING_LIMIT;
+  const traversal = options.traversal ?? analyzeBlockTraversal(parsedDxf, maxDepth);
   const doc = new Document();
   const buf = doc.createBuffer();
   const scene = doc.createScene("DXF Scene");
   const root = doc.createNode("DXF Model").setExtras({ sourceFormat: "dxf" });
   scene.addChild(root);
 
-  // ── Material cache (shared across meshes) ──────────────────────────────────
   const materialCache = new Map<string, Material>();
-
   function getOrCreateMaterial(layer: string, colorHex: string, rgb: [number, number, number]): Material {
     const key = `${layer}|${colorHex}`;
-    let mat = materialCache.get(key);
-    if (!mat) {
-      const r = rgb[0] / 255;
-      const g = rgb[1] / 255;
-      const b = rgb[2] / 255;
-      mat = doc
+    let material = materialCache.get(key);
+    if (!material) {
+      material = doc
         .createMaterial(`Layer:${layer}${colorHex}`)
-        .setBaseColorFactor([r, g, b, 1.0])
+        .setBaseColorFactor([rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, 1])
         .setMetallicFactor(0)
         .setRoughnessFactor(0.8)
         .setExtras({ colorSource: "dxf", layer });
-      materialCache.set(key, mat);
+      materialCache.set(key, material);
     }
-    return mat;
+    return material;
   }
 
-  // ── Build a GLB Mesh from a list of MaterialGroups ─────────────────────────
   function buildMeshFromGroups(name: string, groups: MaterialGroup[]): Mesh | null {
     if (groups.length === 0) return null;
     const mesh = doc.createMesh(name);
     for (const group of groups) {
-      const posAcc = doc
-        .createAccessor()
-        .setType("VEC3")
-        .setArray(group.positions)
-        .setBuffer(buf);
-      const normAcc = doc
-        .createAccessor()
-        .setType("VEC3")
-        .setArray(group.normals)
-        .setBuffer(buf);
-      const mat = getOrCreateMaterial(group.layer, group.colorHex, group.rgb);
-      const prim = doc
+      const positions = doc.createAccessor().setType("VEC3").setArray(group.positions).setBuffer(buf);
+      const normals = doc.createAccessor().setType("VEC3").setArray(group.normals).setBuffer(buf);
+      const primitive = doc
         .createPrimitive()
-        .setAttribute("POSITION", posAcc)
-        .setAttribute("NORMAL", normAcc)
-        .setMaterial(mat)
+        .setAttribute("POSITION", positions)
+        .setAttribute("NORMAL", normals)
+        .setMaterial(getOrCreateMaterial(group.layer, group.colorHex, group.rgb))
         .setExtras({ layer: group.layer, colorHex: group.colorHex });
-      mesh.addPrimitive(prim);
+      mesh.addPrimitive(primitive);
     }
     return mesh;
+  }
+
+  function offsetTriangles(triangles: Triangle[], origin: [number, number, number]): Triangle[] {
+    if (origin[0] === 0 && origin[1] === 0 && origin[2] === 0) return triangles;
+    return triangles.map((triangle) => ({
+      ...triangle,
+      v: triangle.v.map((point) => [
+        point[0] - origin[0],
+        point[1] - origin[1],
+        point[2] - origin[2],
+      ]) as Triangle["v"],
+    }));
+  }
+
+  const directMeshCache = new Map<string, { mesh: Mesh; triangleCount: number }>();
+  const blockReuse: DxfBlockReuseStats = {
+    uniqueRenderedMeshes: 0,
+    reusedBlockMeshCount: 0,
+    geometryDuplicationAvoidedTriangles: 0,
+  };
+
+  function directBlockMesh(blockName: string, insertColor: ResolvedColor): { mesh: Mesh; triangleCount: number } | null {
+    const block = parsedDxf.blocks[blockName];
+    if (!block || block.supported.length === 0) return null;
+    const hasByBlock = block.supported.some((entity) => entity.color.source === "byblock");
+    const geometryHash = hashBlockGeometry(block, parsedDxf.layers);
+    const cacheKey = `${geometryHash}|origin:${block.origin.join(",")}${hasByBlock ? `|byblock:${insertColor.hex}` : ""}`;
+    const cached = directMeshCache.get(cacheKey);
+    if (cached) {
+      blockReuse.reusedBlockMeshCount++;
+      blockReuse.geometryDuplicationAvoidedTriangles += cached.triangleCount;
+      return cached;
+    }
+
+    const triangles = offsetTriangles(extractAllTriangles(block.supported, insertColor), block.origin);
+    if (triangles.length === 0) return null;
+    const { groups } = optimizeMesh(triangles);
+    const mesh = buildMeshFromGroups(`Block:${blockName}${hasByBlock ? `:${insertColor.hex}` : ""}`, groups);
+    if (!mesh) return null;
+    const entry = { mesh, triangleCount: triangles.length };
+    directMeshCache.set(cacheKey, entry);
+    blockReuse.uniqueRenderedMeshes++;
+    return entry;
   }
 
   let nodeCount = 0;
   let totalTriangleCount = 0;
 
-  // ── Block definitions: build one Mesh per named block ─────────────────────
-  const blockMeshes = new Map<string, Mesh>();
+  function addInsertNode(
+    parent: Node,
+    insert: DxfInsert,
+    depth: number,
+    stack: string[],
+    inheritedColor: ResolvedColor | undefined,
+    parentBlockOrigin: [number, number, number],
+    indexPath: number[]
+  ): void {
+    if (depth > maxDepth || stack.includes(insert.blockName)) return;
+    const block = parsedDxf.blocks[insert.blockName];
+    if (!block) return;
 
-  function blockMeshForInsert(blockName: string, insertColor: ReturnType<typeof resolveColor>): Mesh | null {
-    const block = parsedDxf.blocks[blockName];
-    if (!block) return null;
-    const hasByBlock = block.supported.some((entity) => entity.color.source === "byblock");
-    const cacheKey = hasByBlock ? `${blockName}|${insertColor.hex}` : blockName;
-    const cached = blockMeshes.get(cacheKey);
-    if (cached) return cached;
-    const blockTriangles = extractAllTriangles(block.supported, insertColor);
-    if (blockTriangles.length === 0) return null;
-    const { groups } = optimizeMesh(blockTriangles);
-    const mesh = buildMeshFromGroups(`Block:${blockName}${hasByBlock ? `:${insertColor.hex}` : ""}`, groups);
-    if (mesh) blockMeshes.set(cacheKey, mesh);
-    return mesh;
-  }
-
-  // ── INSERT instances ───────────────────────────────────────────────────────
-  let insertIndex = 0;
-  for (const insert of parsedDxf.entities.inserts) {
-    const insertColor = resolveColor(insert.colorIndex, insert.trueColor, insert.layer, parsedDxf.layers);
-    const mesh = blockMeshForInsert(insert.blockName, insertColor);
-    if (!mesh) {
-      // Unknown or empty block — skip silently
-      insertIndex++;
-      continue;
-    }
-
-    const rotation = insertRotationQuaternion(insert.rotation, insert.extrusion);
-    const handle = insert.handle ?? `INSERT_${insertIndex}`;
-    const nodeName = `${insert.blockName}_${insertIndex}`;
-
+    const insertColor = resolveColor(
+      insert.colorIndex,
+      insert.trueColor,
+      insert.layer,
+      parsedDxf.layers,
+      inheritedColor
+    );
+    const handle = insert.handle ?? `INSERT_${indexPath.join("_")}`;
+    const stableObjectId = depth === 1 ? handle : `${handle}@${indexPath.join(".")}`;
+    const translation: [number, number, number] = [
+      insert.position[0] - parentBlockOrigin[0],
+      insert.position[1] - parentBlockOrigin[1],
+      insert.position[2] - parentBlockOrigin[2],
+    ];
     const node = doc
-      .createNode(nodeName)
-      .setMesh(mesh)
-      .setTranslation(insert.position)
+      .createNode(`${insert.blockName}_${indexPath.join("_")}`)
+      .setTranslation(translation)
       .setScale(insert.scale)
-      .setRotation(rotation)
+      .setRotation(insertRotationQuaternion(insert.rotation, insert.extrusion))
       .setExtras({
-        stableObjectId: handle,
+        stableObjectId,
         displayName: insert.blockName,
         sourceFormat: "dxf",
         entityType: "INSERT",
@@ -121,45 +159,46 @@ export async function buildGlb(parsedDxf: ParsedDxf): Promise<BuildGlbResult> {
         layer: insert.layer,
         blockName: insert.blockName,
         insertName: insert.blockName,
+        blockPath: [...stack, insert.blockName],
+        nestingDepth: depth,
+        parentBlockName: stack.at(-1) ?? null,
         extrusion: insert.extrusion,
         ocsApplied: insert.ocsApplied,
         byBlockColor: insertColor.hex,
       });
-
-    root.addChild(node);
+    parent.addChild(node);
     nodeCount++;
 
-    // Accumulate triangle count for each block insert
-    const block = parsedDxf.blocks[insert.blockName];
-    if (block) {
-      totalTriangleCount += block.triangleCount;
+    const direct = directBlockMesh(insert.blockName, insertColor);
+    if (direct) {
+      node.setMesh(direct.mesh);
+      totalTriangleCount += direct.triangleCount;
     }
 
-    insertIndex++;
+    const nextStack = [...stack, insert.blockName];
+    block.inserts.forEach((nestedInsert, nestedIndex) => {
+      addInsertNode(node, nestedInsert, depth + 1, nextStack, insertColor, block.origin, [...indexPath, nestedIndex]);
+    });
   }
 
-  // ── Ungrouped entities (3DFACE / POLYFACE_MESH directly in ENTITIES) ──────
+  parsedDxf.entities.inserts.forEach((insert, index) => {
+    addInsertNode(root, insert, 1, [], undefined, [0, 0, 0], [index]);
+  });
+
   const entityTriangles = extractAllTriangles(parsedDxf.entities.supported);
   if (entityTriangles.length > 0) {
     const { groups } = optimizeMesh(entityTriangles);
     const mesh = buildMeshFromGroups("ungrouped", groups);
     if (mesh) {
-      const ungroupedNode = doc
-        .createNode("ungrouped")
-        .setMesh(mesh)
-        .setExtras({ sourceFormat: "dxf", entityType: "ungrouped" });
-      root.addChild(ungroupedNode);
+      root.addChild(
+        doc.createNode("ungrouped").setMesh(mesh).setExtras({ sourceFormat: "dxf", entityType: "ungrouped" })
+      );
       nodeCount++;
-      for (const group of groups) {
-        totalTriangleCount += group.triangleCount;
-      }
+      totalTriangleCount += groups.reduce((sum, group) => sum + group.triangleCount, 0);
     }
   }
 
-  // ── Serialize ──────────────────────────────────────────────────────────────
-  const io = new NodeIO();
-  const glbBytes = await io.writeBinary(doc);
-
+  const glbBytes = await new NodeIO().writeBinary(doc);
   return {
     glbBytes,
     nodeCount,
@@ -174,5 +213,7 @@ export async function buildGlb(parsedDxf: ParsedDxf): Promise<BuildGlbResult> {
         rgb: [Math.round(factor[0] * 255), Math.round(factor[1] * 255), Math.round(factor[2] * 255)],
       };
     }),
+    traversal,
+    blockReuse,
   };
 }

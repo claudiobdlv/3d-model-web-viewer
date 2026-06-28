@@ -645,10 +645,10 @@ Key log lines:
 
 #### Phase 2A risks addressed or carried into Phase 2B
 - OCS extrusion: simple supported entities and INSERTs now use the arbitrary-axis transform; broader real-file coverage remains a risk.
-- `MESH` entity (R2010+): still detected, reported, and skipped rather than faked.
-- BYBLOCK colour: simple INSERT inheritance is implemented; recursive nested inheritance remains deferred.
+- `MESH` entity (R2010+): level-0 vertex/face-list triangulation was completed in Phase 2C; subdivision evaluation and property overrides remain out of scope.
+- BYBLOCK colour: recursive INSERT-chain inheritance was completed in Phase 2C.
 - Meshopt: integrated with semantic validation and raw fallback.
-- Circular/nested block references: detected through nested INSERT counts but recursive rendering remains deferred.
+- Circular/nested block references: recursive rendering with cycle and depth guards was completed in Phase 2C.
 
 #### Phase 2B status
 Completed internally; see the Phase 2B implementation notes at the end of this document.
@@ -678,12 +678,12 @@ Completed internally; see the Phase 2B implementation notes at the end of this d
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| Revit DXF version variation (R12 vs R2000 vs R2010) | Medium | Spike tokenizer handles all ASCII DXF versions; detect `$ACADVER` and warn if R2010+ MESH entities not fully supported |
-| Coordinate system differences (OCS vs WCS) | Medium | For `3DFACE`, WCS is standard. For entities with OCS extrusion (group 210/220/230), implement arbitrary axis algorithm |
+| Revit DXF version variation (R12 vs R2000 vs R2010) | Medium | Parser detects `$ACADVER`; R2010+ level-0 MESH face lists are covered by a hand-authored fixture, while advanced subdivision/property data remains a risk |
+| Coordinate system differences (OCS vs WCS) | Medium | Arbitrary-axis conversion is implemented for faces, polyfaces, MESH vertices, and INSERT translation/orientation; representative face and INSERT bounds are tested |
 | Large DXF files with many unique blocks | Low-Medium | Block caching and parallel processing mitigate; add file-size warning at 200 MB |
 | Colour fidelity (ACI palette approximations) | Low | ACI 1-9 are exact; higher indices approximate. True colour (group 420) is always exact |
 | POLYLINE with both bits 16 and 64 | Low | First matching branch (bit 64 = POLYFACE_MESH) wins; this is the correct priority |
-| `MESH` entity (R2010+) not fully triangulated | Medium | Detected with note; full parsing requires production work; error surfaced in format-report |
+| Advanced `MESH` data (subdivision, creases, property overrides) | Medium | Level-0 vertex and face lists triangulate; advanced data stays explicitly out of the current support claim |
 | Circular block references | Low | Visited-set depth limit (10) with warning |
 | DWG files uploaded by mistake | Low | `.dwg` not in allowedExtensions; upload is rejected with "not a supported format" message |
 
@@ -849,3 +849,91 @@ The output folder receives a slug subdirectory. Omitting it uses a temporary dir
 - Upload/server job selection, worker artifact upload fields, and UI warnings remain intentionally unwired.
 
 > Recommended Phase 2C prompt: Implement recursive nested BLOCK/INSERT traversal with a depth limit and cycle detection, complete nested BYBLOCK/BYLAYER context inheritance, and add larger representative OCS and R2010+ MESH fixtures. Implement MESH triangulation only if face-list tests prove correctness. Keep `.dxf` out of server/admin upload allow-lists, do not deploy, and preserve existing STEP/GLB paths.
+
+---
+
+## Phase 2C — Recursive Blocks, OCS Fixtures, and Level-0 MESH (DONE)
+
+**Branch:** `feature/formatiq-dxf-worker-backend`
+**Starting commit:** `c3a36a4100acb40b2a7ec8f57ee70f4e189e4dfa`
+**Date:** 2026-06-28
+
+### Nested BLOCK/INSERT traversal
+
+- `blockTraversal.ts` analyzes reachable top-level and nested INSERT chains before GLB construction.
+- GLB construction recursively emits a selection node for every reachable INSERT and composes translation, scale, rotation, block base-point offset, and the existing OCS orientation through the node hierarchy.
+- The default maximum rendered block depth is 10. A deeper branch is skipped with an explicit path warning.
+- The active block-name stack detects circular references. Only the circular branch is skipped; conversion continues with any usable geometry already reached.
+- Node names and extras preserve block names, INSERT handles, nesting depth, parent block, and full block path.
+
+### Nested colour inheritance
+
+- Entity true colour remains authoritative, followed by explicit entity ACI.
+- BYLAYER entities continue to resolve from their own DXF layer table entry.
+- BYBLOCK geometry inherits the immediate INSERT colour context.
+- A BYBLOCK INSERT inherits its parent INSERT context recursively, so a concrete colour can flow through multiple nested blocks. If no concrete ancestor exists, the existing default colour is used.
+- Tests prove simple and nested BYBLOCK, nested BYLAYER, and nested true-colour override behavior.
+
+### Block and mesh reuse
+
+- INSERT hierarchy nodes are created per instance, while direct block geometry stays shared.
+- The mesh cache key uses the block geometry hash, block origin, and inherited colour only when BYBLOCK geometry makes colour instance-dependent.
+- Identical direct block geometry can therefore share one GLB Mesh across repeated or differently named definitions when safe.
+- `dxf-optimization-report.json` records total and nested instances, unique rendered meshes, mesh reuse count, and duplicated triangles avoided.
+
+### OCS fixture coverage
+
+- `test-ocs-face-transform.dxf` is a non-default-extrusion quad with stable WCS bounds `[-2, 0, 0]` to `[0, 0, 3]`.
+- `test-ocs-insert-transform.dxf` combines non-default extrusion, 90-degree rotation, non-uniform scale, and translation; its GLB world bounds are `[-4, 6, 5]` to `[-1, 6, 7]`.
+- Reports and logs record explicit extrusion entities, transformed entities, and unsupported non-default extrusion warnings. Both representative fixtures report zero unsupported transforms.
+
+### R2010+ MESH decision
+
+Real level-0 triangulation is implemented. Autodesk's MESH DXF structure provides:
+
+- group 71: MESH version;
+- group 72: blend-crease flag;
+- group 91: subdivision level;
+- group 92 followed by repeated 10/20/30: level-0 vertex count and coordinates;
+- group 93 followed by group 90 integers: face-list size and face-list items;
+- each face-list record begins with its vertex count, followed by zero-based vertex indices.
+
+The parser validates declared counts and indices, then fan-triangulates each valid polygon. Invalid or incomplete face-list items are skipped and reported; subdivision evaluation, crease processing, edges, and per-subentity property overrides are not claimed. The hand-authored AC1024 `test-mesh-only.dxf` fixture contains one quad face and proves exactly two output triangles. Structure reference: [Autodesk MESH DXF group codes](https://help.autodesk.com/cloudhelp/2015/ENU/AutoCAD-DXF/files/GUID-4B9ADA67-87C8-4673-A579-6E4C76FF7025.htm).
+
+### Reports and logs
+
+`format-report.json` now includes:
+
+- `nestedInsertCount`, `maxBlockNestingDepth`, `blockCycleWarningCount`, and `blockDepthLimitWarningCount`;
+- `mesh.triangulationStatus`, entity/triangle counts, and invalid-face count;
+- the OCS explicit/transformed/unsupported summary and unsupported warning count.
+
+`dxf-optimization-report.json` now includes recursive instance counts, unique rendered mesh count, reuse count, and measurable triangle duplication avoided. `conversion.log` has concise nested traversal, cycle/depth warning, MESH outcome, OCS summary, and mesh-reuse lines.
+
+### Fixtures and tests
+
+Phase 2C adds or strengthens:
+
+- `test-nested-blocks.dxf` — three levels, repeated top instances, cumulative transforms, nested BYBLOCK, BYLAYER, and true colour;
+- `test-block-cycle.dxf` — `A -> B -> A` branch protection with valid retained geometry;
+- `test-block-depth-limit.dxf` — depth 11 chain proving the default limit of 10;
+- `test-ocs-face-transform.dxf` and `test-ocs-insert-transform.dxf` — objective transformed bounds;
+- `test-mesh-only.dxf` — valid AC1024 level-0 MESH quad proving two triangles.
+
+The full worker suite passes 75 tests, including existing STEP chunking, MeshIQ configuration, GLB optimizer/validation, GLB merge, quality mapping, and worker-pool coverage.
+
+### Scope and rollout state
+
+- `.dxf` is still absent from server and admin upload allow-lists.
+- Production polling cannot select `dxf-js` from environment configuration.
+- DWG parsing and ACIS solid conversion were not added.
+- No production deployment, migration, database/storage mutation, or public/QR URL change is part of Phase 2C.
+
+### Remaining risks
+
+- Real Revit and AutoCAD export corpora are still needed to validate vendor/version variation, large-file performance, and material cardinality.
+- MINSERT row/column arrays, advanced MESH subdivision/crease/property records, malformed face-list recovery beyond branch skipping, and XREF resolution remain unsupported.
+- Block layer-0 inheritance and unusual nested non-uniform-scale/rotation combinations need representative real-export fixtures beyond the current deterministic cases.
+- DXF upload, server job selection, UI guidance, and production rollout remain intentionally unwired.
+
+> Recommended Phase 2D prompt: Build a sanitized real-export compatibility corpus for Revit and AutoCAD DXF, add MINSERT row/column expansion and explicit block layer-0 inheritance tests, harden malformed MESH diagnostics and large-file limits, and benchmark recursive block/material cardinality. Keep DXF uploads hidden and do not deploy until the corpus and rollout plan are reviewed.

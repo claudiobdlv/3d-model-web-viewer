@@ -1,5 +1,5 @@
 // FormatIQ DXF — triangle extraction from parsed entities
-import type { DxfSupportedEntity, Triangle, Dxf3DFace, DxfPolyfaceMesh, ResolvedColor } from "./types.js";
+import type { DxfSupportedEntity, Triangle, Dxf3DFace, DxfPolyfaceMesh, DxfMeshEntity, ResolvedColor } from "./types.js";
 import { materialKey, resolveColor } from "./colors.js";
 
 function mkTriangle(
@@ -19,10 +19,27 @@ function mkTriangle(
   };
 }
 
-function effectiveColor(entity: Dxf3DFace | DxfPolyfaceMesh, inheritedByBlockColor?: ResolvedColor): ResolvedColor {
+function effectiveColor(entity: Dxf3DFace | DxfPolyfaceMesh | DxfMeshEntity, inheritedByBlockColor?: ResolvedColor): ResolvedColor {
   return entity.color.source === "byblock" && inheritedByBlockColor
     ? resolveColor(0, null, entity.layer, {}, inheritedByBlockColor)
     : entity.color;
+}
+
+function extractMesh(entity: DxfMeshEntity, inheritedByBlockColor?: ResolvedColor): Triangle[] {
+  const color = effectiveColor(entity, inheritedByBlockColor);
+  const triangles: Triangle[] = [];
+  for (const face of entity.faces) {
+    const first = entity.positions[face[0]!];
+    if (!first) continue;
+    for (let i = 1; i + 1 < face.length; i++) {
+      const second = entity.positions[face[i]!];
+      const third = entity.positions[face[i + 1]!];
+      if (second && third) {
+        triangles.push(mkTriangle(first, second, third, entity.layer, color.hex, color.rgb));
+      }
+    }
+  }
+  return triangles;
 }
 
 function extract3DFace(entity: Dxf3DFace, inheritedByBlockColor?: ResolvedColor): Triangle[] {
@@ -78,7 +95,6 @@ function extractPolyface(entity: DxfPolyfaceMesh, inheritedByBlockColor?: Resolv
 }
 
 // Extract triangles from a single supported entity.
-// MESH entities are detected but not triangulated — return empty.
 export function extractTrianglesFromEntity(entity: DxfSupportedEntity, inheritedByBlockColor?: ResolvedColor): Triangle[] {
   switch (entity.type) {
     case "3DFACE":
@@ -87,8 +103,7 @@ export function extractTrianglesFromEntity(entity: DxfSupportedEntity, inherited
     case "POLYMESH":
       return extractPolyface(entity as DxfPolyfaceMesh, inheritedByBlockColor);
     case "MESH":
-      // MESH (R2010+) not fully triangulated in Phase 2A — detected and reported
-      return [];
+      return extractMesh(entity, inheritedByBlockColor);
     default:
       return [];
   }

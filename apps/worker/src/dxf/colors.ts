@@ -114,9 +114,9 @@ export function resolveColor(
 
   if (aci === 0) {
     if (inheritedByBlockColor) {
-      const source = inheritedByBlockColor.source === "entity-truecolor"
+      const source = inheritedByBlockColor.source === "entity-truecolor" || inheritedByBlockColor.source === "insert-truecolor"
         ? "insert-truecolor"
-        : inheritedByBlockColor.source === "entity-aci"
+        : inheritedByBlockColor.source === "entity-aci" || inheritedByBlockColor.source === "insert-aci"
           ? "insert-aci"
           : "insert-layer";
       return { ...inheritedByBlockColor, source };

@@ -60,10 +60,15 @@ export type DxfMeshEntity = DxfOcsMetadata & {
   colorIndex: number | null;
   trueColor: number | null;
   color: ResolvedColor;
+  version: number;
+  blendCrease: boolean;
   subdivisionLevel: number;
   vertexCount: number;
   faceListCount: number;
-  triangleCount: 0;  // MESH triangulation not yet implemented; always 0
+  positions: [number, number, number][];
+  faces: number[][];
+  invalidFaceCount: number;
+  triangleCount: number;
   note: string;
 };
 
@@ -110,6 +115,23 @@ export type ParsedDxf = {
     inserts: DxfInsert[];
     skipped: Record<string, number>;
   };
+};
+
+export type DxfBlockTraversalSummary = {
+  maxDepthLimit: number;
+  nestedInsertCount: number;
+  renderedInsertCount: number;
+  maxBlockNestingDepth: number;
+  reachableTriangleCount: number;
+  cycleWarnings: string[];
+  depthLimitWarnings: string[];
+  missingBlockWarnings: string[];
+};
+
+export type DxfBlockReuseStats = {
+  uniqueRenderedMeshes: number;
+  reusedBlockMeshCount: number;
+  geometryDuplicationAvoidedTriangles: number;
 };
 
 // --- Geometry ---
@@ -175,10 +197,22 @@ export type DxfFormatReport = {
   blocks: { name: string; entityCount: number; acisCount: number; triangleCount: number }[];
   insertCount: number;
   insertsByBlock: Record<string, number>;
+  nestedInsertCount: number;
+  maxBlockNestingDepth: number;
+  blockCycleWarningCount: number;
+  blockDepthLimitWarningCount: number;
+  mesh: {
+    triangulationStatus: "not-present" | "triangulated" | "detected-invalid";
+    entityCount: number;
+    triangulatedEntityCount: number;
+    triangleCount: number;
+    invalidFaceCount: number;
+  };
   ocs: {
     explicitExtrusionEntityCount: number;
     transformedEntityCount: number;
     unsupportedEntityCount: number;
+    unsupportedWarningCount: number;
   };
   conversionStatus: DxfConversionStatus;
   warnings: string[];
@@ -200,8 +234,12 @@ export type DxfOptimizationReport = {
   blocks: {
     uniqueBlockDefinitions: number;
     totalInstanceCount: number;
+    nestedInstanceCount: number;
     blockDefinitionsWithGeometry: number;
     emptyBlockDefinitions: number;
+    uniqueRenderedMeshes: number;
+    reusedBlockMeshCount: number;
+    geometryDuplicationAvoidedTriangles: number;
   };
   materials: {
     uniqueMaterials: number;

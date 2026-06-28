@@ -9,6 +9,7 @@ import { optimizeMesh } from "./meshOptimize.js";
 import { buildGlb } from "./buildGlb.js";
 import { buildFormatReport, buildOptimizationReport, buildStats, buildManifest } from "./reports.js";
 import { optimizeDisplayGlb } from "../glbOptimizer.js";
+import { analyzeBlockTraversal } from "./blockTraversal.js";
 
 async function appendLog(logPath: string, msg: string): Promise<void> {
   await fs.promises.appendFile(logPath, msg).catch(() => {});
@@ -71,8 +72,24 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
   }
 
   // ── Build format report (early, before potentially throwing) ───────────────
-  const formatReport = buildFormatReport({ parsedDxf, sourcePath, sourceFileSizeBytes });
+  const traversal = analyzeBlockTraversal(parsedDxf);
+  const formatReport = buildFormatReport({ parsedDxf, sourcePath, sourceFileSizeBytes, traversal });
   await fs.promises.writeFile(formatReportPath, JSON.stringify(formatReport, null, 2) + "\n");
+  await appendLog(
+    logPath,
+    `[DXF] Nested block traversal: ${traversal.nestedInsertCount} nested INSERT(s), max depth ${traversal.maxBlockNestingDepth}/${traversal.maxDepthLimit}\n`
+  );
+  for (const warning of [...traversal.cycleWarnings, ...traversal.depthLimitWarnings]) {
+    await appendLog(logPath, `[DXF] WARNING: ${warning}\n`);
+  }
+  await appendLog(
+    logPath,
+    `[DXF] MESH handling: ${formatReport.mesh.triangulationStatus}; ${formatReport.mesh.entityCount} entity/entities, ${formatReport.mesh.triangleCount} triangle(s)\n`
+  );
+  await appendLog(
+    logPath,
+    `[DXF] OCS transforms: ${formatReport.ocs.explicitExtrusionEntityCount} explicit, ${formatReport.ocs.transformedEntityCount} transformed, ${formatReport.ocs.unsupportedEntityCount} unsupported\n`
+  );
 
   if (formatReport.conversionStatus === "acis-only-hard-error") {
     const warning = formatReport.warnings[0] ?? "ACIS-only file.";
@@ -102,19 +119,30 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
 
   // Block definition triangles (for reporting totals)
   let blockRawTriangles = 0;
+  let blockOutputTriangles = 0;
+  let blockRawVertices = 0;
+  let blockOutputVertices = 0;
+  let blockDegenerateTriangles = 0;
+  let blockDuplicateVertices = 0;
   for (const block of Object.values(parsedDxf.blocks)) {
     const tris = extractAllTriangles(block.supported);
     blockRawTriangles += tris.length;
+    const { stats } = optimizeMesh(tris);
+    blockOutputTriangles += stats.outputTriangleCount;
+    blockRawVertices += stats.rawVertexCount;
+    blockOutputVertices += stats.outputVertexCount;
+    blockDegenerateTriangles += stats.degenerateTrianglesRemoved;
+    blockDuplicateVertices += stats.duplicateVerticesWelded;
   }
 
   // Combined stats for reporting
   const combinedStats: OptimizationStats = {
     rawTriangleCount: entityStats.rawTriangleCount + blockRawTriangles,
-    rawVertexCount: entityStats.rawVertexCount + blockRawTriangles * 3,
-    degenerateTrianglesRemoved: entityStats.degenerateTrianglesRemoved,
-    duplicateVerticesWelded: entityStats.duplicateVerticesWelded,
-    outputTriangleCount: entityStats.outputTriangleCount,
-    outputVertexCount: entityStats.outputVertexCount,
+    rawVertexCount: entityStats.rawVertexCount + blockRawVertices,
+    degenerateTrianglesRemoved: entityStats.degenerateTrianglesRemoved + blockDegenerateTriangles,
+    duplicateVerticesWelded: entityStats.duplicateVerticesWelded + blockDuplicateVertices,
+    outputTriangleCount: entityStats.outputTriangleCount + blockOutputTriangles,
+    outputVertexCount: entityStats.outputVertexCount + blockOutputVertices,
   };
 
   const meshOptimizationMs = Date.now() - optStart;
@@ -123,7 +151,7 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
   const glbStart = Date.now();
   throwIfAborted(input.signal);
   await input.onProgress?.(55, "Converting DXF - building GLB");
-  const glbResult = await buildGlb(parsedDxf);
+  const glbResult = await buildGlb(parsedDxf, { traversal });
   const glbBuildMs = Date.now() - glbStart;
   const rawGlbSizeBytes = glbResult.glbBytes.length;
 
@@ -132,6 +160,10 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
   await appendLog(
     logPath,
     `[DXF] GLB built: ${glbResult.nodeCount} nodes, ${glbResult.materialCount} materials, ${glbResult.triangleCount} triangles, ${rawGlbSizeBytes} bytes\n`
+  );
+  await appendLog(
+    logPath,
+    `[DXF] Block mesh reuse: ${glbResult.blockReuse.reusedBlockMeshCount} reuse(s), ${glbResult.blockReuse.uniqueRenderedMeshes} unique mesh(es), ${glbResult.blockReuse.geometryDuplicationAvoidedTriangles} duplicated triangle(s) avoided\n`
   );
   throwIfAborted(input.signal);
   await input.onProgress?.(80, glbOptimizationMode === "meshopt" ? "Optimizing DXF GLB" : "Publishing DXF GLB");
@@ -205,6 +237,8 @@ export async function convertDxfToGlb(input: ConvertDxfInput): Promise<ConvertDx
       fallbackUsed: optimization.fallbackUsed,
       message: optimization.message,
     },
+    traversal,
+    blockReuse: glbResult.blockReuse,
     warnings: formatReport.warnings,
   });
   await fs.promises.writeFile(dxfOptimizationReportPath, JSON.stringify(optReport, null, 2) + "\n");
