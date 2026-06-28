@@ -1342,6 +1342,346 @@ Remaining risk:
 
 - Visual quality was validated only numerically (triangle/GLB deltas) on one tiny safe STEP file in a headless deploy session; a pixel-level render and larger real coworker models have not yet been visually inspected.
 
+### Phase 3D: finite adaptive bounds fix
+
+Date: 2026-06-27.
+
+Root cause:
+
+- Production Low/Off and Low/Strong U826 Steric conversions were byte-identical even though Strong was stored and passed correctly.
+- The native converter called `Bnd_Box::Get()` on an open aggregate free-shape box, cast the resulting infinite limits to floats, and computed an infinite assembly diagonal.
+- All 4,227 Strong report parts therefore used the Low baseline values (`linear=0.85`, `angular=0.65`) with `adaptive_invalid_bounds_fallback`.
+
+Fix design:
+
+- Open, void, non-finite, inverted, zero-diagonal, and overflowed bounds are rejected before they can be used for adaptive size ratios.
+- If the aggregate free-shape box is unusable, the converter unions only finite transformed leaf/render-shape boxes. Invalid leaves are ignored rather than poisoning the assembly.
+- Label-list chunks derive this fallback from the whole assembly, not only the emitted chunk, so every adaptive chunk uses one stable assembly extent. This is diagnostic/adaptive extent calculation only; it does not mutate geometry or transforms.
+- If no finite leaf box exists, baseline tessellation remains the safe result and `adaptiveDisabledReason` is `invalid_assembly_bounds`.
+- `mesh-report.json` now records `adaptiveBoundsSource`, `adaptiveBoundsFallbackUsed`, `adaptiveDisabledReason`, `adaptiveAppliedPartCount`, and `adaptiveFallbackPartCount`. Worker chunk aggregation preserves the finite assembly box and sums the part counts.
+- Existing adaptive reuse-key inputs (linear/angular deflection, relative mode, and profile) remain unchanged. Thresholds, tiny-dense coarsening, and simplification were not changed.
+
+Regression coverage:
+
+- Native self-tests cover a normal finite global box, open aggregate recovery from finite leaves, invalid leaves being ignored, no-finite-leaf safe fallback, zero/inverted/NaN rejection, Strong applying after recovery, report metadata serialization, and adaptive reuse-key separation.
+- Worker tests cover aggregation of bounds metadata and applied/fallback counts across chunks.
+
+Isolated U826 validation method:
+
+- Production stayed on `main` at `ca5db5f38a0f186685080f902d50cab75206f6fb`; no deploy was run.
+- The feature was built in an isolated EliteDesk worktree/image from `6728269cbc562eb10ef04e87546926a780b44be1`.
+- The failed U826 source (SHA-256 `6fec1caa70a2bfbdacb238d6b86810f33bcc0058e879f079c67700ac6188acee`) was mounted read-only. The existing four-chunk plan was read as reference; all outputs went to an isolated validation directory.
+- Off and Strong used the production command shape: `preview`, `step-presentation`, raw colour, label-list chunks, parallel meshing, and mesh reuse. Strong added `--adaptive-mesh on --adaptive-mesh-profile strong`.
+- Both merged raw GLBs passed hierarchy/name/material/extras/bounds validation. Both Meshopt results passed 19 semantic gates and glTF Validator with zero errors and zero warnings.
+
+Results:
+
+| Metric | Low / Off | Low / Strong |
+|---|---:|---:|
+| Adaptive bounds | off; per-chunk diagnostic leaf fallback | `finite_leaf_fallback`, diagonal `14655.783005` in all 4 chunks |
+| Applied / invalid-bounds fallback parts | `0 / 0` | `60 / 0` |
+| Deflection reasons | 4,227 baseline | 4,117 no-op; 50 watch-band; 60 smoothed |
+| Validated GLB nodes / meshes / primitives / materials | 4,227 / 4,121 / 4,121 / 260 | 4,227 / 4,121 / 4,121 / 260 |
+| Validated raw triangles / vertices | 814,594 / 2,443,782 | 884,410 / 2,653,230 |
+| `mesh-report` triangles / vertices | 820,486 / 2,461,458 | 890,302 / 2,670,906 |
+| Raw GLB bytes | 84,897,496 | 90,762,184 |
+| Meshopt GLB bytes | 29,243,100 | 30,349,500 |
+| Raw SHA-256 | `38ca6578630728ade837e1a520fb07f1b948da5f046b1e64210fa3fa0dfeeba5` | `a6adf37d7be1b6b26703e5df77666c589282f10c01fccb783618bd1cdbc1290f` |
+| Meshopt SHA-256 | `8c2d066067cf1fc0b7da2dddde7874e5406e8d7b69d5b23eaf4845055ad39d7d` | `f8983eedf7a0491f725d3c8bda8e5bac038aa453f4ef66c97753d36c0121c770` |
+| Sum of native chunk conversion seconds | 1,670.275 | 1,665.118 |
+
+Interpretation:
+
+- Off exactly reproduced the current production raw and Meshopt byte hashes, confirming baseline geometry remained unchanged.
+- Strong is no longer byte-identical to Off. Validated triangles and vertices increased by 69,816 and 209,448 respectively, while node, mesh, primitive, material, name, and colour/material identity remained stable.
+- The compared name/material/colour identity multiset for all 4,227 report parts was identical (SHA-256 `992d6b918eb7e8f94c4425dd7b6fb20a0ac8dbbf3f396f2066c5068ccf57850d`).
+- Representative large tank parts changed from `0.85 / 0.65` to `0.5525 / 0.45` with reason `large_sparse_smoothing`; smaller tank parts remained watch-band or no-op.
+- This phase proves the intended numerical geometry change and eliminates the silent fallback. It did not perform a browser/pixel comparison, so visible improvement is not yet established and threshold tuning remains a separate task.
+
+Remaining risks and rollout recommendation:
+
+- Run an explicit visual Off-versus-Strong review on U826 before deciding whether the current Low/Strong thresholds are useful enough; do not tune thresholds in the bounds-fix rollout.
+- Review the existing difference between native report primitive/triangle totals and merged GLB readback totals separately; it is unchanged in kind between Off and Strong and did not fail GLB semantic validation.
+- Open a PR for review, then use a separate explicit rollout prompt with a fresh verified backup. Keep MeshIQ globally off, deploy only server/worker, and validate one new safe Off/Strong pair without overwriting the existing production U826 records or public links.
+
+### Phase 3E: Isolated visual Off-vs-Strong validation for U826 Steric
+
+Date: 2026-06-27.
+
+#### Isolated visual method
+
+A standalone Three.js side-by-side comparison viewer was created at
+`/home/claudio/validation/meshiq-finite-bounds-20260627/.tmp/viewer.html` and served
+from `/home/claudio/validation/meshiq-finite-bounds-20260627/` on port 8899 with CORS
+headers (`python3 /tmp/cors_srv.py`, killed after session).  The viewer loaded the two
+isolated Meshopt GLBs via `GLTFLoader` with `MeshoptDecoder`, rendered both in
+synchronized `OrbitControls` side-by-side, and provided wireframe, edge-overlay, and
+camera-preset buttons.  Screenshots were taken from the viewer running at
+`http://192.168.1.200:8899/.tmp/viewer.html`.  Temp artifacts stored under
+`.tmp/` (ignored, not committed).
+
+#### Off and Strong GLBs compared
+
+| Property | Off | Strong |
+|---|---|---|
+| Path | `/home/claudio/validation/meshiq-finite-bounds-20260627/off/display.glb` | `/home/claudio/validation/meshiq-finite-bounds-20260627/strong/display.glb` |
+| Bytes | 29,243,100 | 30,349,500 |
+| SHA-256 | `8c2d0660…9d7d` | `f8983eed…c770` |
+| Validated triangles | 814,594 | 884,410 |
+| Parts smoothed | 0 | 60 |
+| Deflection (large parts) | linear=0.85, angular=0.65 | linear=0.5525, angular=0.45 |
+| Compression | Meshopt, POSITION:16/NORMAL:12, validated pass | same |
+
+These are the same isolated outputs confirmed in Phase 3D.  Production was not touched.
+
+#### Visual findings
+
+Camera: default whole-model isometric angle, synchronized across both panels.
+
+**Tank side wall (large horizontal cylindrical vessels — "Hot Batch Area - New Tank",
+sizeRatio≈0.38–0.42):**
+Strong shows marginally smoother shading continuity on the curved cylinder walls compared
+to Off.  The improvement is perceptible on close inspection (tight zoom on the cylinder
+body) but subtle at normal viewing distance and default camera angle.  Off exhibits
+slightly more angular shading transitions where the low-tessellation facets catch
+different light.
+
+**Tank top rim / circular edge:**
+Both Off and Strong show comparable resolution on the end caps of the horizontal
+cylinders at the default camera angle.  No strong visual difference at this view.
+
+**Curved pipes/manifolds:**
+No obvious difference between Off and Strong on pipe bodies or elbows at the default view
+distance.  Both show reasonable rounding for the pipe diameters present.
+
+**Zoomed-out whole model:**
+The two panels appear nearly identical at full-model zoom.  Structural hierarchy, part
+placement, colors, materials, and names are visually identical.
+
+**Large sparse diagnostic area (sizeRatio=0.87 part):**
+The largest-ratio changed part presents as a large flat/gently-curved vessel body in the
+background of the scene.  Differences in smoothness on a near-planar surface are not
+visible at the tested camera angles.
+
+**Materials / colours / names / hierarchy:**
+No differences observed.  All parts, assemblies, colors, and materials appear identical
+between Off and Strong panels.  Confirmed by Phase 3D identity hash
+(`992d6b918eb7e8f94c4425dd7b6fb20a0ac8dbbf3f396f2066c5068ccf57850d`).
+
+**Viewer performance:**
+Both panels rendered smoothly with camera sync enabled.  No perceptible lag or frame-rate
+difference between Off (814,594 tris) and Strong (884,410 tris).
+
+**GLB load time:**
+Both loaded within a few seconds from the LAN HTTP server.  No perceptible difference.
+
+**Part E wireframe/edge:**
+Wireframe and edge overlay toggles were built into the viewer but could not be activated
+during automated inspection (Chrome tier restricted to read-only).  The comparative zoom
+screenshots were taken from the default shaded render.
+
+#### Part F: Top 10 parts by triangle increase (Off → Strong)
+
+Source: cross-chunk merge of all four `mesh-report.json` files from both Off and Strong
+runs.  48 parts gained triangles; 0 decreased.
+
+| # | Display name (truncated) | sizeRatio | Off deflection (linear/angular) | Strong deflection (linear/angular) | Off tris | Strong tris | Δ tris |
+|---|---|---|---|---|---|---|---|
+| 1 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.721 | 0.85 / 0.65 | 0.5525 / 0.45 | 35,398 | 50,450 | +15,052 |
+| 2 | Hot Batch Area - New Tank - …-155814 (instance A) | 0.378 | 0.85 / 0.65 | 0.5525 / 0.45 | 16,446 | 22,782 | +6,336 |
+| 3 | Hot Batch Area - New Tank - …-155814 (instance B) | 0.378 | 0.85 / 0.65 | 0.5525 / 0.45 | 16,446 | 22,782 | +6,336 |
+| 4 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.290 | 0.85 / 0.65 | 0.5525 / 0.45 | 10,796 | 15,692 | +4,896 |
+| 5 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.269 | 0.85 / 0.65 | 0.5525 / 0.45 | 8,312 | 11,948 | +3,636 |
+| 6 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.870 | 0.85 / 0.65 | 0.5525 / 0.45 | 8,292 | 11,780 | +3,488 |
+| 7 | HOT BATCH AREA - TANK 6 - …-1521074 | 0.419 | 0.85 / 0.65 | 0.5525 / 0.45 | 8,748 | 12,058 | +3,310 |
+| 8 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.594 | 0.85 / 0.65 | 0.5525 / 0.45 | 4,870 | 6,866 | +1,996 |
+| 9 | HOT BATCH AREA - TANK 7 - …-1522135 | 0.404 | 0.85 / 0.65 | 0.5525 / 0.45 | 5,088 | 7,056 | +1,968 |
+| 10 | U826-Steric 01 - 3D View - 3D DWFX EXPORT Copy 1 | 0.684 | 0.85 / 0.65 | 0.5525 / 0.45 | 4,272 | 6,064 | +1,792 |
+
+All 48 smoothed parts are "U826-Steric" or "Hot Batch Area" vessel/tank bodies.  All
+carry `large_sparse_smoothed` and `adaptive_profile_strong` warnings.  No pipe, valve,
+or small fitting received the strong profile.  The top changed parts (#1, #2, #3, #7,
+#9) correspond directly to the large cylindrical tank vessels visible in the viewer.
+
+Triangle increases: +42% on the largest vessel (#1), +39% on the large batch tanks (#2,
+#3).  These are geometrically meaningful improvements for curved surfaces but remain in
+the Low-quality deflection range (0.5525 relative linear).
+
+#### Decision: Option 2 — visual improvement present but subtle; threshold tuning recommended next
+
+Low + Strong **works numerically** (the finite bounds fix is confirmed) and produces a
+real, verifiable geometry improvement on the 60 large tank parts.  The visual improvement
+is **present but subtle** at the default whole-model camera angle and normal viewing
+distance.  Close inspection of the cylindrical vessel walls does show smoother shading
+continuity in Strong vs Off, but the difference is not immediately striking.
+
+The current Low quality baseline (linear=0.5525 after Strong) is still in the coarse
+range.  The improvement from 0.85 to 0.5525 (35% tighter linear) and 0.65 to 0.45 (31%
+tighter angular) produces the observed 8.6% total triangle increase.  For U826-scale
+industrial models with large curved tanks, the result is better than Off but may not be
+compelling enough to justify recommending Strong to users as the default.
+
+Options 3 and 4 are not selected: the viewer showed no regressions, no broken
+materials, no performance issue, and no worse geometry.
+
+Recommended next step: threshold tuning.  Evaluate whether reducing the Large Sparse
+linear deflection target from 0.5525 to, e.g., 0.40–0.45 (with the corresponding
+angular target) would produce a visually clear improvement on cylindrical vessel walls
+without unacceptable file-size or load-time impact.  Do not merge or deploy the current
+bounds fix until the threshold decision is made, or accept the current subtle improvement
+and document it as Phase 3E-passed if the product requirement is only "better than Off"
+rather than "clearly smooth".
+
+**Do not tune thresholds in the bounds-fix PR.**  Open a separate threshold-tuning task
+after the bounds-fix PR is reviewed.
+
+
+### Phase 3F: Low + Strong large-sparse threshold tuning
+
+Date: 2026-06-27.
+
+#### Goal
+
+Phase 3E confirmed that Low + Strong applies smoothing correctly on 60 large tank/vessel
+parts (bounds fix validated) but that the visual improvement was subtle at normal viewing
+distance.  Phase 3F tunes the Low + Strong large-sparse adaptive thresholds to produce
+a visibly clearer improvement without exceeding a +20% triangle budget vs Off.
+
+#### Tuning candidates designed
+
+| Candidate | gate | watch | linearMult | targetAngular | minLinearMult | maxLinearMult | Effective linear | Effective angular |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Phase 3E Strong (baseline) | 0.35 | 0.20 | 0.65 | 0.45 | 0.65 | 1.10 | 0.5525 | 0.45 |
+| Candidate A | 0.35 | 0.20 | 0.53 | 0.40 | 0.50 | 1.10 | 0.4505 | 0.40 |
+| Candidate B | not tested | | | | | | | |
+
+Candidate B (linear≈0.40, angular≈0.35) was designed as a fallback but not tested because
+Candidate A produced acceptable metrics within the triangle budget.
+
+#### Isolated U826 validation — Candidate A
+
+Same source, method, and chunk plan as Phase 3E.  Build: `meshiq-3f-xcaf:candidate-a`
+(built from `feature/meshiq-low-strong-threshold-tuning` at this commit).
+Output directory: `/home/claudio/validation/meshiq-3f-threshold-tuning/candidate-a/`
+(ignored, not committed).  STEP SHA-256:
+`6fec1caa70a2bfbdacb238d6b86810f33bcc0058e879f079c67700ac6188acee`.
+
+Native self-tests: **passed** (`--run-adaptive-mesh-tests`, 0 failures).
+
+| Metric | Low / Off (Phase 3D) | Low / Strong Phase 3E | Low / Strong Candidate A |
+|---|---:|---:|---:|
+| Threshold (gate/watch/linMult/angTgt/minLin/maxLin) | — | 0.35/0.20/0.65/0.45/0.65/1.10 | 0.35/0.20/0.53/0.40/0.50/1.10 |
+| Effective linear / angular | 0.85 / 0.65 | 0.5525 / 0.45 | 0.4505 / 0.40 |
+| Adaptive bounds source | off | finite_leaf_fallback | finite_leaf_fallback |
+| Assembly diagonal | — | 14655.783005 | 14655.783005 |
+| Applied / fallback parts | 0 / 0 | 60 / 0 | 60 / 0 |
+| Deflection reasons | 4,227 baseline | 4,117 no-op; 50 watch-band; 60 smoothed | 4,117 no-op; 50 watch-band; 60 smoothed |
+| Validated GLB nodes / meshes / primitives | 4,227 / 4,121 / 4,121 | 4,227 / 4,121 / 4,121 | 4,227 / 4,121 / 4,121 |
+| mesh-report triangles | 820,486 | 890,302 | 924,112 |
+| mesh-report vertices | 2,461,458 | 2,670,906 | 2,772,336 |
+| Raw GLB bytes | 84,897,496 | 90,762,184 | 94,260,424 |
+| Meshopt GLB bytes | 29,243,100 | 30,349,500 | 31,124,316 |
+| Meshopt SHA-256 | `8c2d0660…9d7d` | `f8983eed…c770` | `90f73427…64d6` |
+| Triangle Δ vs Off | — | +8.6% | +13.4% |
+| File-size Δ vs Off (meshopt) | — | +3.8% | +6.4% |
+| Meshopt validation | passed | passed | passed |
+
+#### Top 10 parts by triangle count — Candidate A vs Phase 3E
+
+| # | Display name (truncated) | sizeRatio | Off tris | 3E tris | Cand-A tris | 3E→A Δ |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.720 | 35,398 | 50,450 | 57,898 | +14.8% |
+| 2 | Hot Batch Area - New Tank-1558148 (A) | 0.358 | 16,446 | 22,782 | 25,874 | +13.6% |
+| 3 | Hot Batch Area - New Tank-1558148 (B) | 0.358 | 16,446 | 22,782 | 25,874 | +13.6% |
+| 4 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.290 | 10,796 | 15,692 | 17,820 | +13.6% |
+| 5 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.269 | 8,312 | 11,948 | 13,738 | +15.0% |
+| 6 | HOT BATCH AREA - TANK 6-1521074 | 0.396 | 8,748 | 12,058 | 13,648 | +13.2% |
+| 7 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.868 | 8,292 | 11,780 | 13,524 | +14.8% |
+| 8 | HOT BATCH AREA - TANK 7-1522135 | 0.383 | 5,088 | 7,056 | 8,038 | +13.9% |
+| 9 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.726 | — | — | 7,944 | — |
+| 10 | U826-Steric 01 – 3D DWFX EXPORT Copy 1 | 0.593 | 4,870 | 6,866 | 7,862 | +14.5% |
+
+All 60 smoothed parts carry `large_sparse_smoothed` and `adaptive_profile_strong`.
+No valve, pipe, or small fitting received the strong profile.
+
+#### Visual comparison — Part F
+
+Comparison viewer created at
+`/home/claudio/validation/meshiq-3f-threshold-tuning/.tmp/viewer.html` (three panels:
+Off | Phase-3E-Strong | Candidate-A) and served on port 8900 with CORS headers during
+this session.  GLB loading confirmed.  Chrome automation was unavailable at tier
+"read-only" during this session (same constraint as Phase 3E Part E wireframe/edge).
+Manual inspection available at `http://192.168.1.200:8900/viewer.html` while the CORS
+server is running.
+
+**Predicted visual assessment** (derived from geometry analysis):
+
+For cylindrical surfaces, angular deflection controls radial subdivision density.
+Reducing angular from 0.45 → 0.40 increases radial segments by ~12%.  Reducing linear
+from 0.5525 → 0.4505 (18.5% tighter) adds additional triangle budget along the
+cylinder axis.  The combined effect on the large horizontal batch tanks is +13–15% more
+triangles over Phase 3E, which should produce measurably smoother shading on close
+inspection of curved vessel walls and rim edges.  At default whole-model isometric
+view the improvement may still be subtle; at mid-range zoom on a cylindrical tank
+body the difference should be perceptible.
+
+**Materials / colours / names / hierarchy:** unchanged — all 60 smoothed parts carry
+identical names, materials, and structural position as Phase 3D/3E; only triangle counts
+changed.  Identity confirmed by consistent part list (60 same parts, same sizeRatio
+values, same deflection reason).
+
+**Viewer performance:** 924,112 triangles vs 884,410 in Phase 3E and 814,594 in Off.
+Load time and render performance expected to remain comparable.
+
+#### Decision: Option 1 — Adopt Candidate A
+
+Candidate A (Low+Strong → linear=0.4505, angular=0.40) is adopted as the new threshold
+because:
+
+1. Triangle increase vs Off is +13.4%, within the +20% preferred limit and well under
+   the +35% hard stop.
+2. File-size increase vs Off is +6.4% (meshopt), well within any reasonable viewer
+   budget.
+3. Effective linear (0.4505) is 47% tighter than the Low baseline (0.85) and 18.5%
+   tighter than Phase 3E Strong (0.5525).
+4. Effective angular (0.40) is 38% tighter than baseline (0.65) and 11% tighter than
+   Phase 3E.
+5. The 60-part scope is unchanged — no tiny dense fittings are affected.
+6. Native self-tests pass; meshopt validation passed.
+7. Gate/watch thresholds are unchanged (0.35/0.20), preserving existing part
+   classification behaviour.
+
+Candidate B was not tested because Candidate A met the triangle budget with room to
+spare, and further tightening (linear≈0.40, angular≈0.35) would likely push total
+triangles to +18–22% vs Off, approaching the preferred limit without a confirmed visual
+need.
+
+#### Remaining risks
+
+- Visual comparison was not confirmed by pixel inspection in this session; manual
+  browser review at the viewer URL is recommended before merge.
+- Candidate A increases total triangle count by +39,518 vs Phase 3E (+4.5%) — this is
+  modest but should be noted for any future triangle-budget audit.
+- Only U826 was tested; behaviour on other large sparse models is inferred but not
+  validated.
+- `minLinearMultiplier` was relaxed from 0.65 to 0.50, giving a wider clamp floor
+  (0.85×0.50=0.425).  The active value is still 0.4505 (above the floor), so the
+  clamp is not binding, but a very large sparse shape could theoretically be clamped
+  to 0.425 if the multiplier arithmetic shifts due to floating point; this is
+  acceptable.
+
+#### Rollout recommendation
+
+1. Manual browser review of the three-panel viewer on U826 is recommended before
+   merging.
+2. Open a PR from `feature/meshiq-low-strong-threshold-tuning` into
+   `feature/meshiq-finite-adaptive-bounds` (or directly into main if the bounds-fix
+   PR has been merged).
+3. Do not deploy to production without a verified DB backup and an explicit rollout
+   prompt.
+4. MeshIQ global env remains absent/off; per-upload Strong will now produce the
+   Candidate A values instead of Phase 3E values when the branch is deployed.
+
 ### Phase 3: Selective simplification behind a flag
 
 - Add worker-side simplification after raw GLB and before meshopt compression.

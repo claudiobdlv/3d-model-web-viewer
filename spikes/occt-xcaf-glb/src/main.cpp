@@ -151,6 +151,22 @@ struct AdaptiveDeflection {
   std::vector<std::string> warnings;
 };
 
+struct FiniteBounds {
+  std::array<double, 3> min = {0.0, 0.0, 0.0};
+  std::array<double, 3> max = {0.0, 0.0, 0.0};
+  bool valid = false;
+};
+
+struct AdaptiveBoundsMetadata {
+  FiniteBounds bounds;
+  double diagonal = 0.0;
+  std::string source = "unavailable";
+  bool fallbackUsed = false;
+  std::string disabledReason;
+  std::size_t finiteLeafBoxCount = 0;
+  std::size_t invalidLeafBoxCount = 0;
+};
+
 struct ReuseKey {
   void* tshapePtr = nullptr;
   double linearDeflection = 0.0;
@@ -265,6 +281,8 @@ void computeWorldBounds(const std::array<float, 3>& localMin, const std::array<f
 void validateWorldBounds(const MeshPrimitive& primitive, const TopoDS_Shape& renderShape, const std::string& instancePath);
 std::string labelEntry(const TDF_Label& label);
 double shapeBboxDiagonal(const TopoDS_Shape& shape);
+bool safeBndBoxToBounds(const Bnd_Box& box, FiniteBounds& bounds);
+double diagonalFromFiniteBounds(const FiniteBounds& bounds);
 AdaptiveDeflection computeAdaptiveDeflection(
     const Quality& quality,
     const struct CliOptions& cliOptions,
@@ -1897,6 +1915,10 @@ std::array<float, 3> emptyMaxBounds() {
 }
 
 void writeVec3(std::ostream& out, const std::array<float, 3>& value) {
+  out << "[" << value[0] << ", " << value[1] << ", " << value[2] << "]";
+}
+
+void writeVec3(std::ostream& out, const std::array<double, 3>& value) {
   out << "[" << value[0] << ", " << value[1] << ", " << value[2] << "]";
 }
 
@@ -4358,28 +4380,125 @@ std::uint64_t primitiveVertexCount(const MeshPrimitive& primitive) {
   return primitive.positions.size() / 3;
 }
 
-double safeAssemblyDiagonal(const std::array<float, 3>& min, const std::array<float, 3>& max) {
-  if (min[0] == std::numeric_limits<float>::max() || max[0] == std::numeric_limits<float>::lowest()) {
-    return 0.0;
+bool isFiniteNumber(const double value) {
+  return std::isfinite(value);
+}
+
+bool isFiniteBounds(const FiniteBounds& bounds) {
+  if (!bounds.valid) return false;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (!isFiniteNumber(bounds.min[axis]) || !isFiniteNumber(bounds.max[axis]) ||
+        bounds.min[axis] > bounds.max[axis]) {
+      return false;
+    }
   }
-  const double dx = static_cast<double>(max[0]) - min[0];
-  const double dy = static_cast<double>(max[1]) - min[1];
-  const double dz = static_cast<double>(max[2]) - min[2];
-  return std::sqrt(dx * dx + dy * dy + dz * dz);
+  return true;
+}
+
+bool safeBndBoxToBounds(const Bnd_Box& box, FiniteBounds& bounds) {
+  bounds = FiniteBounds{};
+  if (box.IsVoid() || box.IsOpen()) {
+    return false;
+  }
+
+  Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+  try {
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+  } catch (...) {
+    return false;
+  }
+  FiniteBounds candidate;
+  candidate.min = {static_cast<double>(xmin), static_cast<double>(ymin), static_cast<double>(zmin)};
+  candidate.max = {static_cast<double>(xmax), static_cast<double>(ymax), static_cast<double>(zmax)};
+  candidate.valid = true;
+  if (!isFiniteBounds(candidate)) {
+    return false;
+  }
+  bounds = candidate;
+  return true;
+}
+
+bool mergeFiniteBounds(FiniteBounds& target, const FiniteBounds& candidate) {
+  if (!isFiniteBounds(candidate)) return false;
+  if (!isFiniteBounds(target)) {
+    target = candidate;
+    return true;
+  }
+  for (int axis = 0; axis < 3; ++axis) {
+    target.min[axis] = std::min(target.min[axis], candidate.min[axis]);
+    target.max[axis] = std::max(target.max[axis], candidate.max[axis]);
+  }
+  target.valid = true;
+  return isFiniteBounds(target);
+}
+
+double diagonalFromFiniteBounds(const FiniteBounds& bounds) {
+  if (!isFiniteBounds(bounds)) return 0.0;
+  const double dx = bounds.max[0] - bounds.min[0];
+  const double dy = bounds.max[1] - bounds.min[1];
+  const double dz = bounds.max[2] - bounds.min[2];
+  if (dx < 0.0 || dy < 0.0 || dz < 0.0) return 0.0;
+  const double diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+  return isFiniteNumber(diagonal) && diagonal > 0.0 ? diagonal : 0.0;
+}
+
+AdaptiveBoundsMetadata resolveAdaptiveBounds(
+    const Bnd_Box& globalBox,
+    const bool globalBuildFailed,
+    const std::vector<FiniteBounds>& leafBounds,
+    const std::size_t invalidLeafBoxCount) {
+  AdaptiveBoundsMetadata result;
+  result.invalidLeafBoxCount = invalidLeafBoxCount;
+
+  FiniteBounds globalBounds;
+  if (!globalBuildFailed && safeBndBoxToBounds(globalBox, globalBounds)) {
+    const double diagonal = diagonalFromFiniteBounds(globalBounds);
+    if (diagonal > 0.0) {
+      result.bounds = globalBounds;
+      result.diagonal = diagonal;
+      result.source = "global_bnd_box";
+      return result;
+    }
+  }
+
+  result.fallbackUsed = true;
+  FiniteBounds fallbackBounds;
+  for (const auto& candidate : leafBounds) {
+    if (mergeFiniteBounds(fallbackBounds, candidate)) {
+      result.finiteLeafBoxCount += 1;
+    } else {
+      result.invalidLeafBoxCount += 1;
+    }
+  }
+  const double fallbackDiagonal = diagonalFromFiniteBounds(fallbackBounds);
+  if (fallbackDiagonal > 0.0) {
+    result.bounds = fallbackBounds;
+    result.diagonal = fallbackDiagonal;
+    result.source = "finite_leaf_fallback";
+    return result;
+  }
+
+  result.disabledReason = "invalid_assembly_bounds";
+  return result;
+}
+
+double safeAssemblyDiagonal(const std::array<float, 3>& min, const std::array<float, 3>& max) {
+  FiniteBounds bounds;
+  bounds.min = {static_cast<double>(min[0]), static_cast<double>(min[1]), static_cast<double>(min[2])};
+  bounds.max = {static_cast<double>(max[0]), static_cast<double>(max[1]), static_cast<double>(max[2])};
+  bounds.valid = true;
+  return diagonalFromFiniteBounds(bounds);
 }
 
 double shapeBboxDiagonal(const TopoDS_Shape& shape) {
   Bnd_Box box;
-  BRepBndLib::Add(shape, box);
-  if (box.IsVoid()) {
+  try {
+    BRepBndLib::Add(shape, box);
+  } catch (const Standard_Failure&) {
     return 0.0;
   }
-  Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
-  box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
-  const double dx = static_cast<double>(xmax - xmin);
-  const double dy = static_cast<double>(ymax - ymin);
-  const double dz = static_cast<double>(zmax - zmin);
-  return std::sqrt(dx * dx + dy * dy + dz * dz);
+  FiniteBounds bounds;
+  return safeBndBoxToBounds(box, bounds) ? diagonalFromFiniteBounds(bounds) : 0.0;
 }
 
 double clampDouble(const double value, const double minValue, const double maxValue, std::vector<std::string>& warnings) {
@@ -4419,7 +4538,7 @@ AdaptiveProfileThresholds adaptiveThresholdsFor(const Quality& quality, const Ad
     return {0.35, 0.20, 0.50, 0.28, 0.50, 1.80};
   }
   if (profile == AdaptiveMeshProfile::Conservative) return {0.50, 0.25, 0.90, 0.60, 0.75, 1.10};
-  if (profile == AdaptiveMeshProfile::Strong) return {0.35, 0.20, 0.65, 0.45, 0.65, 1.10};
+  if (profile == AdaptiveMeshProfile::Strong) return {0.35, 0.20, 0.53, 0.40, 0.50, 1.10};
   return {0.45, 0.30, 0.85, 0.55, 0.75, 1.10};
 }
 
@@ -4511,12 +4630,45 @@ void writeMeshReportRankingEntry(
   out << "}";
 }
 
+struct AdaptiveApplicationCounts {
+  std::size_t applied = 0;
+  std::size_t fallback = 0;
+};
+
+AdaptiveApplicationCounts adaptiveApplicationCounts(const std::vector<MeshPrimitive>& primitives) {
+  AdaptiveApplicationCounts counts;
+  for (const auto& primitive : primitives) {
+    if (primitive.deflectionReason == "large_sparse_smoothing") counts.applied += 1;
+    if (primitive.deflectionReason == "adaptive_invalid_bounds_fallback") counts.fallback += 1;
+  }
+  return counts;
+}
+
+void writeAdaptiveBoundsQualityFields(
+    std::ostream& out,
+    const bool adaptiveEnabled,
+    const AdaptiveBoundsMetadata& adaptiveBounds,
+    const AdaptiveApplicationCounts& counts) {
+  out << "    \"adaptiveBoundsSource\": "; writeString(out, adaptiveBounds.source); out << ",\n";
+  out << "    \"adaptiveBoundsFallbackUsed\": " << (adaptiveBounds.fallbackUsed ? "true" : "false") << ",\n";
+  out << "    \"adaptiveDisabledReason\": ";
+  if (adaptiveEnabled && !adaptiveBounds.disabledReason.empty()) {
+    writeString(out, adaptiveBounds.disabledReason);
+  } else {
+    out << "null";
+  }
+  out << ",\n";
+  out << "    \"adaptiveAppliedPartCount\": " << counts.applied << ",\n";
+  out << "    \"adaptiveFallbackPartCount\": " << counts.fallback << ",\n";
+}
+
 void writeMeshReport(
     const std::filesystem::path& outputPath,
     const std::string& inputPath,
     const Quality& quality,
     const CliOptions& cliOptions,
     const Stats& stats,
+    const AdaptiveBoundsMetadata& adaptiveBounds,
     const std::vector<MeshPrimitive>& primitives) {
   std::ofstream out(outputPath);
   if (!out) {
@@ -4532,8 +4684,13 @@ void writeMeshReport(
       globalMax[axis] = std::max(globalMax[axis], primitive.worldMax[axis]);
     }
   }
-  const double assemblyDiagonal = safeAssemblyDiagonal(globalMin, globalMax);
+  const bool adaptiveEnabled = adaptiveMeshEnabled(cliOptions.adaptiveMeshMode);
+  const double primitiveAssemblyDiagonal = safeAssemblyDiagonal(globalMin, globalMax);
+  const double assemblyDiagonal = adaptiveBounds.diagonal > 0.0
+      ? adaptiveBounds.diagonal
+      : (adaptiveEnabled ? 0.0 : primitiveAssemblyDiagonal);
   const double densityEpsilon = 1e-9;
+  const AdaptiveApplicationCounts adaptiveCounts = adaptiveApplicationCounts(primitives);
 
   std::uint64_t vertexTotal = 0;
   std::uint64_t triangleTotal = 0;
@@ -4603,6 +4760,7 @@ void writeMeshReport(
   out << "    \"adaptiveEnabled\": " << (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? "true" : "false") << ",\n";
   out << "    \"adaptiveMode\": "; writeString(out, adaptiveMeshModeName(cliOptions.adaptiveMeshMode)); out << ",\n";
   out << "    \"adaptiveProfile\": "; writeString(out, adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) ? adaptiveMeshProfileName(cliOptions.adaptiveMeshProfile) : "standard"); out << ",\n";
+  writeAdaptiveBoundsQualityFields(out, adaptiveEnabled, adaptiveBounds, adaptiveCounts);
   out << "    \"simplificationEnabled\": false,\n";
   out << "    \"baseLinearDeflection\": " << quality.linearDeflection << ",\n";
   out << "    \"baseAngularDeflection\": " << quality.angularDeflection << ",\n";
@@ -4610,9 +4768,11 @@ void writeMeshReport(
   out << "    \"parallelMesh\": " << (cliOptions.parallelMesh ? "true" : "false") << "\n";
   out << "  },\n";
   out << "  \"assemblyBoundingBox\": {\"min\": ";
-  writeVec3(out, assemblyDiagonal > 0.0 ? globalMin : std::array<float, 3>{0, 0, 0});
+  if (adaptiveBounds.diagonal > 0.0) writeVec3(out, adaptiveBounds.bounds.min);
+  else writeVec3(out, assemblyDiagonal > 0.0 ? globalMin : std::array<float, 3>{0, 0, 0});
   out << ", \"max\": ";
-  writeVec3(out, assemblyDiagonal > 0.0 ? globalMax : std::array<float, 3>{0, 0, 0});
+  if (adaptiveBounds.diagonal > 0.0) writeVec3(out, adaptiveBounds.bounds.max);
+  else writeVec3(out, assemblyDiagonal > 0.0 ? globalMax : std::array<float, 3>{0, 0, 0});
   out << ", \"diagonal\": " << assemblyDiagonal << "},\n";
   out << "  \"totals\": {\n";
   out << "    \"trianglesBeforeSimplification\": " << triangleTotal << ",\n";
@@ -5382,6 +5542,42 @@ struct LeafInstance {
   std::string transformSource;
 };
 
+std::vector<FiniteBounds> finiteBoundsForLeafInstances(
+    const std::vector<LeafInstance>& leafInstances,
+    const CliOptions& cliOptions,
+    std::size_t& invalidLeafBoxCount) {
+  std::vector<FiniteBounds> result;
+  result.reserve(leafInstances.size());
+  invalidLeafBoxCount = 0;
+
+  for (const auto& inst : leafInstances) {
+    try {
+      TopoDS_Shape renderShape = inst.sourceShape;
+      if (cliOptions.debugLegacyTransform) {
+        if (!inst.childAccumulatedLocation.IsIdentity()) {
+          renderShape = inst.sourceShape.Moved(inst.childAccumulatedLocation);
+        }
+      } else if (!inst.parentAccumulatedLocation.IsIdentity()) {
+        renderShape = inst.sourceShape.Moved(inst.parentAccumulatedLocation);
+      }
+
+      Bnd_Box box;
+      BRepBndLib::Add(renderShape, box);
+      FiniteBounds bounds;
+      if (safeBndBoxToBounds(box, bounds) && diagonalFromFiniteBounds(bounds) > 0.0) {
+        result.push_back(bounds);
+      } else {
+        invalidLeafBoxCount += 1;
+      }
+    } catch (...) {
+      // Bounds are diagnostic inputs to adaptive tessellation. A malformed
+      // child must not abort or poison conversion of the remaining assembly.
+      invalidLeafBoxCount += 1;
+    }
+  }
+  return result;
+}
+
 void collectLeafInstances(
     const Handle(XCAFDoc_ShapeTool)& shapeTool,
     const Handle(XCAFDoc_ColorTool)& colourTool,
@@ -6070,6 +6266,72 @@ int runAdaptiveMeshSelfTests() {
   check(fallback.reason == "adaptive_invalid_bounds_fallback", "invalid bounds fallback still works");
   check(fallback.linearDeflection == balanced.linearDeflection, "invalid bounds fallback keeps baseline linear");
 
+  Bnd_Box finiteBox;
+  finiteBox.Update(-10.0, -20.0, -30.0, 40.0, 50.0, 60.0);
+  FiniteBounds finiteBounds;
+  check(safeBndBoxToBounds(finiteBox, finiteBounds), "finite Bnd_Box is accepted");
+  check(diagonalFromFiniteBounds(finiteBounds) > 0.0 &&
+        std::isfinite(diagonalFromFiniteBounds(finiteBounds)),
+        "finite bounds produce a finite positive diagonal");
+  const AdaptiveBoundsMetadata directBounds = resolveAdaptiveBounds(finiteBox, false, {}, 0);
+  check(directBounds.source == "global_bnd_box" && !directBounds.fallbackUsed &&
+        std::abs(directBounds.diagonal - diagonalFromFiniteBounds(finiteBounds)) < 0.000001,
+        "existing finite global bounds remain authoritative and unchanged");
+  FiniteBounds zeroBounds;
+  zeroBounds.min = {1.0, 1.0, 1.0};
+  zeroBounds.max = {1.0, 1.0, 1.0};
+  zeroBounds.valid = true;
+  check(diagonalFromFiniteBounds(zeroBounds) == 0.0, "zero assembly diagonal is rejected");
+  FiniteBounds invertedBounds = zeroBounds;
+  invertedBounds.min[0] = 2.0;
+  check(diagonalFromFiniteBounds(invertedBounds) == 0.0, "negative/inverted assembly extent is rejected");
+  FiniteBounds nanBounds = zeroBounds;
+  nanBounds.max[2] = std::numeric_limits<double>::quiet_NaN();
+  check(diagonalFromFiniteBounds(nanBounds) == 0.0, "NaN assembly extent is rejected");
+
+  Bnd_Box openBox;
+  openBox.Update(-10.0, -20.0, -30.0, 40.0, 50.0, 60.0);
+  openBox.OpenXmin();
+  FiniteBounds rejectedOpenBounds;
+  check(!safeBndBoxToBounds(openBox, rejectedOpenBounds), "open Bnd_Box is rejected before Get/cast");
+
+  FiniteBounds leafA;
+  leafA.min = {-5.0, -4.0, -3.0};
+  leafA.max = {5.0, 6.0, 7.0};
+  leafA.valid = true;
+  FiniteBounds invalidLeaf;
+  invalidLeaf.min = {0.0, 0.0, 0.0};
+  invalidLeaf.max = {std::numeric_limits<double>::infinity(), 1.0, 1.0};
+  invalidLeaf.valid = true;
+  const AdaptiveBoundsMetadata recoveredBounds = resolveAdaptiveBounds(
+      openBox, false, {leafA, invalidLeaf}, 0);
+  check(recoveredBounds.diagonal > 0.0 && std::isfinite(recoveredBounds.diagonal),
+        "open aggregate box recovers from finite leaf bounds");
+  check(recoveredBounds.source == "finite_leaf_fallback" && recoveredBounds.fallbackUsed,
+        "recovered bounds report finite leaf fallback source");
+  check(recoveredBounds.finiteLeafBoxCount == 1 && recoveredBounds.invalidLeafBoxCount == 1,
+        "invalid leaf bounds are ignored rather than poisoning fallback");
+
+  const AdaptiveBoundsMetadata unavailableBounds = resolveAdaptiveBounds(openBox, false, {}, 0);
+  check(unavailableBounds.diagonal == 0.0 &&
+        unavailableBounds.disabledReason == "invalid_assembly_bounds",
+        "open aggregate box without finite leaves keeps safe fallback");
+
+  const AdaptiveDeflection recoveredStrong = computeAdaptiveDeflection(
+      low, strong, recoveredBounds.diagonal, recoveredBounds.diagonal * 0.50);
+  check(recoveredStrong.reason == "large_sparse_smoothing",
+        "strong profile applies smoothing when finite fallback bounds cross the gate");
+  check(recoveredStrong.reason != "adaptive_invalid_bounds_fallback",
+        "finite fallback prevents universal invalid-bounds deflection fallback");
+
+  std::ostringstream metadataJson;
+  writeAdaptiveBoundsQualityFields(metadataJson, true, recoveredBounds, {1, 0});
+  check(metadataJson.str().find("\"adaptiveBoundsSource\": \"finite_leaf_fallback\"") != std::string::npos,
+        "adaptive bounds source is serialized in report metadata");
+  check(metadataJson.str().find("\"adaptiveBoundsFallbackUsed\": true") != std::string::npos &&
+        metadataJson.str().find("\"adaptiveAppliedPartCount\": 1") != std::string::npos,
+        "adaptive fallback and applied counts are serialized in report metadata");
+
   check(adaptiveMeshProfileName(parseAdaptiveMeshProfile("conservative")) == "conservative", "explicit conservative accepted");
   check(adaptiveMeshProfileName(parseAdaptiveMeshProfile("standard")) == "standard", "explicit standard accepted");
   check(adaptiveMeshProfileName(parseAdaptiveMeshProfile("strong")) == "strong", "explicit strong accepted");
@@ -6229,26 +6491,18 @@ int main(int argc, char** argv) {
     TDF_LabelSequence freeShapes;
     shapeTool->GetFreeShapes(freeShapes);
 
-    std::array<float, 3> assemblyMin = emptyMinBounds();
-    std::array<float, 3> assemblyMax = emptyMaxBounds();
+    Bnd_Box globalAssemblyBox;
+    bool globalAssemblyBoundsBuildFailed = false;
     for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
       TDF_Label referred;
       TopoDS_Shape freeShape = shapeForLabel(shapeTool, freeShapes.Value(i), referred);
       if (freeShape.IsNull()) continue;
-      Bnd_Box box;
-      BRepBndLib::Add(freeShape, box);
-      if (box.IsVoid()) continue;
-      Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
-      box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
-      assemblyMin[0] = std::min(assemblyMin[0], static_cast<float>(xmin));
-      assemblyMin[1] = std::min(assemblyMin[1], static_cast<float>(ymin));
-      assemblyMin[2] = std::min(assemblyMin[2], static_cast<float>(zmin));
-      assemblyMax[0] = std::max(assemblyMax[0], static_cast<float>(xmax));
-      assemblyMax[1] = std::max(assemblyMax[1], static_cast<float>(ymax));
-      assemblyMax[2] = std::max(assemblyMax[2], static_cast<float>(zmax));
+      try {
+        BRepBndLib::Add(freeShape, globalAssemblyBox);
+      } catch (...) {
+        globalAssemblyBoundsBuildFailed = true;
+      }
     }
-    const double assemblyBboxDiagonal = safeAssemblyDiagonal(assemblyMin, assemblyMax);
-    logLine("Assembly bbox diagonal for adaptive mesh: " + std::to_string(assemblyBboxDiagonal));
 
     Stats stats;
     stats.freeShapes = freeShapes.Length();
@@ -6334,6 +6588,66 @@ int main(int argc, char** argv) {
     }
     logLine("Leaf instances collected: " + std::to_string(leafInstances.size()));
 
+    FiniteBounds globalBoundsPreview;
+    const bool globalBoundsUsable = !globalAssemblyBoundsBuildFailed &&
+        safeBndBoxToBounds(globalAssemblyBox, globalBoundsPreview) &&
+        diagonalFromFiniteBounds(globalBoundsPreview) > 0.0;
+
+    const std::vector<LeafInstance>* boundsLeafInstances = &leafInstances;
+    std::vector<LeafInstance> allAssemblyLeafInstances;
+    if (!globalBoundsUsable && adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && cliOptions.hasLabelList) {
+      // Chunked conversions still need one stable whole-assembly extent. The
+      // fallback traversal ignores the output label filter, but it only reads
+      // finite transformed leaf boxes and never mutates emitted geometry.
+      CliOptions boundsOptions = cliOptions;
+      boundsOptions.hasLabelList = false;
+      boundsOptions.labelListPath.clear();
+      boundsOptions.selectedLabels.clear();
+      for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
+        collectLeafInstances(
+            shapeTool,
+            colourTool,
+            layerTool,
+            &rawStepStyles,
+            boundsOptions,
+            freeShapes.Value(i),
+            quality,
+            "",
+            TopLoc_Location(),
+            "label_shape_location",
+            false,
+            noInheritedColour,
+            noInheritedLayers,
+            "",
+            "",
+            "",
+            allAssemblyLeafInstances);
+      }
+      boundsLeafInstances = &allAssemblyLeafInstances;
+      logLine("Adaptive bounds fallback collected whole-assembly leaf instances: " +
+              std::to_string(allAssemblyLeafInstances.size()));
+    }
+
+    std::vector<FiniteBounds> finiteLeafBounds;
+    std::size_t invalidLeafBoxCount = 0;
+    if (!globalBoundsUsable) {
+      finiteLeafBounds = finiteBoundsForLeafInstances(*boundsLeafInstances, cliOptions, invalidLeafBoxCount);
+    }
+    const AdaptiveBoundsMetadata adaptiveBounds = resolveAdaptiveBounds(
+        globalAssemblyBox,
+        globalAssemblyBoundsBuildFailed,
+        finiteLeafBounds,
+        invalidLeafBoxCount);
+    const double assemblyBboxDiagonal = adaptiveBounds.diagonal;
+    logLine("Adaptive assembly bounds: source=" + adaptiveBounds.source +
+            " fallbackUsed=" + (adaptiveBounds.fallbackUsed ? std::string("true") : std::string("false")) +
+            " finiteLeafBoxes=" + std::to_string(adaptiveBounds.finiteLeafBoxCount) +
+            " invalidLeafBoxes=" + std::to_string(adaptiveBounds.invalidLeafBoxCount));
+    logLine("Assembly bbox diagonal for adaptive mesh: " + std::to_string(assemblyBboxDiagonal));
+    if (adaptiveMeshEnabled(cliOptions.adaptiveMeshMode) && !adaptiveBounds.disabledReason.empty()) {
+      logLine("Adaptive mesh disabled reason: " + adaptiveBounds.disabledReason);
+    }
+
     if (cliOptions.generatePrototypeReport) {
       logLine("Writing prototype-reuse-report.json...");
       writePrototypeReuseReport(outputDir / "prototype-reuse-report.json", leafInstances, shapeTool, colourTool, layerTool, &rawStepStyles, cliOptions, quality);
@@ -6411,7 +6725,7 @@ int main(int argc, char** argv) {
     writeReport(outputDir / "xcaf-report.json", inputPath, quality, colourSpace, colourMode, cliOptions, stats, rawStepStyles.colourAudit(), primitives, glbSize);
 
     logLine("Writing mesh-report.json");
-    writeMeshReport(outputDir / "mesh-report.json", inputPath, quality, cliOptions, stats, primitives);
+    writeMeshReport(outputDir / "mesh-report.json", inputPath, quality, cliOptions, stats, adaptiveBounds, primitives);
 
     logLine("Writing material-style-profile.json");
     writeMaterialStyleProfile(outputDir / "material-style-profile.json", rawStepStyles, stats);
