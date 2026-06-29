@@ -2,15 +2,17 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ArchiveRestore, ArrowDown, ArrowUp, Box, Check, ChevronRight, Copy, Download, Folder,
-  FolderOpen, HardDrive, History, List, Loader2, Moon, MoreVertical, Pencil, Plus, QrCode,
+  FolderOpen, HardDrive, History, List, Loader2, LogOut, Moon, MoreVertical, Pencil, Plus, QrCode,
   RefreshCw, Replace, Search, Share2, Sun, Trash2, Upload, X
 } from "lucide-react";
 import {
   batchModels, createProject, createPublicShare, deleteProject, getAppConfig, getPublicShareSettings, getStorageQuota,
   listLibraryModels, listProjects, renameModel, renameProject, uploadModel,
   initChunkedUpload, uploadChunk, completeChunkedUpload, deleteChunkedUpload,
-  getModel, makeRevisionCurrent, replaceRevision, updateRevisionPublicSelectable, uploadNewRevision
+  getModel, makeRevisionCurrent, replaceRevision, updateRevisionPublicSelectable, uploadNewRevision,
+  getMe, postLogout
 } from "../api";
+import type { MeResponse } from "../api";
 import { downloadPublicShareQr } from "../qr";
 import type { BatchAction, ConversionQuality, MeshiqAdaptiveSmoothing, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, PublicShareLinkMode, StorageQuota, UploadTask } from "../types";
 import { activeStatuses, formatDate, formatFileSize, statusKind, statusLabel } from "../utils";
@@ -81,9 +83,12 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
   const [dxfUploadEnabled, setDxfUploadEnabled] = useState(false);
   const [revisionDialog, setRevisionDialog] = useState<{ kind: "new" | "replace" | "manage" | "share"; model: ModelRecord; revisionId?: number } | null>(null);
   const [dragState, setDragState] = useState<{ active: boolean; projectId: number | null; label: string; blocked: boolean }>({ active: false, projectId: null, label: "Unsorted", blocked: false });
+  const [me, setMe] = useState<MeResponse | null>(null);
   const polling = useRef<number | undefined>(undefined);
   const dragDepth = useRef(0);
   const searchInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { void getMe().then(setMe); }, []);
 
   const project = view.kind === "project" ? projects.find((item) => item.id === view.id) : undefined;
   const title = view.kind === "all" ? "All models" : view.kind === "projects" ? "Projects" :
@@ -209,6 +214,7 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
       <div className="brand"><span className="brand-mark"><Box size={20}/></span><strong>ModelBase</strong></div>
       <label className="global-search"><Search size={18}/><input ref={searchInput} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${view.kind === "projects" ? "projects" : "models"}`} />{query && <button type="button" className="search-clear" aria-label="Clear search" onClick={() => { setQuery(""); searchInput.current?.focus(); }}><X size={15}/></button>}</label>
       <button className="icon-button" onClick={toggleTheme} title="Toggle theme">{theme === "dark" ? <Sun size={17}/> : <Moon size={17}/>}</button>
+      {me?.authenticated && <AccountMenu me={me} />}
       <button className="primary-button" onClick={() => openUpload()}><Upload size={16}/> Upload</button>
     </header>
     <div className="library-layout">
@@ -252,6 +258,74 @@ export function AdminPage({ theme, toggleTheme }: { theme: "dark" | "light"; tog
     {revisionDialog?.kind === "manage" && <ManageRevisionsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)} onReplace={(revisionId)=>setRevisionDialog({kind:"replace",model:revisionDialog.model,revisionId})} onChanged={async()=>refresh(false)}/>}
     {revisionDialog?.kind === "share" && <ShareSettingsDialog model={revisionDialog.model} onClose={()=>setRevisionDialog(null)}/>}
   </div>;
+}
+
+function AccountMenu({ me }: { me: Extract<MeResponse, { authenticated: true }> }) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const [busy, setBusy] = useState(false);
+  const menuWidth = 220;
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const button = buttonRef.current;
+      if (!button) return;
+      const rect = button.getBoundingClientRect();
+      const height = menuRef.current?.offsetHeight ?? 110;
+      const gap = 5;
+      setPosition({
+        left: Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.right - menuWidth)),
+        top: rect.bottom + gap + height <= window.innerHeight - 8 ? rect.bottom + gap : Math.max(8, rect.top - height - gap)
+      });
+    };
+    place();
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!buttonRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  const label = me.user.displayName || me.user.email;
+  const initials = label.trim().split(/\s+/).slice(0, 2).map(w => w[0]?.toUpperCase() ?? "").join("") || "?";
+
+  const handleSignOut = async () => {
+    if (busy) return;
+    setBusy(true);
+    await postLogout();
+  };
+
+  const menu = open ? createPortal(
+    <div ref={menuRef} className="menu-popover account-popover" style={position}>
+      <div className="account-popover-user">
+        <strong>{label}</strong>
+        {me.user.displayName && <span>{me.user.email}</span>}
+        {me.organization && <span className="account-popover-org">{me.organization.name}</span>}
+      </div>
+      <button onClick={handleSignOut} disabled={busy}><LogOut size={15}/>{busy ? "Signing out…" : "Sign out"}</button>
+    </div>,
+    document.body
+  ) : null;
+
+  return (
+    <div className="account-menu">
+      <button ref={buttonRef} className="account-avatar" onClick={() => setOpen(!open)} aria-expanded={open} aria-label="Account menu" title={label}>{initials}</button>
+      {menu}
+    </div>
+  );
 }
 
 function SideItem({active,icon,label,onClick}:{active:boolean;icon:React.ReactElement<{size?:number}>;label:string;onClick:()=>void}) {

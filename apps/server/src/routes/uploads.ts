@@ -9,6 +9,21 @@ import { parseRevisionMetadata, registerModelAndJob, registerRevisionAndJob } fr
 import { parseConversionQuality } from "../quality.js";
 import { parseMeshiqAdaptiveSmoothing } from "../meshiq.js";
 import { isUploadExtensionAllowed, uploadExtensionError } from "../featureFlags.js";
+import {
+  authorizeRole,
+  authorizeModelAccess,
+  authorizeUploadHandle,
+  UPLOAD_ROLE,
+  type AccessResult
+} from "../auth/index.js";
+
+// Send the standard JSON error for a failed authorization result. Returns true
+// when the response was sent (caller stops), false when access is allowed.
+function denied(res: express.Response, access: AccessResult): boolean {
+  if (access.ok) return false;
+  res.status(access.status).json({ error: access.error });
+  return true;
+}
 
 const MAX_UPLOAD_BYTES = 524288000;       // 500 MB
 const MAX_UPLOAD_CHUNK_BYTES = 52428800; // 50 MB
@@ -48,6 +63,9 @@ function parseProjectId(value: unknown): number | null {
 uploadsRouter.post("/init", (req, res) => {
   try {
     const { filename, sizeBytes, projectId, quality, meshiqAdaptiveSmoothing, modelSlug } = req.body || {};
+
+    // Starting an upload (new model or new revision) requires member+ (finding 6).
+    if (denied(res, authorizeRole(req, UPLOAD_ROLE))) return;
 
     if (typeof filename !== "string" || !filename) {
       res.status(400).json({ error: "filename is required." });
@@ -92,6 +110,10 @@ uploadsRouter.post("/init", (req, res) => {
       return;
     }
 
+    if (parsedFolderId !== null && req.authEnabled) {
+      res.status(403).json({ error: "Projects are not available in workspace mode." });
+      return;
+    }
     if (parsedFolderId !== null && !getFolderById(parsedFolderId)) {
       res.status(400).json({ error: "Selected project was not found." });
       return;
@@ -107,9 +129,10 @@ uploadsRouter.post("/init", (req, res) => {
       return;
     }
     const existingModelSlug = typeof modelSlug === "string" ? modelSlug.trim() : "";
-    if (existingModelSlug && !getModelBySlug(existingModelSlug)) {
-      res.status(404).json({ error: "Model not found." });
-      return;
+    if (existingModelSlug) {
+      // A revision upload must target a model in the caller's workspace (finding 6).
+      const targetModel = getModelBySlug(existingModelSlug);
+      if (denied(res, authorizeModelAccess(req, targetModel, UPLOAD_ROLE))) return;
     }
     const revisionMetadata = parseRevisionMetadata(req.body, !existingModelSlug);
 
@@ -135,6 +158,8 @@ uploadsRouter.post("/init", (req, res) => {
       issuedDate: revisionMetadata.issuedDate,
       makeCurrent: revisionMetadata.makeCurrent,
       allowPublicSelectable: revisionMetadata.allowPublicSelectable,
+      organizationId: req.auth?.organization?.id ?? null,
+      createdByUserId: req.auth?.user?.id ?? null,
       totalChunks,
       chunkSizeBytes: MAX_UPLOAD_CHUNK_BYTES,
       createdAt: new Date().toISOString()
@@ -178,6 +203,8 @@ uploadsRouter.post("/:uploadId/chunk", chunkUpload.single("chunk"), (req, res) =
     }
 
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    // Only the session/org that created the handle may push chunks to it (finding 6).
+    if (denied(res, authorizeUploadHandle(req, metadata))) return;
 
     const chunkIndex = Number(typeof req.query.chunkIndex === "string" ? req.query.chunkIndex : "");
     const totalChunks = Number(typeof req.query.totalChunks === "string" ? req.query.totalChunks : "");
@@ -232,6 +259,15 @@ uploadsRouter.post("/:uploadId/complete", async (req, res, next) => {
     }
 
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    // The completing session/org must own the handle (finding 6).
+    if (denied(res, authorizeUploadHandle(req, metadata))) return;
+    if (denied(res, authorizeRole(req, UPLOAD_ROLE))) return;
+    // Re-verify revision target ownership at completion: a revision upload must
+    // still resolve to a model in the caller's workspace.
+    if (typeof metadata.modelSlug === "string" && metadata.modelSlug) {
+      const targetModel = getModelBySlug(metadata.modelSlug);
+      if (denied(res, authorizeModelAccess(req, targetModel, UPLOAD_ROLE))) return;
+    }
 
     // Verify all chunks exist
     let assembledSize = 0;
@@ -291,6 +327,8 @@ uploadsRouter.post("/:uploadId/complete", async (req, res, next) => {
           meshiqAdaptiveSmoothing: metadata.meshiqAdaptiveSmoothing,
           folderId: metadata.projectId,
           originalSizeBytes: metadata.sizeBytes,
+          organizationId: metadata.organizationId ?? null,
+          createdByUserId: metadata.createdByUserId ?? null,
           revisionLabel: metadata.revisionLabel,
           issuedDate: metadata.issuedDate,
           makeCurrent: metadata.makeCurrent,
@@ -319,6 +357,13 @@ uploadsRouter.delete("/:uploadId", (req, res) => {
     }
 
     const uploadDir = path.join(chunkedUploadsRoot, uploadId);
+    const metadataPath = path.join(uploadDir, "metadata.json");
+    // Only the owning session/org may cancel a handle (finding 6). A valid handle
+    // always has metadata (written during init before the id is returned).
+    if (fs.existsSync(metadataPath)) {
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+      if (denied(res, authorizeUploadHandle(req, metadata))) return;
+    }
     if (fs.existsSync(uploadDir)) {
       fs.rmSync(uploadDir, { recursive: true, force: true });
     }
