@@ -140,6 +140,29 @@ export type ParsedDxf = {
     inserts: DxfInsert[];
     skipped: Record<string, number>;
   };
+  diagnostics: DxfEntityDiagnostics;
+};
+
+export type DxfEntityDiagnostics = {
+  topLevelEntityTypeCounts: Record<string, number>;
+  blockEntityTypeCounts: Record<string, number>;
+  topLevelSkippedEntitySummary: Record<string, number>;
+  blockSkippedEntitySummary: Record<string, number>;
+  unsupportedEntitySummary: Record<string, number>;
+  unsupportedEntitiesWithCoordinates: Record<string, number>;
+  unsupportedEntitiesWithNonZeroZ: Record<string, number>;
+  polylineFlagDistribution: Record<string, number>;
+  vertexFlagDistribution: Record<string, number>;
+  unsupportedGeometry: {
+    curveOrWireEntityCount: number;
+    surfaceEntityCount: number;
+    proxyEntityCount: number;
+    otherEntityCount: number;
+    hasNonZeroZ: boolean;
+    topLevelEntityCount: number;
+    blockEntityCount: number;
+    onlyInsideBlocks: boolean;
+  };
 };
 
 export type DxfBlockTraversalSummary = {
@@ -218,6 +241,17 @@ export type DxfFormatReport = {
     REGION: number;
   };
   skippedEntitySummary: Record<string, number>;
+  topLevelEntityTypeCounts: Record<string, number>;
+  blockEntityTypeCounts: Record<string, number>;
+  topLevelSkippedEntitySummary: Record<string, number>;
+  blockSkippedEntitySummary: Record<string, number>;
+  unsupportedEntitySummary: Record<string, number>;
+  unsupportedEntitiesWithCoordinates: Record<string, number>;
+  unsupportedEntitiesWithNonZeroZ: Record<string, number>;
+  polylineFlagDistribution: Record<string, number>;
+  vertexFlagDistribution: Record<string, number>;
+  unsupportedGeometry: DxfEntityDiagnostics["unsupportedGeometry"];
+  geometryInsideBlocksOnly: boolean;
   acisEntityCount: number;
   layerCount: number;
   layers: { name: string; colorIndex: number; trueColor: number | null; hex: string; frozen: boolean }[];

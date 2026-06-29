@@ -516,6 +516,10 @@ Key log lines:
 
 > "This DXF contains no 3D mesh geometry. Ensure you are exporting a 3D view from Revit, not a plan or elevation."
 
+If non-planar `SPLINE`, `LINE`, `ARC`, `CIRCLE`, surface, or proxy records are present without faces, report the file as unsupported surface/curve/wire/proxy geometry rather than as merely 2D. These records may carry useful 3D coordinates, but they do not define polygon faces and must not be triangulated by guesswork.
+
+> "Rhino users: mesh the model first, then export DXF as mesh/polygon mesh. NURBS surfaces, curves, wires, and solids are not supported by the free DXF importer."
+
 ### 10.4 2D Only (Hard Error)
 
 > "This DXF appears to be a 2D drawing ({count} 2D entities detected, 0 3D mesh entities). Create a dedicated 3D view in Revit before exporting."
@@ -1006,3 +1010,17 @@ Rough development-machine guardrails (not production SLAs):
 - Sampled memory deltas are coarse process observations, not a true peak-memory profiler. Very large (hundreds of MB) private exports still require controlled local benchmarking before rollout.
 
 > Recommended Phase 2E prompt: Run the local compatibility harness against an authorized set of real Revit and AutoCAD ASCII DXF exports, record only anonymized aggregate results, reproduce any failures as minimal synthetic fixtures, add parser resource ceilings/fuzz cases, and produce a reviewed upload/rollback plan behind a disabled feature flag. Keep DXF uploads hidden and do not deploy until the corpus, limits, and migration-free rollout plan are explicitly approved.
+
+---
+
+## Rhino wire-export hardening and optional converter sidecars
+
+The native free path remains first and authoritative: TypeScript `dxf-js` parsing of explicit polygon mesh records. A 3D DXF containing only curves, wires, NURBS surfaces, or proxies is not a hidden mesh; without face topology, the importer cannot produce a trustworthy model. The local `npm run dxf:inspect -- <input.dxf>` command records anonymized entity, block, flag, coordinate, and zero-triangle diagnostics under ignored `.tmp/` storage without touching the app database or production storage.
+
+Rhino or AutoCAD conversion may be evaluated later as an optional manual/commercial sidecar fallback, never as a dependency of the native Linux worker. A sidecar should run on a separate Windows machine or VM, consume a separate queue, enforce a strict timeout, and initially process one job at a time. Private inputs and outputs must remain outside Git. The sidecar must not expose Cloudflare or router ports and must not mutate the production database except through the worker's normal artifact-completion contract.
+
+- Rhino.Compute is a plausible server-style geometry path, but it is Windows-based and requires Rhino licensing; it is not a free Linux EliteDesk-native solution.
+- AutoCAD automation may provide stronger DWG/DXF fidelity, but its licensing and unattended-automation constraints require a separate evaluation before implementation.
+- BricsCAD, ODA, and ARES are later evaluation candidates only.
+
+No sidecar dependency, DWG support, ACIS conversion, or proprietary SDK is added in this phase.

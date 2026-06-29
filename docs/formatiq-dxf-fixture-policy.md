@@ -39,6 +39,14 @@ Optional explicit local paths are supported:
 npm run dxf:compat -- "D:\private-dxf" "D:\private-dxf-results"
 ```
 
+For a single-file structural diagnosis without conversion, run:
+
+```powershell
+npm run dxf:inspect -- "D:\private-dxf\sample.dxf"
+```
+
+The inspector omits the source name and all coordinates from its output. It prints only anonymized aggregate entity, block, flag, ACIS/MESH, and 2D/3D indicators, then writes the same JSON below ignored `.tmp/formatiq-inspection/`. An optional output path is accepted only when it remains below the repository `.tmp/` directory.
+
 The default output is `.tmp/formatiq-compatibility-results/`. The harness prints and writes a summary containing filename, status, entity/ACIS/MESH/block/instance counts, triangles, materials, raw/display GLB sizes, elapsed time, and warnings. Outputs remain local and ignored.
 
 ## Review and sanitization checklist

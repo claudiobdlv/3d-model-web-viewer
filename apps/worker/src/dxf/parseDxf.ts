@@ -6,7 +6,7 @@ import fs from "node:fs";
 import type {
   DxfToken, DxfLayer, DxfBlock, DxfInsert, DxfAcisEntity,
   DxfSupportedEntity, Dxf3DFace, DxfPolyfaceMesh, DxfMeshEntity,
-  ParsedDxf, DxfFaceRecord,
+  ParsedDxf, DxfFaceRecord, DxfEntityDiagnostics,
 } from "./types.js";
 import { resolveColor } from "./colors.js";
 import { defaultExtrusion, isDefaultExtrusion, ocsToWcs } from "./ocs.js";
@@ -46,6 +46,117 @@ function splitSections(tokens: DxfToken[]): Record<string, DxfToken[]> {
     i++;
   }
   return sections;
+}
+
+const curveOrWireTypes = new Set([
+  "ARC", "CIRCLE", "ELLIPSE", "HELIX", "LINE", "LWPOLYLINE", "POLYLINE_2D", "RAY", "SPLINE", "XLINE",
+]);
+const surfaceTypes = new Set([
+  "EXTRUDEDSURFACE", "LOFTEDSURFACE", "NURBSURFACE", "PLANESURFACE", "REVOLVEDSURFACE", "SURFACE", "SWEPTSURFACE",
+]);
+const structuralEntityTypes = new Set(["3DFACE", "3DSOLID", "BODY", "INSERT", "MESH", "REGION", "SEQEND", "VERTEX"]);
+
+type RawEntityInspection = {
+  entityTypeCounts: Record<string, number>;
+  unsupportedEntitySummary: Record<string, number>;
+  unsupportedEntitiesWithCoordinates: Record<string, number>;
+  unsupportedEntitiesWithNonZeroZ: Record<string, number>;
+  polylineFlagDistribution: Record<string, number>;
+  vertexFlagDistribution: Record<string, number>;
+  curveOrWireEntityCount: number;
+  surfaceEntityCount: number;
+  proxyEntityCount: number;
+  otherEntityCount: number;
+};
+
+function increment(summary: Record<string, number>, key: string): void {
+  summary[key] = (summary[key] ?? 0) + 1;
+}
+
+function mergeSummaries(...summaries: Record<string, number>[]): Record<string, number> {
+  const merged: Record<string, number> = {};
+  for (const summary of summaries) {
+    for (const [key, count] of Object.entries(summary)) merged[key] = (merged[key] ?? 0) + count;
+  }
+  return merged;
+}
+
+function inspectRawEntities(tokens: DxfToken[], blockSection: boolean): RawEntityInspection {
+  const result: RawEntityInspection = {
+    entityTypeCounts: {}, unsupportedEntitySummary: {}, unsupportedEntitiesWithCoordinates: {},
+    unsupportedEntitiesWithNonZeroZ: {}, polylineFlagDistribution: {}, vertexFlagDistribution: {},
+    curveOrWireEntityCount: 0, surfaceEntityCount: 0, proxyEntityCount: 0, otherEntityCount: 0,
+  };
+  let insideBlock = !blockSection;
+
+  for (let i = 0; i < tokens.length;) {
+    if (tokens[i]!.code !== 0) { i++; continue; }
+    const rawType = tokens[i]!.value;
+    if (blockSection && rawType === "BLOCK") { insideBlock = true; i++; continue; }
+    if (blockSection && rawType === "ENDBLK") { insideBlock = false; i++; continue; }
+    if (!insideBlock || rawType === "ENDSEC" || rawType === "EOF") { i++; continue; }
+
+    let j = i + 1;
+    let flags = 0;
+    let hasCoordinates = false;
+    let hasNonZeroZ = false;
+    while (j < tokens.length && tokens[j]!.code !== 0) {
+      const { code, value } = tokens[j]!;
+      if (code === 70) flags = Number.parseInt(value, 10) || 0;
+      if ((code >= 10 && code <= 18) || (code >= 20 && code <= 28)) hasCoordinates = true;
+      if (code >= 30 && code <= 38 && Math.abs(Number.parseFloat(value) || 0) > 1e-12) hasNonZeroZ = true;
+      j++;
+    }
+
+    if (rawType !== "SEQEND") increment(result.entityTypeCounts, rawType);
+    if (rawType === "POLYLINE") increment(result.polylineFlagDistribution, String(flags));
+    if (rawType === "VERTEX") increment(result.vertexFlagDistribution, String(flags));
+
+    const diagnosticType = rawType === "POLYLINE" && !(flags & 16) && !(flags & 64) ? "POLYLINE_2D" : rawType;
+    const isProxy = diagnosticType.includes("PROXY");
+    const isUnsupported = !structuralEntityTypes.has(rawType) && !(rawType === "POLYLINE" && ((flags & 16) || (flags & 64)));
+    if (isUnsupported) {
+      increment(result.unsupportedEntitySummary, diagnosticType);
+      if (hasCoordinates) increment(result.unsupportedEntitiesWithCoordinates, diagnosticType);
+      if (hasNonZeroZ) increment(result.unsupportedEntitiesWithNonZeroZ, diagnosticType);
+      if (curveOrWireTypes.has(diagnosticType)) result.curveOrWireEntityCount++;
+      else if (surfaceTypes.has(diagnosticType)) result.surfaceEntityCount++;
+      else if (isProxy) result.proxyEntityCount++;
+      else result.otherEntityCount++;
+    }
+    i = j;
+  }
+  return result;
+}
+
+function buildEntityDiagnostics(sections: Record<string, DxfToken[]>): DxfEntityDiagnostics {
+  const top = inspectRawEntities(sections["ENTITIES"] ?? [], false);
+  const block = inspectRawEntities(sections["BLOCKS"] ?? [], true);
+  const unsupportedEntitySummary = mergeSummaries(top.unsupportedEntitySummary, block.unsupportedEntitySummary);
+  const topLevelEntityCount = Object.values(top.unsupportedEntitySummary).reduce((sum, count) => sum + count, 0);
+  const blockEntityCount = Object.values(block.unsupportedEntitySummary).reduce((sum, count) => sum + count, 0);
+  const nonZeroZ = mergeSummaries(top.unsupportedEntitiesWithNonZeroZ, block.unsupportedEntitiesWithNonZeroZ);
+  return {
+    topLevelEntityTypeCounts: top.entityTypeCounts,
+    blockEntityTypeCounts: block.entityTypeCounts,
+    topLevelSkippedEntitySummary: top.unsupportedEntitySummary,
+    blockSkippedEntitySummary: block.unsupportedEntitySummary,
+    unsupportedEntitySummary,
+    unsupportedEntitiesWithCoordinates: mergeSummaries(top.unsupportedEntitiesWithCoordinates, block.unsupportedEntitiesWithCoordinates),
+    unsupportedEntitiesWithNonZeroZ: nonZeroZ,
+    polylineFlagDistribution: mergeSummaries(top.polylineFlagDistribution, block.polylineFlagDistribution),
+    vertexFlagDistribution: mergeSummaries(top.vertexFlagDistribution, block.vertexFlagDistribution),
+    unsupportedGeometry: {
+      curveOrWireEntityCount: top.curveOrWireEntityCount + block.curveOrWireEntityCount,
+      surfaceEntityCount: top.surfaceEntityCount + block.surfaceEntityCount,
+      proxyEntityCount: top.proxyEntityCount + block.proxyEntityCount,
+      otherEntityCount: top.otherEntityCount + block.otherEntityCount,
+      hasNonZeroZ: Object.keys(nonZeroZ).length > 0,
+      topLevelEntityCount,
+      blockEntityCount,
+      onlyInsideBlocks: topLevelEntityCount === 0 && blockEntityCount > 0,
+    },
+  };
 }
 
 // ─── HEADER ───────────────────────────────────────────────────────────────────
@@ -659,5 +770,6 @@ export function parseDxf(filePath: string): ParsedDxf {
     layers,
     blocks,
     entities: entityResult,
+    diagnostics: buildEntityDiagnostics(sections),
   };
 }

@@ -10,6 +10,7 @@
     "dev": "tsx src/worker.ts",
     "start": "tsx src/worker.ts",
     "dxf:convert": "tsx scripts/convert-dxf-fixture.ts",
+    "dxf:inspect": "tsx scripts/inspect-dxf.ts",
     "dxf:compat": "tsx scripts/check-dxf-private-samples.ts",
     "dxf:benchmark": "tsx scripts/benchmark-dxf.ts"
   },

@@ -121,6 +121,7 @@ export function buildFormatReport(params: {
   // Also check if any block definitions have geometry (accessed via inserts)
   const anyBlockHasGeometry = hasInserts && traversal.reachableTriangleCount > 0;
   const hasUsable3D = hasSupportedEntities || anyBlockHasGeometry;
+  const geometryInsideBlocksOnly = !hasSupportedEntities && anyBlockHasGeometry;
 
   let conversionStatus: DxfConversionStatus;
   const warnings: string[] = [];
@@ -163,14 +164,29 @@ export function buildFormatReport(params: {
       "Export a dedicated Revit 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids.";
   } else if (!hasUsable3D) {
     conversionStatus = "no-usable-3d-geometry";
-    const skippedTotal = Object.values(entities.skipped).reduce((a, b) => a + b, 0);
+    const skippedTotal = Object.values(parsedDxf.diagnostics.unsupportedEntitySummary).reduce((a, b) => a + b, 0);
+    const unsupported = parsedDxf.diagnostics.unsupportedGeometry;
     if (meshEntityCount > 0) {
       warnings.push("DXF MESH entities contained no usable level-0 triangles; review the MESH diagnostics above.");
       exportAdvice = "Re-export a level-0 polygon mesh or repair the malformed MESH vertex/face lists in the source application.";
-    } else if (skippedTotal > 0) {
-      warnings.push("DXF contains only 2D or unsupported entities. No 3D mesh geometry found.");
+    } else if (
+      unsupported.surfaceEntityCount > 0 ||
+      unsupported.proxyEntityCount > 0 ||
+      (unsupported.curveOrWireEntityCount > 0 && unsupported.hasNonZeroZ)
+    ) {
+      warnings.push(
+        `DXF contains unsupported surface/curve/wire/proxy geometry (${unsupported.curveOrWireEntityCount} curve/wire, ` +
+          `${unsupported.surfaceEntityCount} surface, ${unsupported.proxyEntityCount} proxy) but no supported polygon mesh. ` +
+          "This geometry cannot be triangulated safely by the free DXF importer."
+      );
       exportAdvice =
-        "Export a dedicated Revit 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids.";
+        "Rhino users: mesh the model first, then export DXF as mesh/polygon mesh. NURBS surfaces, curves, wires, and solids are not supported by the free DXF importer. " +
+        "Revit users: export DXF from a dedicated 3D view with Solids set to Polymesh and Colours set to By element/display colours.";
+      warnings.push(exportAdvice);
+    } else if (skippedTotal > 0) {
+      warnings.push("DXF contains 2D-only or otherwise non-mesh entities. No usable 3D polygon mesh was found.");
+      exportAdvice =
+        "Export a 3D polygon mesh. Revit users: use a dedicated 3D view with Solids set to Polymesh and Colours set to By element/display colours.";
       warnings.push(exportAdvice);
     } else {
       warnings.push("DXF appears to contain no geometry entities at all.");
@@ -197,7 +213,18 @@ export function buildFormatReport(params: {
     sourceFileName: path.basename(sourcePath),
     sourceFileSizeBytes,
     entityCounts,
-    skippedEntitySummary: entities.skipped,
+    skippedEntitySummary: parsedDxf.diagnostics.unsupportedEntitySummary,
+    topLevelEntityTypeCounts: parsedDxf.diagnostics.topLevelEntityTypeCounts,
+    blockEntityTypeCounts: parsedDxf.diagnostics.blockEntityTypeCounts,
+    topLevelSkippedEntitySummary: parsedDxf.diagnostics.topLevelSkippedEntitySummary,
+    blockSkippedEntitySummary: parsedDxf.diagnostics.blockSkippedEntitySummary,
+    unsupportedEntitySummary: parsedDxf.diagnostics.unsupportedEntitySummary,
+    unsupportedEntitiesWithCoordinates: parsedDxf.diagnostics.unsupportedEntitiesWithCoordinates,
+    unsupportedEntitiesWithNonZeroZ: parsedDxf.diagnostics.unsupportedEntitiesWithNonZeroZ,
+    polylineFlagDistribution: parsedDxf.diagnostics.polylineFlagDistribution,
+    vertexFlagDistribution: parsedDxf.diagnostics.vertexFlagDistribution,
+    unsupportedGeometry: parsedDxf.diagnostics.unsupportedGeometry,
+    geometryInsideBlocksOnly,
     acisEntityCount,
     layerCount: Object.keys(layers).length,
     layers: layerSummaries,

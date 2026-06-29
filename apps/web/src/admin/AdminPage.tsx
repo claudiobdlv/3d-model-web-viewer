@@ -764,7 +764,7 @@ function UploadDialog({
           />
         </label>
         {hint && <div className="upload-hint">{hint}</div>}
-        {dxfUploadEnabled && <div className="upload-hint"><strong>DXF export guide</strong><p>Revit users: export DXF from a dedicated 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids.</p></div>}
+        {dxfUploadEnabled && <div className="upload-hint"><strong>DXF export guide</strong><p>Revit users: export DXF from a dedicated 3D view with Solids set to Polymesh and Colours set to By element/display colours. Avoid ACIS solids.</p><p>Rhino users: mesh the model first, then export DXF as mesh/polygon mesh. NURBS surfaces, curves, wires, and solids are not supported by the free DXF importer.</p></div>}
         <label>
           Project
           <select

@@ -686,7 +686,76 @@ test("convertDxfToGlb: ACIS-only fixture throws with actionable advice", async (
   });
 });
 
-// Note: No fixture exists for mixed-ACIS, 2D-only, or no-geometry cases.
-// These paths are covered by the parseDxf unit tests above and by the
-// buildFormatReport logic. Full integration tests can be added in Phase 2B
-// when additional fixtures are created.
+test("parseDxf: block-contained 3D wires are diagnosed without inventing faces", () => {
+  const parsed = parseDxf(fix("test-unsupported-3d-curves-in-block.dxf"));
+  assert.deepEqual(parsed.diagnostics.topLevelEntityTypeCounts, { INSERT: 1 });
+  assert.deepEqual(parsed.diagnostics.blockEntityTypeCounts, {
+    LINE: 1,
+    SPLINE: 1,
+    POLYLINE: 1,
+    VERTEX: 2,
+  });
+  assert.deepEqual(parsed.diagnostics.topLevelSkippedEntitySummary, {});
+  assert.deepEqual(parsed.diagnostics.blockSkippedEntitySummary, {
+    LINE: 1,
+    SPLINE: 1,
+    POLYLINE_2D: 1,
+  });
+  assert.deepEqual(parsed.diagnostics.polylineFlagDistribution, { "0": 1 });
+  assert.deepEqual(parsed.diagnostics.vertexFlagDistribution, { "0": 2 });
+  assert.equal(parsed.diagnostics.unsupportedGeometry.curveOrWireEntityCount, 3);
+  assert.equal(parsed.diagnostics.unsupportedGeometry.hasNonZeroZ, true);
+  assert.equal(parsed.diagnostics.unsupportedGeometry.onlyInsideBlocks, true);
+  assert.equal(parsed.entities.supported.length, 0);
+  assert.equal(parsed.blocks.WIRE_COMPONENT!.triangleCount, 0);
+});
+
+test("convertDxfToGlb: 3D curve/wire export fails with Rhino-specific mesh guidance", async () => {
+  await withTmpDir(async (dir) => {
+    await assert.rejects(
+      () => convertDxfToGlb({
+        sourcePath: fix("test-unsupported-3d-curves-in-block.dxf"),
+        outputDir: dir,
+        slug: "unsupported-wires",
+        glbOptimizationMode: "disabled",
+      }),
+      /unsupported surface\/curve\/wire\/proxy geometry/i
+    );
+    const report = JSON.parse(await fs.promises.readFile(path.join(dir, "unsupported-wires", "format-report.json"), "utf8"));
+    assert.equal(report.conversionStatus, "no-usable-3d-geometry");
+    assert.deepEqual(report.skippedEntitySummary, { LINE: 1, SPLINE: 1, POLYLINE_2D: 1 });
+    assert.equal(report.unsupportedGeometry.curveOrWireEntityCount, 3);
+    assert.equal(report.unsupportedGeometry.onlyInsideBlocks, true);
+    assert.match(report.exportAdvice, /Rhino users: mesh the model first/i);
+    assert.match(report.exportAdvice, /Revit users: export DXF from a dedicated 3D view/i);
+  });
+});
+
+test("convertDxfToGlb: 2D-only DXF is distinguished from a 3D wire export", async () => {
+  await withTmpDir(async (dir) => {
+    await assert.rejects(
+      () => convertDxfToGlb({ sourcePath: fix("test-2d-only.dxf"), outputDir: dir, slug: "two-dimensional" }),
+      /2D-only/i
+    );
+    const report = JSON.parse(await fs.promises.readFile(path.join(dir, "two-dimensional", "format-report.json"), "utf8"));
+    assert.equal(report.unsupportedGeometry.hasNonZeroZ, false);
+    assert.equal(report.unsupportedGeometry.curveOrWireEntityCount, 2);
+    assert.doesNotMatch(report.exportAdvice, /Rhino users/i);
+  });
+});
+
+test("convertDxfToGlb: surfaces and proxy entities are reported explicitly", async () => {
+  await withTmpDir(async (dir) => {
+    await assert.rejects(
+      () => convertDxfToGlb({ sourcePath: fix("test-unsupported-surface-proxy.dxf"), outputDir: dir, slug: "surface-proxy" }),
+      /unsupported surface\/curve\/wire\/proxy geometry/i
+    );
+    const report = JSON.parse(await fs.promises.readFile(path.join(dir, "surface-proxy", "format-report.json"), "utf8"));
+    assert.equal(report.unsupportedGeometry.surfaceEntityCount, 1);
+    assert.equal(report.unsupportedGeometry.proxyEntityCount, 1);
+    assert.deepEqual(report.unsupportedEntitySummary, { PLANESURFACE: 1, ACAD_PROXY_ENTITY: 1 });
+  });
+});
+
+// No-geometry remains covered by the buildFormatReport unit path; the other
+// failure classes have small synthetic integration fixtures above.
