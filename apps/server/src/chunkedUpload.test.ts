@@ -75,6 +75,12 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
   process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "true";
   const enabledClaim = await jsonRequest(`${origin}/api/worker/jobs/next`, { headers: workerHeaders });
   assert.equal(enabledClaim.body.job.sourceExtension, ".dxf");
+  const queuedDxf = new FormData();
+  queuedDxf.set("modelFile", new Blob(["synthetic-dxf-two"]), "queued.dxf");
+  const queuedDxfResponse = await jsonRequest(`${origin}/api/models`, { method: "POST", headers, body: queuedDxf });
+  assert.equal(queuedDxfResponse.response.status, 201);
+  const claimWhileDxfActive = await jsonRequest(`${origin}/api/worker/jobs/next`, { headers: workerHeaders });
+  assert.equal(claimWhileDxfActive.body.job, null);
   const dxfArtifacts = new FormData();
   dxfArtifacts.set("display.glb", new Blob(["valid-enough-for-route-test"]), "display.glb");
   dxfArtifacts.set("manifest.json", new Blob(["{}"]), "manifest.json");
@@ -91,6 +97,14 @@ test("chunked uploads flow (init, upload chunk, complete, cancel, and validation
   const dxfArtifactDir = path.dirname(path.join(dataDir, dxfRevision.display_glb_path));
   assert.equal(fs.existsSync(path.join(dxfArtifactDir, "format-report.json")), true);
   assert.equal(fs.existsSync(path.join(dxfArtifactDir, "dxf-optimization-report.json")), true);
+  const secondDxfClaim = await jsonRequest(`${origin}/api/worker/jobs/next`, { headers: workerHeaders });
+  assert.equal(secondDxfClaim.body.job.sourceExtension, ".dxf");
+  const failedSecondDxf = new FormData();
+  failedSecondDxf.set("message", "Synthetic concurrency test complete.");
+  const failedSecondDxfResponse = await jsonRequest(`${origin}/api/worker/jobs/${secondDxfClaim.body.job.id}/fail`, {
+    method: "POST", headers: workerHeaders, body: failedSecondDxf
+  });
+  assert.equal(failedSecondDxfResponse.response.status, 200);
   process.env.FORMATIQ_DXF_UPLOAD_ENABLED = "false";
 
   // 1. Test init validation - invalid extension

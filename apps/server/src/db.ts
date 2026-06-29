@@ -888,6 +888,11 @@ export function claimNextWorkerJob(includeDxf = false): WorkerJobRecord | undefi
        WHERE (jobs.type = 'step-to-glb' OR (? = 1 AND jobs.type = 'dxf-to-glb'))
          AND jobs.status IN ('uploaded', 'queued')
          AND jobs.cancellation_requested_at IS NULL
+         AND (jobs.type != 'dxf-to-glb' OR NOT EXISTS (
+           SELECT 1 FROM jobs active_dxf
+           WHERE active_dxf.type = 'dxf-to-glb'
+             AND active_dxf.status IN ('processing', 'cancelling')
+         ))
          AND CASE
                WHEN lower(model_revisions.source_filename) LIKE '%.step' THEN '.step'
                WHEN lower(model_revisions.source_filename) LIKE '%.stp' THEN '.stp'
