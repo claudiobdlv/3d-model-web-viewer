@@ -74,6 +74,20 @@ test("accounts-enabled admin protection, scoping, and logout", async (t) => {
   });
   const cookieA = `${cookieName}=${sessionA.token}`;
 
+  // /api/me returns 401 with authenticated:false when there is no session.
+  const meAnon = await fetch(`${origin}/api/me`);
+  assert.equal(meAnon.status, 401);
+  assert.equal((await meAnon.json() as { authenticated: boolean }).authenticated, false);
+
+  // /api/me returns user and organisation for an authenticated session.
+  const meA = await fetch(`${origin}/api/me`, { headers: { cookie: cookieA } });
+  assert.equal(meA.status, 200);
+  const meABody = await meA.json() as { authenticated: boolean; user: { email: string; displayName: string | null }; organization: { name: string } | null };
+  assert.equal(meABody.authenticated, true);
+  assert.equal(meABody.user.email, googleProfile.email);
+  assert.equal(meABody.user.displayName, googleProfile.displayName);
+  assert.ok(meABody.organization !== null);
+
   // Authenticated list works and is initially empty for this workspace.
   const listA0 = await fetch(`${origin}/api/models`, { headers: { cookie: cookieA } });
   assert.equal(listA0.status, 200);
@@ -127,9 +141,22 @@ test("accounts-enabled admin protection, scoping, and logout", async (t) => {
   const ownFetch = await fetch(`${origin}/api/models/${model.slug}`, { headers: { cookie: cookieA } });
   assert.equal(ownFetch.status, 200);
 
-  // --- Logout revokes the session ---
-  const logout = await fetch(`${origin}/auth/logout`, { headers: { cookie: cookieA }, redirect: "manual" });
+  // --- POST logout revokes the session (canonical UI path) ---
+  const logout = await fetch(`${origin}/auth/logout`, { method: "POST", headers: { cookie: cookieA }, redirect: "manual" });
   assert.equal(logout.status, 302);
+  assert.match(logout.headers.get("location") || "", /^\/login/);
   const afterLogout = await fetch(`${origin}/api/models`, { headers: { cookie: cookieA } });
   assert.equal(afterLogout.status, 401);
+
+  // GET logout also works (kept for backward compatibility, e.g. manual navigation).
+  const sessionC = await service.createSession(loginA.user.id, {
+    activeOrganizationId: loginA.organization.id,
+    ipAddress: null,
+    userAgent: null
+  });
+  const cookieC = `${cookieName}=${sessionC.token}`;
+  const logoutGet = await fetch(`${origin}/auth/logout`, { headers: { cookie: cookieC }, redirect: "manual" });
+  assert.equal(logoutGet.status, 302);
+  const afterLogoutGet = await fetch(`${origin}/api/models`, { headers: { cookie: cookieC } });
+  assert.equal(afterLogoutGet.status, 401);
 });

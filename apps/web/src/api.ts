@@ -430,3 +430,27 @@ function uploadMultipart<T>(url: string, form: FormData, onProgress?: (percent: 
     xhr.send(form);
   });
 }
+
+export type MeResponse =
+  | { authenticated: false }
+  | {
+      authenticated: true;
+      user: { id: string; email: string; displayName: string | null; avatarUrl: string | null };
+      organization: { id: string; name: string; slug: string } | null;
+      role: string | null;
+    };
+
+export async function getMe(): Promise<MeResponse> {
+  try {
+    const res = await fetch("/api/me", { headers: { accept: "application/json" }, cache: "no-store" });
+    if (!res.ok) return { authenticated: false };
+    return res.json() as Promise<MeResponse>;
+  } catch {
+    return { authenticated: false };
+  }
+}
+
+export async function postLogout(): Promise<void> {
+  await fetch("/auth/logout", { method: "POST", redirect: "manual" });
+  window.location.href = "/login";
+}
