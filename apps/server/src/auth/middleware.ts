@@ -9,6 +9,11 @@ declare global {
   namespace Express {
     interface Request {
       auth?: AuthContext;
+      // Explicit accounts-enabled flag, set once in server.ts. The authorization
+      // helpers key off this (not the presence of req.auth) so a logged-out
+      // request on an auth-enabled server fails closed instead of being treated
+      // as legacy single-tenant access.
+      authEnabled?: boolean;
     }
   }
 }

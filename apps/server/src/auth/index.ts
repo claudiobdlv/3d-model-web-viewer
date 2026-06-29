@@ -18,6 +18,17 @@ export {
   authorizeModelForOrg,
   parseCookies
 } from "./middleware.js";
+export {
+  authorizeRole,
+  authorizeModelAccess,
+  authorizeUploadHandle,
+  READ_ROLE,
+  UPLOAD_ROLE,
+  SOURCE_DOWNLOAD_ROLE,
+  DIAGNOSTIC_ROLE,
+  MUTATE_ROLE,
+  type AccessResult
+} from "./access.js";
 
 export interface AuthSubsystem {
   enabled: boolean;
@@ -31,6 +42,21 @@ export interface AuthSubsystem {
   // Returns the middleware that guards admin/private routes. When accounts are
   // disabled it returns the supplied legacy guard so production is unchanged.
   adminGuard(legacy: express.RequestHandler): express.RequestHandler;
+}
+
+// Fail closed for insecure production session configuration (finding 7). When
+// AUTH_ENABLED=true and NODE_ENV=production, secure cookies must be enabled
+// (the app is expected to run behind HTTPS). ALLOW_INSECURE_SESSION=true is a
+// documented escape hatch for non-HTTPS local/staging use only.
+export function assertSecureProductionConfig(config: AuthConfig, env: NodeJS.ProcessEnv): void {
+  if (env.NODE_ENV !== "production") return;
+  const allowInsecure = /^(1|true|yes|on)$/i.test((env.ALLOW_INSECURE_SESSION || "").trim());
+  if (!config.secureCookies && !allowInsecure) {
+    throw new Error(
+      "AUTH_ENABLED=true in production requires secure session cookies. " +
+        "Set SESSION_COOKIE_SECURE=true (serve behind HTTPS), or set ALLOW_INSECURE_SESSION=true for a deliberate non-HTTPS override."
+    );
+  }
 }
 
 // Composes requireSession + requireOrgMembership into a single guard.
@@ -60,6 +86,11 @@ export function createAuthSubsystem(config: AuthConfig = loadAuthConfig()): Auth
     throw new Error("AUTH_ENABLED=true requires SESSION_SECRET to be set.");
   }
 
+  // Deployment safety: in production we must fail closed when session cookies
+  // would be transmitted insecurely (finding 7). A documented local override
+  // exists for non-HTTPS development only.
+  assertSecureProductionConfig(config, process.env);
+
   // Select the persistence backend. Postgres is required for production; an
   // in-memory store is allowed only for local development/testing of the flow.
   let store: AuthStore;
@@ -74,6 +105,11 @@ export function createAuthSubsystem(config: AuthConfig = loadAuthConfig()): Auth
       if (applied.length) console.log(`auth.migrations_applied ${applied.join(", ")}`);
     };
   } else if (process.env.AUTH_STORE === "memory") {
+    // The in-memory store is non-persistent and single-process: never allow it
+    // to back a production deployment (finding 8).
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("AUTH_STORE=memory is not permitted in production; configure DATABASE_URL (Postgres).");
+    }
     store = new MemoryAuthStore();
     migrate = async () => {
       console.warn("auth.memory_store: using in-memory accounts store (non-persistent).");

@@ -6,6 +6,7 @@ import {
   claimsToProfile,
   emailVerifiedFlag,
   issuerMatcher,
+  validateDiscoveryIssuer,
   validateIdTokenClaims,
   type IdTokenClaims
 } from "./oidc.js";
@@ -63,6 +64,50 @@ test("only explicitly-unverified emails are rejected", () => {
   assert.deepEqual(validate({ email_verified: "false" }), { ok: false, reason: "email_unverified" });
   // Absent email_verified is allowed (some providers omit it).
   assert.deepEqual(validate({ email_verified: undefined }), { ok: true });
+});
+
+test("requireVerifiedEmail denies by default when the claim is missing or false", () => {
+  // Strict mode (used for Google): the email must be positively verified.
+  assert.deepEqual(validate({ email_verified: true }, { requireVerifiedEmail: true }), { ok: true });
+  assert.deepEqual(validate({ email_verified: "true" }, { requireVerifiedEmail: true }), { ok: true });
+  assert.deepEqual(validate({ email_verified: undefined }, { requireVerifiedEmail: true }), {
+    ok: false,
+    reason: "email_unverified"
+  });
+  assert.deepEqual(validate({ email_verified: false }, { requireVerifiedEmail: true }), {
+    ok: false,
+    reason: "email_unverified"
+  });
+});
+
+test("validateDiscoveryIssuer enforces the configured issuer", () => {
+  const google: ProviderConfig = {
+    provider: "google",
+    clientId: "c",
+    clientSecret: "s",
+    issuer: "https://accounts.google.com",
+    scopes: ["openid"]
+  };
+  assert.equal(validateDiscoveryIssuer("https://accounts.google.com", google), true);
+  assert.equal(validateDiscoveryIssuer("https://evil.example", google), false);
+  assert.equal(validateDiscoveryIssuer(undefined, google), false);
+
+  const microsoft: ProviderConfig = {
+    provider: "microsoft",
+    clientId: "c",
+    clientSecret: "s",
+    issuer: "https://login.microsoftonline.com/common/v2.0",
+    scopes: ["openid"],
+    tenant: "common"
+  };
+  // Multi-tenant discovery docs advertise the templated issuer.
+  assert.equal(validateDiscoveryIssuer("https://login.microsoftonline.com/{tenantid}/v2.0", microsoft), true);
+  // A concrete tenant issuer is also accepted.
+  assert.equal(
+    validateDiscoveryIssuer("https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0", microsoft),
+    true
+  );
+  assert.equal(validateDiscoveryIssuer("https://evil.example/{tenantid}/v2.0", microsoft), false);
 });
 
 test("Microsoft 'common' issuer predicate accepts tenant-specific issuers", () => {

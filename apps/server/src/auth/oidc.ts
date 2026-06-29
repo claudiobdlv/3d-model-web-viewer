@@ -33,6 +33,11 @@ export interface ClaimValidationOptions {
   nonce: string;
   now?: number; // ms epoch, injectable for tests
   clockToleranceSec?: number;
+  // When true, the email claim must be positively verified (email_verified
+  // true/"true"). Used for providers that always assert verification (Google).
+  // When false (default), only an explicitly-unverified email is rejected, so
+  // providers that omit the claim (some Microsoft accounts) still work.
+  requireVerifiedEmail?: boolean;
 }
 
 export type ClaimValidationResult = { ok: true } | { ok: false; reason: string };
@@ -72,8 +77,13 @@ export function validateIdTokenClaims(
   }
 
   // email_verified may be absent (some Microsoft accounts omit it). Reject only
-  // when a provider explicitly reports the email as unverified.
+  // when a provider explicitly reports the email as unverified...
   if (isExplicitlyUnverified(claims.email_verified)) {
+    return { ok: false, reason: "email_unverified" };
+  }
+  // ...and, for providers that always assert verification, deny by default when
+  // the claim is missing or not positively true (finding 8).
+  if (options.requireVerifiedEmail && !emailVerifiedFlag(claims.email_verified)) {
     return { ok: false, reason: "email_unverified" };
   }
 
@@ -100,6 +110,18 @@ export function issuerMatcher(config: ProviderConfig): string | ((iss: string) =
     return (iss: string) => /^https:\/\/login\.microsoftonline\.com\/[0-9a-f-]+\/v2\.0$/i.test(iss);
   }
   return config.issuer;
+}
+
+// Validate that an OIDC discovery document's advertised issuer matches the
+// configured provider issuer (finding 8). For single-tenant providers this is an
+// exact match. Microsoft multi-tenant ("common"/"organizations") discovery docs
+// advertise a templated issuer ("…/{tenantid}/v2.0"); accept that template (the
+// concrete per-request token issuer is still validated by issuerMatcher).
+export function validateDiscoveryIssuer(discoveryIssuer: unknown, config: ProviderConfig): boolean {
+  if (typeof discoveryIssuer !== "string" || discoveryIssuer.length === 0) return false;
+  const matcher = issuerMatcher(config);
+  if (typeof matcher === "string") return discoveryIssuer === matcher;
+  return discoveryIssuer === "https://login.microsoftonline.com/{tenantid}/v2.0" || matcher(discoveryIssuer);
 }
 
 export interface AuthorizationRequest {
@@ -209,7 +231,10 @@ export async function verifyAndProfile(input: {
   const validation = validateIdTokenClaims(claims, {
     issuer: issuerMatcher(input.config),
     clientId: input.config.clientId,
-    nonce: input.nonce
+    nonce: input.nonce,
+    // Google always asserts email_verified; require it. Microsoft may omit it
+    // for some account types, so stay lenient there (documented exception).
+    requireVerifiedEmail: input.config.provider === "google"
   });
   if (!validation.ok) {
     throw new Error(`id_token_invalid:${validation.reason}`);

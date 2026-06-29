@@ -157,6 +157,67 @@ mode the automated HTTP test uses.
 
 ---
 
+## Tenant-safety hardening (post security review)
+
+A security review found that while `AUTH_ENABLED=false` was production-safe,
+`AUTH_ENABLED=true` was not yet tenant-safe. The following hardening makes the
+enabled mode safe; the disabled (legacy SQLite + Basic-auth) path is unchanged.
+
+**Central authorization layer.** `auth/access.ts` holds the only place tenant
+decisions are made: `authorizeRole`, `authorizeModelAccess`, and
+`authorizeUploadHandle`. Mode is keyed off the explicit `req.authEnabled` flag
+(set once in `server.ts`), never the mere presence of `req.auth`, so a logged-out
+request on an auth-enabled server fails closed instead of falling through to
+legacy behaviour. When disabled, every helper is a pure pass-through.
+
+**Role matrix.** `viewer` = read only (view private models + display GLB).
+`member` = upload models/revisions and download source files. `admin`/`owner` =
+rename, move, trash/restore/delete, manage shares, change default view / revision
+settings. Cross-workspace models always 404 (existence is never leaked); an
+in-workspace model beyond the caller's role is 403.
+
+**Routes covered.** All `/api/models` mutations + batch, all share
+create/read/update/revoke (`/api/models/:id/share`), every artifact route
+(`/model-files`, `/downloads/:slug/original|display.glb`, `/admin/logs/...`, the
+material/XCAF/mesh report endpoints) with **no filesystem fallback** when the
+model row is absent/deleted, and the chunked-upload lifecycle
+(init/chunk/complete/cancel) bound to the owning user + organization.
+
+**Folders / projects / jobs / storage quota.** These tables have no organization
+column in the Phase 1 schema. Rather than leak cross-workspace data they are
+**denied (403) while accounts are enabled** (`workspaceUnavailable` guard +
+`projectsUnavailable` checks on model→project association). With accounts
+disabled they keep their existing global behaviour. Making them multi-tenant is
+deferred to a later phase.
+
+**Deployment safety.** When `AUTH_ENABLED=true` and `NODE_ENV=production`, the
+server fails to start unless `SESSION_COOKIE_SECURE=true` (a deliberate
+`ALLOW_INSECURE_SESSION=true` override exists for non-HTTPS local/staging only),
+and `AUTH_STORE=memory` is rejected outright. Secure-cookie config is now
+explicit and no longer relies solely on `NODE_ENV`.
+
+**OIDC.** Google logins now require a positively-verified email
+(`requireVerifiedEmail`); Microsoft stays lenient because some account types omit
+the claim (documented exception — only explicitly-unverified emails are rejected
+there). The discovery document's `issuer` is validated against the configured
+issuer before use (`validateDiscoveryIssuer`), accepting the Microsoft
+multi-tenant `{tenantid}` template.
+
+### Known limitations / deferred (not blockers for continuing the branch)
+
+- **Logout CSRF.** Logout is exposed as both `POST` and `GET /auth/logout`; `POST`
+  is canonical. `GET` is retained for the menu link. Impact is limited to
+  terminating the victim's own session (annoyance, not account compromise). A
+  strict POST-only switch is deferred to the admin-UI wiring phase.
+- **Transactional account provisioning.** New-user provisioning
+  (user → identity → org → membership) is not yet wrapped in a single DB
+  transaction. The unique-email constraint + collision rule prevent the main
+  orphan/lockout risk; a fully atomic `provisionAccount` is deferred to Phase 2.
+- **Multer** upgraded to `^2.2.0`, clearing the high-severity DoS advisory
+  (`npm audit --omit=dev` → 0 vulnerabilities).
+
+---
+
 ## Validation status (this session)
 
 **Ran and passing:** `apps/server` typecheck + build, full `apps/server` test

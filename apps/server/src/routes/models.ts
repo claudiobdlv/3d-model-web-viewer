@@ -45,7 +45,30 @@ import {
 import { parseConversionQuality, type ConversionQuality } from "../quality.js";
 import { parseMeshiqAdaptiveSmoothing, type MeshiqAdaptiveSmoothing } from "../meshiq.js";
 import { getLargeStepChunkingSummary } from "../utils/largeStepChunkingSummary.js";
-import { authorizeModelForOrg } from "../auth/index.js";
+import {
+  authorizeRole,
+  authorizeModelAccess,
+  UPLOAD_ROLE,
+  MUTATE_ROLE,
+  READ_ROLE,
+  type AccessResult
+} from "../auth/index.js";
+
+// Send the standard JSON error for a failed authorization result. Returns true
+// when the response was sent (caller should stop), false when access is allowed.
+function denied(res: express.Response, access: AccessResult): boolean {
+  if (access.ok) return false;
+  res.status(access.status).json({ error: access.error });
+  return true;
+}
+
+// Folders/projects are global (not organization-scoped) and are denied wholesale
+// while accounts are enabled (see server.ts workspaceUnavailable + finding 5).
+// Guard model→project association so a workspace-mode caller cannot pin a model
+// into an unscoped global folder.
+function projectsUnavailable(req: express.Request): boolean {
+  return req.authEnabled === true;
+}
 
 const allowedExtensions = new Set([".step", ".stp", ".glb", ".gltf"]);
 
@@ -95,6 +118,13 @@ modelsRouter.post("/batch", async (req, res) => {
     return;
   }
 
+  // Every batch action is a destructive/structural mutation → admin+.
+  if (denied(res, authorizeRole(req, MUTATE_ROLE))) return;
+  if (action === "moveToProject" && projectsUnavailable(req)) {
+    res.status(403).json({ error: "Projects are not available in workspace mode." });
+    return;
+  }
+
   let projectId: number | null = null;
   if (action === "moveToProject") {
     try {
@@ -120,6 +150,14 @@ modelsRouter.post("/batch", async (req, res) => {
     const model = getModelBySlug(slug, true);
     if (!model) {
       failed.push({ slug, reason: "Model not found." });
+      continue;
+    }
+    // Enforce workspace ownership per-model: another org's slug must not be
+    // mutated through a batch action (finding 2). Cross-org models report as
+    // "not found" so existence is not leaked.
+    const access = authorizeModelAccess(req, model, MUTATE_ROLE);
+    if (!access.ok) {
+      failed.push({ slug, reason: access.error });
       continue;
     }
 
@@ -159,12 +197,9 @@ modelsRouter.get("/:slug", (req, res) => {
     res.status(404).json({ error: "Model not found." });
     return;
   }
-  // Scope private/admin access to the active workspace (404, not 403, to avoid
-  // leaking existence of other workspaces' models).
-  if (req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
-    res.status(404).json({ error: "Model not found." });
-    return;
-  }
+  // Scope private/admin read access to the active workspace (viewer+). Returns
+  // 404 for other workspaces' models so existence is not leaked.
+  if (denied(res, authorizeModelAccess(req, model, READ_ROLE))) return;
 
   const currentRevision = getCurrentRevisionForModel(model.id);
   const revisions = listRevisionsForModel(model.id);
@@ -300,6 +335,8 @@ export async function registerModelAndJob({
 
 modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
   try {
+    // Uploading a new model requires member+ (finding 3); viewers are read-only.
+    if (denied(res, authorizeRole(req, UPLOAD_ROLE))) return;
     if (!req.file) {
       res.status(400).send("No model file was uploaded.");
       return;
@@ -311,6 +348,10 @@ modelsRouter.post("/", upload.single("modelFile"), async (req, res, next) => {
     const meshiqAdaptiveSmoothing = parseMeshiqAdaptiveSmoothing(req.body?.meshiqAdaptiveSmoothing);
     const revisionMetadata = parseRevisionMetadata(req.body, true);
     const folderId = parseUploadProjectId(req.body);
+    if (folderId !== null && projectsUnavailable(req)) {
+      res.status(403).send("Projects are not available in workspace mode.");
+      return;
+    }
     if (folderId !== null && !getFolderById(folderId)) {
       res.status(400).send("Selected project was not found.");
       return;
@@ -361,6 +402,9 @@ modelsRouter.post("/:slug/revisions", upload.fields([{ name: "modelFile", maxCou
     if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
     const model = getModelBySlug(slug);
     if (!model) return void res.status(404).json({ error: "Model not found." });
+    // Revision upload requires member+ and must target a model in the caller's
+    // workspace (findings 2 + 3).
+    if (denied(res, authorizeModelAccess(req, model, UPLOAD_ROLE))) return;
     const file = getUploadedModelFile(req);
     if (!file) return void res.status(400).json({ error: "No model file was uploaded." });
 
@@ -466,6 +510,9 @@ modelsRouter.post("/:slug/revisions/:revisionId/replace", upload.fields([{ name:
     if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
     const model = getModelBySlug(slug);
     if (!model) return void res.status(404).json({ error: "Model not found." });
+    // Replacing a revision file is an upload into an existing model → member+ and
+    // workspace ownership (findings 2 + 3).
+    if (denied(res, authorizeModelAccess(req, model, UPLOAD_ROLE))) return;
     const revisionId = Number(req.params.revisionId);
     if (!Number.isInteger(revisionId) || revisionId < 1) return void res.status(400).json({ error: "Invalid revisionId." });
     if (!getRevisionForModel(model.id, revisionId)) return void res.status(404).json({ error: "Revision not found for model." });
@@ -544,6 +591,7 @@ modelsRouter.patch("/:slug/revisions/:revisionId/current", (req, res) => {
     res.status(context.errorStatus!).json({ error: context.error });
     return;
   }
+  if (denied(res, authorizeModelAccess(req, context.model, MUTATE_ROLE))) return;
   res.json(setCurrentRevision(context.model.id, context.revision.id));
 });
 
@@ -553,6 +601,7 @@ modelsRouter.patch("/:slug/revisions/:revisionId", (req, res) => {
     res.status(context.errorStatus!).json({ error: context.error });
     return;
   }
+  if (denied(res, authorizeModelAccess(req, context.model, MUTATE_ROLE))) return;
   const keys = Object.keys(req.body || {});
   if (keys.length !== 1 || keys[0] !== "isPubliclySelectable" || typeof req.body.isPubliclySelectable !== "boolean") {
     res.status(400).json({ error: "Only isPubliclySelectable may be updated, and it must be true or false." });
@@ -568,6 +617,14 @@ modelsRouter.patch("/:slug", (req, res, next) => {
       res.status(400).json({ error: "Invalid model slug." });
       return;
     }
+
+    const existing = getModelBySlug(slug);
+    if (!existing) {
+      res.status(404).json({ error: "Model not found." });
+      return;
+    }
+    // Rename is an admin-level mutation scoped to the caller's workspace.
+    if (denied(res, authorizeModelAccess(req, existing, MUTATE_ROLE))) return;
 
     const name = typeof req.body?.name === "string" ? req.body.name : "";
     const model = renameModel(slug, name);
@@ -594,6 +651,11 @@ modelsRouter.patch("/:slug/folder", (req, res) => {
     res.status(404).json({ error: "Model not found." });
     return;
   }
+  if (denied(res, authorizeModelAccess(req, model, MUTATE_ROLE))) return;
+  if (projectsUnavailable(req)) {
+    res.status(403).json({ error: "Folders are not available in workspace mode." });
+    return;
+  }
 
   const folderId = parseOptionalFolderId(req.body?.folderId);
   if (folderId !== null && !getFolderById(folderId)) {
@@ -610,8 +672,14 @@ modelsRouter.patch("/:slug/project", (req, res) => {
     res.status(400).json({ error: "Invalid model slug." });
     return;
   }
-  if (!getModelBySlug(slug)) {
+  const model = getModelBySlug(slug);
+  if (!model) {
     res.status(404).json({ error: "Model not found." });
+    return;
+  }
+  if (denied(res, authorizeModelAccess(req, model, MUTATE_ROLE))) return;
+  if (projectsUnavailable(req)) {
+    res.status(403).json({ error: "Projects are not available in workspace mode." });
     return;
   }
   const projectId = parseOptionalFolderId(req.body?.projectId);
@@ -627,6 +695,7 @@ modelsRouter.post("/:slug/trash", (req, res) => {
   if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
   const model = getModelBySlug(slug, true);
   if (!model) return void res.status(404).json({ error: "Model not found." });
+  if (denied(res, authorizeModelAccess(req, model, MUTATE_ROLE))) return;
   if (model.deleted_at) return void res.status(409).json({ error: "Model is already in the recycling bin." });
   trashModel(slug);
   requestModelCancellation(slug);
@@ -638,6 +707,7 @@ modelsRouter.post("/:slug/restore", (req, res) => {
   if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
   const model = getModelBySlug(slug, true);
   if (!model) return void res.status(404).json({ error: "Model not found." });
+  if (denied(res, authorizeModelAccess(req, model, MUTATE_ROLE))) return;
   if (!model.deleted_at) return void res.status(409).json({ error: "Model is not in the recycling bin." });
   res.json(restoreModel(slug));
 });
@@ -648,6 +718,7 @@ modelsRouter.delete("/:slug/forever", async (req, res, next) => {
     if (!isSafeSlug(slug)) return void res.status(400).json({ error: "Invalid model slug." });
     const model = getModelBySlug(slug, true);
     if (!model) return void res.status(404).json({ error: "Model not found." });
+    if (denied(res, authorizeModelAccess(req, model, MUTATE_ROLE))) return;
     if (!model.deleted_at) return void res.status(409).json({ error: "Model must be in the recycling bin before permanent deletion." });
     res.json({ ok: true, slug, ...(await permanentlyDeleteModel(slug)) });
   } catch (error) {
@@ -668,6 +739,8 @@ modelsRouter.post("/:slug/default-view", (req, res, next) => {
       res.status(404).json({ error: "Model not found." });
       return;
     }
+    // Changing the saved default view is an admin-level mutation (finding 3).
+    if (denied(res, authorizeModelAccess(req, model, MUTATE_ROLE))) return;
 
     const { defaultView } = req.body;
     let defaultViewJson: string | null = null;
@@ -745,6 +818,7 @@ modelsRouter.delete("/:slug", async (req, res, next) => {
       res.status(404).json({ error: "Model not found." });
       return;
     }
+    if (denied(res, authorizeModelAccess(req, model, MUTATE_ROLE))) return;
 
     const { deletion, removedPaths } = await permanentlyDeleteModel(slug);
 

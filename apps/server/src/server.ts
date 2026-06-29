@@ -7,6 +7,7 @@ import {
   createPublicShare,
   getActivePublicShareForModel,
   getModelById,
+  getModelBySlug,
   getCurrentRevisionForModel,
   getRevisionForModel,
   listRevisionsForModel,
@@ -17,6 +18,7 @@ import {
   revokePublicSharesForModel,
   resolvePublicShareRevision,
   updatePublicShareSettings,
+  type ModelRecord,
   type ModelRevisionRecord,
   type PublicShareLinkMode,
   type PublicShareRecord
@@ -48,7 +50,15 @@ import {
   resolveDisplayGlbPath,
   resolveSourcePath
 } from "./storage.js";
-import { createAuthSubsystem, authorizeModelForOrg } from "./auth/index.js";
+import {
+  createAuthSubsystem,
+  authorizeModelAccess,
+  type Role,
+  READ_ROLE,
+  SOURCE_DOWNLOAD_ROLE,
+  DIAGNOSTIC_ROLE,
+  MUTATE_ROLE
+} from "./auth/index.js";
 
 const port = Number(process.env.PORT || 3009);
 export const app = express();
@@ -69,6 +79,13 @@ const adminGuard = auth.adminGuard(legacyRequireAdmin);
 export const authSubsystem = auth;
 
 app.use(express.json());
+// Expose the accounts-enabled flag on every request so the central
+// authorization helpers fail closed under AUTH_ENABLED=true and pass through
+// unchanged (legacy single-tenant behaviour) when disabled.
+app.use((req, _res, next) => {
+  req.authEnabled = auth.enabled;
+  next();
+});
 // Resolve the session cookie into req.auth before any route runs (no-op when off).
 if (auth.enabled && auth.attach) app.use(auth.attach);
 // Public, no-login auth routes (/login, /auth/*, /api/me) when accounts are on.
@@ -139,24 +156,32 @@ app.get("/", (_req, res) => {
   res.redirect(302, "/admin");
 });
 
-app.get("/api/models/:id/share", requireAdmin, (req, res) => {
+// Resolve the model targeted by a /api/models/:id/share route and enforce that
+// the caller owns it within their active workspace and holds a role that may
+// manage shares (finding 1). Returns null (after sending the response) on any
+// failure so a cross-organization caller can neither read nor mutate shares for
+// another workspace's model, and cannot even confirm the model exists.
+function requireShareModel(req: express.Request, res: express.Response): ModelRecord | null {
   const modelId = Number(req.params.id);
   const model = Number.isInteger(modelId) ? getModelById(modelId) : undefined;
-  if (!model) {
-    res.status(404).json({ error: "Model not found." });
-    return;
+  const access = authorizeModelAccess(req, model, MUTATE_ROLE);
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error });
+    return null;
   }
+  return model as ModelRecord;
+}
+
+app.get("/api/models/:id/share", requireAdmin, (req, res) => {
+  const model = requireShareModel(req, res);
+  if (!model) return;
   const share = getActivePublicShareForModel(model.id);
   res.json(share ? publicShareSettingsResponse(share) : { active: false });
 });
 
 app.post("/api/models/:id/share", requireAdmin, (req, res) => {
-  const modelId = Number(req.params.id);
-  const model = Number.isInteger(modelId) ? getModelById(modelId) : undefined;
-  if (!model) {
-    res.status(404).json({ error: "Model not found." });
-    return;
-  }
+  const model = requireShareModel(req, res);
+  if (!model) return;
 
   const activeShare = getActivePublicShareForModel(model.id);
   let settings: ReturnType<typeof parsePublicShareSettings>;
@@ -207,22 +232,14 @@ app.post("/api/models/:id/share", requireAdmin, (req, res) => {
 });
 
 app.delete("/api/models/:id/share", requireAdmin, (req, res) => {
-  const modelId = Number(req.params.id);
-  const model = Number.isInteger(modelId) ? getModelById(modelId) : undefined;
-  if (!model) {
-    res.status(404).json({ error: "Model not found." });
-    return;
-  }
+  const model = requireShareModel(req, res);
+  if (!model) return;
   res.json({ ok: true, revoked: revokePublicSharesForModel(model.id) });
 });
 
 app.patch("/api/models/:id/share", requireAdmin, (req, res) => {
-  const modelId = Number(req.params.id);
-  const model = Number.isInteger(modelId) ? getModelById(modelId) : undefined;
-  if (!model) {
-    res.status(404).json({ error: "Model not found." });
-    return;
-  }
+  const model = requireShareModel(req, res);
+  if (!model) return;
   const share = getActivePublicShareForModel(model.id);
   if (!share) {
     res.status(404).json({ error: "Active public share not found." });
@@ -248,15 +265,28 @@ app.patch("/api/models/:id/share", requireAdmin, (req, res) => {
   }
 });
 
+// Folders, projects, jobs, and the storage quota are global (no organization
+// scoping column) in the legacy SQLite schema. Phase 1 does not migrate them to
+// be multi-tenant, so rather than leak cross-workspace data we deny these routes
+// entirely while accounts are enabled (finding 5). With AUTH_ENABLED=false the
+// existing global behaviour is preserved unchanged.
+function workspaceUnavailable(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  if (req.authEnabled) {
+    res.status(403).json({ error: "This area is not yet available in workspace (accounts) mode." });
+    return;
+  }
+  next();
+}
+
 app.use("/api/models", requireAdmin, modelsRouter);
 app.use("/api/uploads/chunked", requireAdmin, uploadsRouter);
-app.use("/api/folders", requireAdmin, foldersRouter);
-app.use("/api/projects", requireAdmin, projectsRouter);
-app.get("/api/storage/quota", requireAdmin, (_req, res) => {
+app.use("/api/folders", requireAdmin, workspaceUnavailable, foldersRouter);
+app.use("/api/projects", requireAdmin, workspaceUnavailable, projectsRouter);
+app.get("/api/storage/quota", requireAdmin, workspaceUnavailable, (_req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
   res.json(getStorageQuota());
 });
-app.use("/api/jobs", requireAdmin, jobsRouter);
+app.use("/api/jobs", requireAdmin, workspaceUnavailable, jobsRouter);
 app.use("/api/worker", workerRouter);
 
 app.get("/3dviewer/:slug", requireAdmin, (req, res) => {
@@ -269,22 +299,43 @@ app.get("/3dviewer/:slug", requireAdmin, (req, res) => {
   res.sendFile(path.join(frontendRoot, frontendRoot === webRoot ? "index.html" : "model.html"));
 });
 
+// Resolve the model behind an artifact/file route and enforce workspace
+// ownership + role (finding 4). There is NO filesystem fallback: if the model
+// row is absent (never existed, or was deleted/trashed) the request 404s, so a
+// deleted or orphaned slug can never serve a GLB, source file, log, or report.
+function requireArtifactModel(
+  req: express.Request,
+  res: express.Response,
+  slug: string,
+  minimumRole: Role
+): ModelRecord | null {
+  if (!isSafeSlug(slug)) {
+    res.status(404).send("Not found");
+    return null;
+  }
+  const model = getModelBySlug(slug);
+  const access = authorizeModelAccess(req, model, minimumRole);
+  if (!access.ok) {
+    res.status(access.status).send(access.error);
+    return null;
+  }
+  return model as ModelRecord;
+}
+
 app.get("/model-files/:slug/:file", requireAdmin, (req, res) => {
   const slug = String(req.params.slug);
   const file = String(req.params.file);
   const allowedFiles = new Set(["display.glb", "manifest.json", "stats.json", "xcaf-report.json", "mesh-report.json"]);
 
-  if (!isSafeSlug(slug) || !allowedFiles.has(file)) {
+  if (!allowedFiles.has(file)) {
     res.status(404).send("Not found");
     return;
   }
 
-  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; organization_id?: string | null } | undefined;
-  if (model && req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
-    res.status(404).send("Not found");
-    return;
-  }
-  const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
+  const model = requireArtifactModel(req, res, slug, READ_ROLE);
+  if (!model) return;
+
+  const resolved = resolveAdminRevision(model.id, req.query.revisionId);
   if (resolved.invalid) {
     res.status(404).send("Not found");
     return;
@@ -303,20 +354,11 @@ app.get("/model-files/:slug/:file", requireAdmin, (req, res) => {
 
 app.get("/downloads/:slug/original", requireAdmin, (req, res) => {
   const slug = String(req.params.slug);
-  if (!isSafeSlug(slug)) {
-    res.status(404).send("Not found");
-    return;
-  }
+  // Source (STEP/STP) download is gated behind member+; viewers cannot pull the
+  // original source file (finding 3).
+  const model = requireArtifactModel(req, res, slug, SOURCE_DOWNLOAD_ROLE);
+  if (!model) return;
 
-  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; source_ext: string; source_filename: string; organization_id?: string | null } | undefined;
-  if (!model) {
-    res.status(404).send("Not found");
-    return;
-  }
-  if (req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
-    res.status(404).send("Not found");
-    return;
-  }
   const { revision, invalid } = resolveAdminRevision(model.id, req.query.revisionId);
   if (invalid) {
     res.status(404).send("Revision not found.");
@@ -332,17 +374,10 @@ app.get("/downloads/:slug/original", requireAdmin, (req, res) => {
 
 app.get("/downloads/:slug/display.glb", requireAdmin, (req, res) => {
   const slug = String(req.params.slug);
-  if (!isSafeSlug(slug)) {
-    res.status(404).send("Not found");
-    return;
-  }
+  const model = requireArtifactModel(req, res, slug, READ_ROLE);
+  if (!model) return;
 
-  const model = db.prepare("SELECT * FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string; organization_id?: string | null } | undefined;
-  if (model && req.auth?.organization && !authorizeModelForOrg(model, req.auth.organization.id)) {
-    res.status(404).send("Not found");
-    return;
-  }
-  const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
+  const resolved = resolveAdminRevision(model.id, req.query.revisionId);
   if (resolved.invalid) {
     res.status(404).send("Revision not found.");
     return;
@@ -359,13 +394,11 @@ app.get("/downloads/:slug/display.glb", requireAdmin, (req, res) => {
 
 app.get("/admin/logs/:slug/conversion.log", requireAdmin, (req, res) => {
   const slug = String(req.params.slug);
-  if (!isSafeSlug(slug)) {
-    res.status(404).send("Not found");
-    return;
-  }
+  // Diagnostic artifacts require workspace membership + member role (finding 4).
+  const model = requireArtifactModel(req, res, slug, DIAGNOSTIC_ROLE);
+  if (!model) return;
 
-  const model = db.prepare("SELECT id FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number } | undefined;
-  const resolved = model ? resolveAdminRevision(model.id, req.query.revisionId) : {};
+  const resolved = resolveAdminRevision(model.id, req.query.revisionId);
   if (resolved.invalid) {
     res.status(404).send("Revision not found.");
     return;
@@ -390,67 +423,37 @@ app.get("/admin/logs/:slug/conversion.log", requireAdmin, (req, res) => {
   res.type("text/plain").sendFile(filePath);
 });
 
-app.get("/admin/models/:slug/material-debug.json", requireAdmin, (req, res) => {
+// Serve a per-model diagnostic JSON report (material/XCAF/mesh) after enforcing
+// workspace ownership + diagnostic role. Returns null (response already sent) on
+// any authorization or resolution failure.
+function sendDiagnosticReport(req: express.Request, res: express.Response, reportFile: string): void {
   const slug = String(req.params.slug);
-  if (!isSafeSlug(slug)) {
-    res.status(404).send("Not found");
-    return;
-  }
+  const model = requireArtifactModel(req, res, slug, DIAGNOSTIC_ROLE);
+  if (!model) return;
 
-  const artifactDir = getArtifactDir(slug, req.query.revisionId);
+  const artifactDir = getArtifactDir(model, req.query.revisionId);
   if (!artifactDir) {
     res.status(404).send("Revision not found.");
     return;
   }
-  const filePath = path.join(artifactDir, "material-debug.json");
+  const filePath = path.join(artifactDir, reportFile);
   if (!fs.existsSync(filePath)) {
     res.status(404).send("Not found");
     return;
   }
-
   res.type("application/json").sendFile(filePath);
+}
+
+app.get("/admin/models/:slug/material-debug.json", requireAdmin, (req, res) => {
+  sendDiagnosticReport(req, res, "material-debug.json");
 });
 
 app.get("/admin/models/:slug/xcaf-report.json", requireAdmin, (req, res) => {
-  const slug = String(req.params.slug);
-  if (!isSafeSlug(slug)) {
-    res.status(404).send("Not found");
-    return;
-  }
-
-  const artifactDir = getArtifactDir(slug, req.query.revisionId);
-  if (!artifactDir) {
-    res.status(404).send("Revision not found.");
-    return;
-  }
-  const filePath = path.join(artifactDir, "xcaf-report.json");
-  if (!fs.existsSync(filePath)) {
-    res.status(404).send("Not found");
-    return;
-  }
-
-  res.type("application/json").sendFile(filePath);
+  sendDiagnosticReport(req, res, "xcaf-report.json");
 });
 
 app.get("/admin/models/:slug/mesh-report.json", requireAdmin, (req, res) => {
-  const slug = String(req.params.slug);
-  if (!isSafeSlug(slug)) {
-    res.status(404).send("Not found");
-    return;
-  }
-
-  const artifactDir = getArtifactDir(slug, req.query.revisionId);
-  if (!artifactDir) {
-    res.status(404).send("Revision not found.");
-    return;
-  }
-  const filePath = path.join(artifactDir, "mesh-report.json");
-  if (!fs.existsSync(filePath)) {
-    res.status(404).send("Not found");
-    return;
-  }
-
-  res.type("application/json").sendFile(filePath);
+  sendDiagnosticReport(req, res, "mesh-report.json");
 });
 
 app.use("/public/assets", express.static(path.join(frontendRoot, "assets"), {
@@ -572,12 +575,11 @@ function sendPublicNotFound(res: express.Response, html: boolean): void {
   );
 }
 
-function getArtifactDir(slug: string, revisionIdValue?: unknown): string | undefined {
-  const model = db.prepare("SELECT id, slug FROM models WHERE slug = ? AND deleted_at IS NULL").get(slug) as { id: number; slug: string } | undefined;
-  const resolved = model ? resolveAdminRevision(model.id, revisionIdValue) : {};
+function getArtifactDir(model: Pick<ModelRecord, "id" | "slug">, revisionIdValue?: unknown): string | undefined {
+  const resolved = resolveAdminRevision(model.id, revisionIdValue);
   if (resolved.invalid) return undefined;
   const revision = resolved.revision;
-  return revision ? path.dirname(resolveDisplayGlbPath({ slug }, revision)) : getModelDir(slug);
+  return revision ? path.dirname(resolveDisplayGlbPath({ slug: model.slug }, revision)) : getModelDir(model.slug);
 }
 
 function resolveAdminRevision(modelId: number, revisionIdValue?: unknown): {

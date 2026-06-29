@@ -7,6 +7,7 @@ import {
   buildAuthorizationRequest,
   discover,
   exchangeCodeForTokens,
+  validateDiscoveryIssuer,
   verifyAndProfile
 } from "./oidc.js";
 import { parseCookies } from "./middleware.js";
@@ -150,6 +151,9 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
     }
     try {
       const discovery = await discover(providerConfig.issuer);
+      if (!validateDiscoveryIssuer(discovery.issuer, providerConfig)) {
+        throw new Error("discovery_issuer_mismatch");
+      }
       const authRequest = buildAuthorizationRequest({
         discovery,
         clientId: providerConfig.clientId,
@@ -211,6 +215,9 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
 
     try {
       const discovery = await discover(providerConfig.issuer);
+      if (!validateDiscoveryIssuer(discovery.issuer, providerConfig)) {
+        throw new Error("discovery_issuer_mismatch");
+      }
       const tokens = await exchangeCodeForTokens({
         discovery,
         clientId: providerConfig.clientId,

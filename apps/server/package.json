@@ -13,7 +13,7 @@
   "dependencies": {
     "express": "^4.21.2",
     "jose": "^5.9.6",
-    "multer": "^2.0.2",
+    "multer": "^2.2.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {
