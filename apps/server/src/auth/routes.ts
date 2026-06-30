@@ -11,6 +11,7 @@ import {
   verifyAndProfile
 } from "./oidc.js";
 import { parseCookies } from "./middleware.js";
+import { RateLimiter, clientIp, loadAuthRateLimitConfig } from "./rateLimit.js";
 import type { Provider } from "./types.js";
 
 const OAUTH_TXN_COOKIE = "modelbase_oauth_txn";
@@ -132,7 +133,35 @@ function renderErrorPage(title: string, body: string): string {
 export function createAuthRouter(service: AuthService, config: AuthConfig): express.Router {
   const router = express.Router();
 
-  router.get("/login", (req, res) => {
+  // Per-process, in-memory rate limiting for the auth endpoints only. These
+  // limiters are never attached to public QR/model routes (which live outside
+  // this router) or to converter upload routes. See auth/rateLimit.ts.
+  const rl = loadAuthRateLimitConfig();
+  const oauthLimiter = new RateLimiter({ windowMs: rl.windowMs, max: rl.oauthMax });
+  const loginLimiter = new RateLimiter({ windowMs: rl.windowMs, max: rl.loginMax });
+
+  // Wraps a limiter as middleware keyed by client IP. On limit it returns 429
+  // with a Retry-After header (and a tiny no-store HTML body), short-circuiting
+  // before any OAuth/discovery work is done.
+  const limit =
+    (limiter: RateLimiter): express.RequestHandler =>
+    (req, res, next) => {
+      const decision = limiter.hit(clientIp(req));
+      if (decision.allowed) {
+        next();
+        return;
+      }
+      const retryAfterSec = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
+      res
+        .status(429)
+        .setHeader("Retry-After", String(retryAfterSec));
+      res.setHeader("Cache-Control", "no-store");
+      res
+        .type("html")
+        .send(renderErrorPage("Too many attempts", "Too many sign-in attempts. Please wait a moment and try again."));
+    };
+
+  router.get("/login", limit(loginLimiter), (req, res) => {
     if (req.auth) {
       res.redirect(302, safeNext(req.query.next));
       return;
@@ -151,7 +180,7 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
     res.type("html").send(renderLoginPage(config, safeNext(req.query.next), message));
   });
 
-  router.get("/auth/:provider/start", async (req, res) => {
+  router.get("/auth/:provider/start", limit(oauthLimiter), async (req, res) => {
     const provider = String(req.params.provider);
     if (!isProvider(provider)) {
       res.status(404).type("html").send(renderErrorPage("Unknown provider", "That sign-in provider is not available."));
@@ -159,6 +188,7 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
     }
     const providerConfig = config.providers[provider];
     if (!providerConfig) {
+      await service.recordProviderUnavailable(provider, "start");
       res.status(503).type("html").send(renderErrorPage("Provider unavailable", "This sign-in provider is not configured."));
       return;
     }
@@ -195,7 +225,7 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
     }
   });
 
-  router.get("/auth/:provider/callback", async (req, res) => {
+  router.get("/auth/:provider/callback", limit(oauthLimiter), async (req, res) => {
     const provider = String(req.params.provider);
     if (!isProvider(provider)) {
       res.status(404).type("html").send(renderErrorPage("Unknown provider", "That sign-in provider is not available."));
@@ -203,6 +233,7 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
     }
     const providerConfig = config.providers[provider];
     if (!providerConfig) {
+      await service.recordProviderUnavailable(provider, "callback");
       res.status(503).type("html").send(renderErrorPage("Provider unavailable", "This sign-in provider is not configured."));
       return;
     }
@@ -269,14 +300,34 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
     }
   });
 
-  const handleLogout = async (req: express.Request, res: express.Response) => {
+  // Strict POST-only logout. Revoking a session is a state change, so it must
+  // not be reachable via a cross-site GET (e.g. an <img>/<a> pointed at
+  // /auth/logout): that would let a third-party page force-terminate the
+  // victim's session (logout CSRF). The admin UI signs out with
+  // `POST /auth/logout` (apps/web/src/api.ts `postLogout`).
+  router.post("/auth/logout", async (req, res) => {
     const token = parseCookies(req.headers.cookie)[config.cookieName];
     await service.logout(token);
     clearSessionCookie(res, config);
     res.redirect(302, "/login");
-  };
-  router.post("/auth/logout", handleLogout);
-  router.get("/auth/logout", handleLogout);
+  });
+  // GET is intentionally NOT a logout. It neither revokes the session nor
+  // clears the cookie; it returns a 405 telling the caller to use the sign-out
+  // button. Kept (rather than 404) so an old bookmarked link lands somewhere
+  // sensible instead of erroring, while closing the GET-logout CSRF vector.
+  router.get("/auth/logout", (_req, res) => {
+    res.setHeader("Allow", "POST");
+    res.setHeader("Cache-Control", "no-store");
+    res
+      .status(405)
+      .type("html")
+      .send(
+        renderErrorPage(
+          "Use the sign-out button",
+          "Signing out happens through the account menu. Your session was not changed by visiting this link."
+        )
+      );
+  });
 
   // Current session info for the admin account menu.
   router.get("/api/me", (req, res) => {

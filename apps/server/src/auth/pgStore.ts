@@ -145,21 +145,56 @@ function mapSession(row: any): Session {
   };
 }
 
+// Minimal surface shared by a pg Pool and a checked-out PoolClient. Every store
+// method talks to a `Queryable` so the same implementation can run either
+// against the pool (autocommit, one statement per call) or against a single
+// client inside a BEGIN/COMMIT transaction (see `transaction`).
+interface Queryable {
+  query(text: string, params?: unknown[]): Promise<{ rows: any[]; rowCount?: number | null }>;
+}
+
 export class PgAuthStore implements AuthStore {
-  constructor(private readonly pool: Pool) {}
+  // `pool` is retained for acquiring a dedicated client in `transaction`; `db`
+  // is what every statement runs against (the pool itself by default, or a
+  // transaction-bound client for the store handed to `transaction`'s callback).
+  private readonly db: Queryable;
+
+  constructor(private readonly pool: Pool, db?: Queryable) {
+    this.db = db ?? pool;
+  }
+
+  async transaction<T>(fn: (tx: AuthStore) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const txStore = new PgAuthStore(this.pool, client);
+      const result = await fn(txStore);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        /* ignore rollback failures; surface the original error below */
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 
   async getUserById(id: string): Promise<User | undefined> {
-    const { rows } = await this.pool.query("SELECT * FROM users WHERE id = $1", [id]);
+    const { rows } = await this.db.query("SELECT * FROM users WHERE id = $1", [id]);
     return rows[0] ? mapUser(rows[0]) : undefined;
   }
 
   async getUserByEmail(email: string): Promise<User | undefined> {
-    const { rows } = await this.pool.query("SELECT * FROM users WHERE lower(primary_email) = lower($1)", [email]);
+    const { rows } = await this.db.query("SELECT * FROM users WHERE lower(primary_email) = lower($1)", [email]);
     return rows[0] ? mapUser(rows[0]) : undefined;
   }
 
   async createUser(input: CreateUserInput): Promise<User> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       `INSERT INTO users (id, primary_email, display_name, avatar_url)
        VALUES ($1, lower($2), $3, $4) RETURNING *`,
       [crypto.randomUUID(), input.primaryEmail, input.displayName, input.avatarUrl]
@@ -168,11 +203,11 @@ export class PgAuthStore implements AuthStore {
   }
 
   async markUserLogin(userId: string): Promise<void> {
-    await this.pool.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [userId]);
+    await this.db.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [userId]);
   }
 
   async getIdentity(provider: Provider, issuer: string, subject: string): Promise<AuthIdentity | undefined> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       "SELECT * FROM auth_identities WHERE provider = $1 AND issuer = $2 AND subject = $3",
       [provider, issuer, subject]
     );
@@ -180,12 +215,12 @@ export class PgAuthStore implements AuthStore {
   }
 
   async listIdentitiesForUser(userId: string): Promise<AuthIdentity[]> {
-    const { rows } = await this.pool.query("SELECT * FROM auth_identities WHERE user_id = $1", [userId]);
+    const { rows } = await this.db.query("SELECT * FROM auth_identities WHERE user_id = $1", [userId]);
     return rows.map(mapIdentity);
   }
 
   async createIdentity(input: CreateIdentityInput): Promise<AuthIdentity> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       `INSERT INTO auth_identities
          (id, user_id, provider, issuer, subject, provider_email, provider_email_verified, display_name, avatar_url, last_used_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now()) RETURNING *`,
@@ -205,11 +240,11 @@ export class PgAuthStore implements AuthStore {
   }
 
   async markIdentityUsed(identityId: string): Promise<void> {
-    await this.pool.query("UPDATE auth_identities SET last_used_at = now() WHERE id = $1", [identityId]);
+    await this.db.query("UPDATE auth_identities SET last_used_at = now() WHERE id = $1", [identityId]);
   }
 
   async createOrganization(input: CreateOrganizationInput): Promise<Organization> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       `INSERT INTO organizations (id, name, slug, owner_user_id, plan)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [crypto.randomUUID(), input.name, input.slug, input.ownerUserId, input.plan ?? "free"]
@@ -218,12 +253,12 @@ export class PgAuthStore implements AuthStore {
   }
 
   async getOrganizationById(id: string): Promise<Organization | undefined> {
-    const { rows } = await this.pool.query("SELECT * FROM organizations WHERE id = $1", [id]);
+    const { rows } = await this.db.query("SELECT * FROM organizations WHERE id = $1", [id]);
     return rows[0] ? mapOrg(rows[0]) : undefined;
   }
 
   async organizationSlugExists(slug: string): Promise<boolean> {
-    const { rows } = await this.pool.query("SELECT 1 FROM organizations WHERE slug = $1", [slug]);
+    const { rows } = await this.db.query("SELECT 1 FROM organizations WHERE slug = $1", [slug]);
     return rows.length > 0;
   }
 
@@ -233,7 +268,7 @@ export class PgAuthStore implements AuthStore {
     role: Membership["role"];
     status?: Membership["status"];
   }): Promise<Membership> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       `INSERT INTO organization_memberships (id, organization_id, user_id, role, status)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [crypto.randomUUID(), input.organizationId, input.userId, input.role, input.status ?? "active"]
@@ -242,7 +277,7 @@ export class PgAuthStore implements AuthStore {
   }
 
   async getMembership(organizationId: string, userId: string): Promise<Membership | undefined> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       "SELECT * FROM organization_memberships WHERE organization_id = $1 AND user_id = $2",
       [organizationId, userId]
     );
@@ -250,7 +285,7 @@ export class PgAuthStore implements AuthStore {
   }
 
   async listMembershipsForUser(userId: string): Promise<Membership[]> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       "SELECT * FROM organization_memberships WHERE user_id = $1 ORDER BY created_at ASC",
       [userId]
     );
@@ -258,7 +293,7 @@ export class PgAuthStore implements AuthStore {
   }
 
   async createSession(input: CreateSessionInput): Promise<Session> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       `INSERT INTO sessions (id, user_id, token_hash, active_organization_id, expires_at, last_used_at, ip_address, user_agent)
        VALUES ($1, $2, $3, $4, $5, now(), $6, $7) RETURNING *`,
       [
@@ -275,25 +310,25 @@ export class PgAuthStore implements AuthStore {
   }
 
   async getSessionByHash(tokenHash: string): Promise<Session | undefined> {
-    const { rows } = await this.pool.query("SELECT * FROM sessions WHERE token_hash = $1", [tokenHash]);
+    const { rows } = await this.db.query("SELECT * FROM sessions WHERE token_hash = $1", [tokenHash]);
     return rows[0] ? mapSession(rows[0]) : undefined;
   }
 
   async revokeSession(sessionId: string): Promise<void> {
-    await this.pool.query("UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL", [sessionId]);
+    await this.db.query("UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL", [sessionId]);
   }
 
   async markSessionUsed(sessionId: string): Promise<void> {
-    await this.pool.query("UPDATE sessions SET last_used_at = now() WHERE id = $1", [sessionId]);
+    await this.db.query("UPDATE sessions SET last_used_at = now() WHERE id = $1", [sessionId]);
   }
 
   async deleteExpiredSessions(now: Date): Promise<number> {
-    const result = await this.pool.query("DELETE FROM sessions WHERE expires_at <= $1", [now.toISOString()]);
+    const result = await this.db.query("DELETE FROM sessions WHERE expires_at <= $1", [now.toISOString()]);
     return result.rowCount ?? 0;
   }
 
   async recordAuditEvent(input: CreateAuditEventInput): Promise<AuditEvent> {
-    const { rows } = await this.pool.query(
+    const { rows } = await this.db.query(
       `INSERT INTO audit_events (id, event_type, user_id, organization_id, metadata)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [crypto.randomUUID(), input.eventType, input.userId, input.organizationId, input.metadata ? JSON.stringify(input.metadata) : null]

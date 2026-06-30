@@ -83,4 +83,13 @@ export interface AuthStore {
 
   // Audit
   recordAuditEvent(input: CreateAuditEventInput): Promise<AuditEvent>;
+
+  // Runs `fn` so that every store write it performs commits or rolls back
+  // together. The store passed to `fn` MUST be used for the writes that should
+  // be atomic. For PostgreSQL this is a real `BEGIN`/`COMMIT`/`ROLLBACK` on a
+  // single dedicated client; for the in-memory store it snapshots and restores
+  // state on failure so tests can exercise partial-failure rollback without a
+  // database. Used by account provisioning (user + identity + organization +
+  // membership + initial audit events succeed or fail as a unit).
+  transaction<T>(fn: (tx: AuthStore) => Promise<T>): Promise<T>;
 }

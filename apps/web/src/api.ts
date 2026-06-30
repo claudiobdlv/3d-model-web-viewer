@@ -448,9 +448,13 @@ export type MeResponse =
 export async function getMe(): Promise<MeResponse> {
   try {
     const res = await fetch("/api/me", { headers: { accept: "application/json" }, cache: "no-store" });
+    // 401 (no session) and 404 (accounts disabled, route absent) both mean
+    // "not authenticated". Await the body parse inside the try so a non-JSON /
+    // truncated response is treated as unauthenticated rather than throwing.
     if (!res.ok) return { authenticated: false };
-    return res.json() as Promise<MeResponse>;
+    return (await res.json()) as MeResponse;
   } catch {
+    // Network failure or invalid JSON: fail closed to unauthenticated.
     return { authenticated: false };
   }
 }

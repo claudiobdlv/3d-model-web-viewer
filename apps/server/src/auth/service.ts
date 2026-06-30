@@ -101,64 +101,105 @@ export class AuthService {
       return { ok: false, reason: "account_exists_different_provider", existingProviders };
     }
 
-    // Brand new account: user + default workspace + owner membership + identity.
-    const user = await this.store.createUser({
-      primaryEmail: email,
-      displayName: profile.displayName,
-      avatarUrl: profile.avatarUrl
-    });
-    await this.store.recordAuditEvent({
-      eventType: "user.created",
-      userId: user.id,
-      organizationId: null,
-      metadata: { provider: profile.provider }
-    });
-    await this.store.createIdentity({
-      userId: user.id,
-      provider: profile.provider,
-      issuer: profile.issuer,
-      subject: profile.subject,
-      providerEmail: email,
-      providerEmailVerified: profile.emailVerified,
-      displayName: profile.displayName,
-      avatarUrl: profile.avatarUrl
-    });
-    const { organization, membership } = await this.ensurePersonalWorkspace(user);
-    await this.store.markUserLogin(user.id);
-    await this.store.recordAuditEvent({
-      eventType: "login.success",
-      userId: user.id,
-      organizationId: organization.id,
-      metadata: { provider: profile.provider, returning: false }
-    });
-    return { ok: true, user, organization, membership, created: true };
+    // Brand new account. Provision the user, their auth identity, the Personal
+    // Workspace, the owner membership, and the initial audit trail as a single
+    // unit of work: with the PostgreSQL store everything commits or rolls back
+    // together (no orphaned user without a workspace, no identity pointing at a
+    // half-created account); the in-memory store snapshots/restores to mirror
+    // this for tests. If a concurrent signup wins the unique-email/identity
+    // race, the transaction aborts and we re-resolve below instead of leaving
+    // partial state behind.
+    try {
+      const provisioned = await this.store.transaction(async (tx) => {
+        const user = await tx.createUser({
+          primaryEmail: email,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl
+        });
+        await tx.recordAuditEvent({
+          eventType: "user.created",
+          userId: user.id,
+          organizationId: null,
+          metadata: { provider: profile.provider }
+        });
+        await tx.createIdentity({
+          userId: user.id,
+          provider: profile.provider,
+          issuer: profile.issuer,
+          subject: profile.subject,
+          providerEmail: email,
+          providerEmailVerified: profile.emailVerified,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl
+        });
+        const { organization, membership } = await this.ensurePersonalWorkspace(user, tx);
+        await tx.markUserLogin(user.id);
+        await tx.recordAuditEvent({
+          eventType: "login.success",
+          userId: user.id,
+          organizationId: organization.id,
+          metadata: { provider: profile.provider, returning: false }
+        });
+        return { user, organization, membership };
+      });
+      return { ok: true, ...provisioned, created: true };
+    } catch (error) {
+      // Provisioning rolled back. Distinguish a lost concurrency race (another
+      // request created this identity or claimed the email first) from a
+      // genuine infrastructure failure, which must propagate.
+      const racedIdentity = await this.store.getIdentity(profile.provider, profile.issuer, profile.subject);
+      if (racedIdentity) {
+        const racedUser = await this.store.getUserById(racedIdentity.user_id);
+        if (racedUser && racedUser.status === "active" && !racedUser.deleted_at) {
+          const { organization, membership } = await this.ensurePersonalWorkspace(racedUser);
+          await this.store.recordAuditEvent({
+            eventType: "login.success",
+            userId: racedUser.id,
+            organizationId: organization.id,
+            metadata: { provider: profile.provider, returning: true, raced: true }
+          });
+          return { ok: true, user: racedUser, organization, membership, created: false };
+        }
+      }
+      const racedEmailUser = await this.store.getUserByEmail(email);
+      if (racedEmailUser) {
+        const identities = await this.store.listIdentitiesForUser(racedEmailUser.id);
+        const existingProviders = [...new Set(identities.map((identity) => identity.provider))];
+        return { ok: false, reason: "account_exists_different_provider", existingProviders };
+      }
+      throw error;
+    }
   }
 
   // Ensures the user has at least one workspace they own. New users get a
-  // "Personal Workspace" with role owner.
-  async ensurePersonalWorkspace(user: User): Promise<{ organization: Organization; membership: Membership }> {
-    const memberships = await this.store.listMembershipsForUser(user.id);
+  // "Personal Workspace" with role owner. `store` lets callers run this inside
+  // a provisioning transaction (defaults to the long-lived store otherwise).
+  async ensurePersonalWorkspace(
+    user: User,
+    store: AuthStore = this.store
+  ): Promise<{ organization: Organization; membership: Membership }> {
+    const memberships = await store.listMembershipsForUser(user.id);
     for (const membership of memberships) {
-      const organization = await this.store.getOrganizationById(membership.organization_id);
+      const organization = await store.getOrganizationById(membership.organization_id);
       if (organization && !organization.deleted_at) {
         return { organization, membership };
       }
     }
 
-    const slug = await this.allocateOrgSlug(user);
-    const organization = await this.store.createOrganization({
+    const slug = await this.allocateOrgSlug(user, store);
+    const organization = await store.createOrganization({
       name: DEFAULT_WORKSPACE_NAME,
       slug,
       ownerUserId: user.id,
       plan: "free"
     });
-    const membership = await this.store.createMembership({
+    const membership = await store.createMembership({
       organizationId: organization.id,
       userId: user.id,
       role: "owner",
       status: "active"
     });
-    await this.store.recordAuditEvent({
+    await store.recordAuditEvent({
       eventType: "organization.created",
       userId: user.id,
       organizationId: organization.id,
@@ -167,7 +208,7 @@ export class AuthService {
     return { organization, membership };
   }
 
-  private async allocateOrgSlug(user: User): Promise<string> {
+  private async allocateOrgSlug(user: User, store: AuthStore = this.store): Promise<string> {
     const base =
       (user.primary_email.split("@")[0] || "workspace")
         .toLowerCase()
@@ -177,7 +218,7 @@ export class AuthService {
     let slug = base;
     let suffix = 2;
     // Bounded loop; appends a short random suffix if needed to avoid clashes.
-    while (await this.store.organizationSlugExists(slug)) {
+    while (await store.organizationSlugExists(slug)) {
       slug = `${base}-${suffix}`;
       suffix += 1;
       if (suffix > 50) {
@@ -241,6 +282,18 @@ export class AuthService {
 
     await this.store.markSessionUsed(session.id);
     return { user, session, organization, membership };
+  }
+
+  // Records that a sign-in was attempted against a provider that is not
+  // currently available (in the AUTH_PROVIDERS allow-list but without configured
+  // credentials, e.g. Microsoft while Google-only). No user/PII is involved.
+  async recordProviderUnavailable(provider: string, phase: "start" | "callback"): Promise<void> {
+    await this.store.recordAuditEvent({
+      eventType: "auth.provider_unavailable",
+      userId: null,
+      organizationId: null,
+      metadata: { provider, phase }
+    });
   }
 
   async logout(rawToken: string | undefined): Promise<void> {
