@@ -289,16 +289,156 @@ multi-tenant `{tenantid}` template.
 
 ### Known limitations / deferred (not blockers for continuing the branch)
 
-- **Logout CSRF.** Logout is exposed as both `POST` and `GET /auth/logout`; `POST`
-  is canonical. `GET` is retained for the menu link. Impact is limited to
-  terminating the victim's own session (annoyance, not account compromise). A
-  strict POST-only switch is deferred to the admin-UI wiring phase.
-- **Transactional account provisioning.** New-user provisioning
-  (user → identity → org → membership) is not yet wrapped in a single DB
-  transaction. The unique-email constraint + collision rule prevent the main
-  orphan/lockout risk; a fully atomic `provisionAccount` is deferred to Phase 2.
+- **Logout CSRF.** ✅ Resolved in Hardening Pack 1 — logout is now strict
+  POST-only. See [Accounts Hardening Pack 1](#accounts-hardening-pack-1).
+- **Transactional account provisioning.** ✅ Resolved in Hardening Pack 1 — new
+  account provisioning is now atomic on PostgreSQL. See
+  [Accounts Hardening Pack 1](#accounts-hardening-pack-1).
 - **Multer** upgraded to `^2.2.0`, clearing the high-severity DoS advisory
   (`npm audit --omit=dev` → 0 vulnerabilities).
+
+---
+
+## Accounts Hardening Pack 1
+
+A follow-up hardening pass on top of the tenant-safety work. Everything here is
+still **feature-flagged off** (`AUTH_ENABLED=false`): with accounts disabled the
+accounts router is not even mounted, so none of the changes below run in
+production today. No OAuth credentials, Postgres, or `AUTH_ENABLED=true` are
+required to ship it.
+
+### Transactional account provisioning
+
+First-time sign-in provisions a user, their auth identity, a "Personal
+Workspace" organization, an owner membership, and the initial audit events
+(`user.created`, `organization.created`, `login.success`). These now **commit or
+roll back as a single unit**:
+
+- `AuthStore.transaction(fn)` wraps the work. `PgAuthStore.transaction` runs it
+  on one dedicated client inside `BEGIN`/`COMMIT`/`ROLLBACK`
+  (`apps/server/src/auth/pgStore.ts`). Every statement of a transaction uses
+  that client, so a failure anywhere (e.g. the membership insert) rolls back the
+  user/identity/organization created earlier — no orphaned half-accounts.
+- `MemoryAuthStore.transaction` snapshots and restores its collections, and
+  serializes transactions, so tests get real all-or-nothing semantics (and
+  deterministic concurrency) without a database
+  (`apps/server/src/auth/memoryStore.ts`). The in-memory store also now enforces
+  the one-account-per-email rule, mirroring the Postgres
+  `users_primary_email_key` unique index.
+- A lost concurrency race (a second simultaneous signup for the same
+  email/identity) is detected after rollback and re-resolved as a returning
+  login or a provider collision, instead of surfacing a raw constraint error
+  (`apps/server/src/auth/service.ts`).
+- Tests: `apps/server/src/auth/provisioning.test.ts` covers the happy path,
+  partial-failure rollback (no orphaned rows), and concurrent-signup
+  convergence.
+
+### Strict POST-only logout
+
+- `POST /auth/logout` revokes the session, clears the cookie, and redirects to
+  `/login`. This is the only way to sign out, and it is exactly what the admin
+  UI uses (`apps/web/src/api.ts` `postLogout`).
+- `GET /auth/logout` **no longer logs anyone out.** It returns `405 Method Not
+  Allowed` with `Allow: POST` and an informational page; it does **not** revoke
+  the session or clear the cookie. This closes the logout-CSRF vector (a
+  cross-site `<img>`/link can no longer force-terminate a victim's session) while
+  still landing an old bookmarked GET link somewhere sensible.
+- Tests: `apps/server/src/auth/adminHttp.test.ts` asserts GET returns 405 and
+  leaves the session valid, and that a subsequent POST revokes it.
+
+### Auth-endpoint rate limiting
+
+Lightweight, dependency-free, in-memory (per-process) rate limiting applied
+**only** to the accounts router (`apps/server/src/auth/rateLimit.ts`):
+
+- Covered: `GET /auth/:provider/start`, `GET /auth/:provider/callback` (one
+  OAuth limiter), and `GET /login` (a separate, higher limiter). Repeated failed
+  sign-ins — including `email_not_allowed` denials, which happen inside the
+  callback — are blunted because they pass through the rate-limited callback
+  endpoint.
+- **Not** covered (by design): the public QR/model viewer routes
+  (`/public/:token...`) and converter upload routes. The accounts router that
+  hosts these limiters is mounted only when `AUTH_ENABLED=true`, so public
+  routes can never be affected.
+- Keyed by client IP (first `X-Forwarded-For` hop, else socket address). On
+  limit it returns `429` with a `Retry-After` header and `Cache-Control:
+  no-store`, short-circuiting before any OAuth/discovery work.
+- Defaults: 20 OAuth hits / 10 min and 60 `/login` hits / 10 min per IP.
+  Tunable via `AUTH_RATE_LIMIT_WINDOW_MS`, `AUTH_RATE_LIMIT_MAX`,
+  `AUTH_RATE_LIMIT_LOGIN_MAX` (used by tests to force the limit quickly).
+- Tests: `apps/server/src/auth/rateLimit.test.ts` (unit) and
+  `apps/server/src/auth/rateLimitHttp.test.ts` (429 triggers on a limited route,
+  `/login` is unaffected).
+
+### Audit events
+
+The audit trail (PostgreSQL `audit_events`, in-memory list for tests) records:
+
+| Event | When |
+|---|---|
+| `login.success` | A user signs in (returning or first-time). |
+| `login.rejected` | Login denied — e.g. `email_not_allowed`, `user_disabled`. |
+| `login.collision` | Email already owned by a different provider identity. |
+| `user.created` / `organization.created` | First-time provisioning (in the tx). |
+| `session.created` | A session is minted. |
+| `session.revoked` | Logout (`reason: "logout"`) or revocation. |
+| `auth.provider_unavailable` | A sign-in was attempted against a provider in the allow-list but without configured credentials (e.g. Microsoft while Google-only). |
+
+Metadata stores only sanitized ids + small flags. Raw session/OAuth tokens,
+client secrets, ID tokens, and cookies are **never** logged. Tests:
+`apps/server/src/auth/audit.test.ts` (includes an assertion that no audit
+metadata contains tokens/secrets/cookies).
+
+### Production enablement preflight script
+
+`apps/server/scripts/accounts-preflight.mjs` is a **read-only** readiness check.
+It never enables auth, runs migrations, writes to any database, or prints secret
+values (only whether a variable is set). Safe to run against production.
+
+```bash
+cd apps/server
+node scripts/accounts-preflight.mjs              # env + SQLite readiness
+node scripts/accounts-preflight.mjs --check-db   # also test Postgres connectivity (read-only)
+node scripts/accounts-preflight.mjs --json        # machine-readable
+```
+
+It reports: `AUTH_ENABLED`, `AUTH_PROVIDERS`, `SESSION_COOKIE_SECURE`, presence
+(not values) of `AUTH_ALLOWED_EMAILS` (with entry count), `APP_BASE_URL`,
+`SESSION_SECRET`, `DATABASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; the
+count of SQLite models missing `organization_id` plus a dry-run assignment
+status; the active public-share count; and, with `--check-db`, whether the
+Postgres `schema_migrations` table exists (without applying anything). Exit code
+is `0` for a completed check (including "NOT READY") and non-zero only when
+`--check-db` connectivity fails.
+
+### Remaining steps before enabling Google login
+
+The hardening pack changes **no** enablement prerequisites. To turn Google login
+on later (see the [runbook](#enabling-accounts-later-runbook) for full detail):
+
+1. Register the Google OAuth app; set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+   in the EliteDesk `.env` (never committed).
+2. Set `AUTH_ALLOWED_EMAILS` (required fail-closed admin allow-list),
+   `SESSION_SECRET`, `APP_BASE_URL`, `SESSION_COOKIE_SECURE=true`, and
+   `DATABASE_URL`.
+3. Bring up the Postgres compose overlay; let migrations run on startup.
+4. Run `node scripts/accounts-preflight.mjs --check-db` and confirm **READY**.
+5. Sign in once as the owner, back up SQLite + Postgres, then run
+   `assign-models-to-default-org.mjs` (dry-run first) to stamp existing models.
+6. Set `AUTH_ENABLED=true` and redeploy.
+
+### Rollback notes
+
+- **Instant rollback:** set `AUTH_ENABLED=false` (or unset it) and redeploy. The
+  accounts router, session resolution, rate limiters, and audit logging all stop
+  running; the legacy `ADMIN_PASSWORD` Basic-auth flow and SQLite model flows
+  resume unchanged. No schema rollback is needed — the additive SQLite ownership
+  columns and the (separate) Postgres auth tables are inert while disabled.
+- **Rate limiting / logout / audit** are all internal to the accounts router, so
+  there is nothing extra to undo beyond flipping the flag.
+- **Provisioning transaction:** purely an internal change to how the same rows
+  are written; reverting the flag stops all writes. No data migration is implied
+  by enabling or disabling it.
 
 ---
 

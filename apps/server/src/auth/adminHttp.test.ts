@@ -150,7 +150,8 @@ test("accounts-enabled admin protection, scoping, and logout", async (t) => {
   const afterLogout = await fetch(`${origin}/api/models`, { headers: { cookie: cookieA } });
   assert.equal(afterLogout.status, 401);
 
-  // GET logout also works (kept for backward compatibility, e.g. manual navigation).
+  // GET logout is strict: it does NOT revoke the session (closes the GET-logout
+  // CSRF vector). It returns 405 and the session stays valid until a real POST.
   const sessionC = await service.createSession(loginA.user.id, {
     activeOrganizationId: loginA.organization.id,
     ipAddress: null,
@@ -158,7 +159,14 @@ test("accounts-enabled admin protection, scoping, and logout", async (t) => {
   });
   const cookieC = `${cookieName}=${sessionC.token}`;
   const logoutGet = await fetch(`${origin}/auth/logout`, { headers: { cookie: cookieC }, redirect: "manual" });
-  assert.equal(logoutGet.status, 302);
+  assert.equal(logoutGet.status, 405);
+  assert.equal(logoutGet.headers.get("allow"), "POST");
+  // Session is untouched by the GET.
   const afterLogoutGet = await fetch(`${origin}/api/models`, { headers: { cookie: cookieC } });
-  assert.equal(afterLogoutGet.status, 401);
+  assert.equal(afterLogoutGet.status, 200);
+  // A real POST logout then revokes it.
+  const logoutPostC = await fetch(`${origin}/auth/logout`, { method: "POST", headers: { cookie: cookieC }, redirect: "manual" });
+  assert.equal(logoutPostC.status, 302);
+  const afterPostC = await fetch(`${origin}/api/models`, { headers: { cookie: cookieC } });
+  assert.equal(afterPostC.status, 401);
 });

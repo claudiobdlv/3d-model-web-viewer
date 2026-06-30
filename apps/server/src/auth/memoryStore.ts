@@ -42,10 +42,17 @@ export class MemoryAuthStore implements AuthStore {
   }
 
   async createUser(input: CreateUserInput): Promise<User> {
+    const normalized = input.primaryEmail.toLowerCase();
+    // Mirror the Postgres `users_primary_email_key` unique index so the
+    // in-memory store exhibits the same conflict behaviour under concurrent
+    // provisioning (one account per normalized email).
+    if ([...this.users.values()].some((existing) => existing.primary_email === normalized)) {
+      throw new Error("user_email_conflict");
+    }
     const now = this.now();
     const user: User = {
       id: crypto.randomUUID(),
-      primary_email: input.primaryEmail.toLowerCase(),
+      primary_email: normalized,
       display_name: input.displayName,
       avatar_url: input.avatarUrl,
       status: "active",
@@ -212,6 +219,50 @@ export class MemoryAuthStore implements AuthStore {
     };
     this.audit.push(event);
     return event;
+  }
+
+  // Serializes transactions so only one snapshot/restore window is open at a
+  // time. A real database serializes via row locks; without this, two
+  // concurrent transactions' whole-map snapshots could clobber each other's
+  // committed writes on rollback. This gives deterministic, serializable-like
+  // behaviour for concurrent-provisioning tests.
+  private txChain: Promise<void> = Promise.resolve();
+
+  // Snapshot/restore transaction. `fn` runs with exclusive access; on failure
+  // we restore the pre-transaction collection references so partial writes (a
+  // created user/identity but a failed membership, say) are fully rolled back.
+  // This gives tests real all-or-nothing provisioning semantics without a
+  // database. (Shallow Map copies suffice: provisioning creates brand-new value
+  // objects, so dropping the new map entries on rollback discards them.)
+  async transaction<T>(fn: (tx: AuthStore) => Promise<T>): Promise<T> {
+    const previous = this.txChain;
+    let release!: () => void;
+    this.txChain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous.catch(() => undefined);
+
+    const snapshot = {
+      users: new Map(this.users),
+      identities: new Map(this.identities),
+      organizations: new Map(this.organizations),
+      memberships: new Map(this.memberships),
+      sessions: new Map(this.sessions),
+      audit: [...this.audit]
+    };
+    try {
+      return await fn(this);
+    } catch (error) {
+      this.users = snapshot.users;
+      this.identities = snapshot.identities;
+      this.organizations = snapshot.organizations;
+      this.memberships = snapshot.memberships;
+      this.sessions = snapshot.sessions;
+      this.audit = snapshot.audit;
+      throw error;
+    } finally {
+      release();
+    }
   }
 
   // Test helpers (not part of AuthStore).
