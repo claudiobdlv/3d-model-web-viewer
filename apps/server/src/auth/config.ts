@@ -26,6 +26,17 @@ export interface AuthConfig {
   sameSite: "lax" | "strict";
   databaseUrl?: string;
   providers: Partial<Record<Provider, ProviderConfig>>;
+  // The provider allow-list (AUTH_PROVIDERS), independent of whether credentials
+  // happen to be configured. Defaults to Google-only for this phase. Microsoft
+  // code stays in the codebase but is excluded from `providers` (and therefore
+  // not mounted/shown) unless explicitly added here. See docs/accounts-phase1.md
+  // "Re-enabling Microsoft" for how to opt back in.
+  allowedProviders: Provider[];
+  // Admin email allow-list (AUTH_ALLOWED_EMAILS), lowercase-normalized. Only
+  // verified emails in this list may create/log into the first admin workspace
+  // while accounts are enabled. Empty means nothing is allowed (fail closed) —
+  // index.ts requires this to be non-empty whenever AUTH_ENABLED=true.
+  allowedAdminEmails: string[];
 }
 
 function bool(value: string | undefined, fallback = false): boolean {
@@ -37,13 +48,31 @@ function trimSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+function isProvider(value: string): value is Provider {
+  return value === "google" || value === "microsoft";
+}
+
+function parseAllowedProviders(value: string | undefined): Provider[] {
+  // Default intended provider list for this phase is Google only.
+  const raw = (value ?? "google").split(",").map((entry) => entry.trim().toLowerCase());
+  const providers = raw.filter(isProvider);
+  return providers.length ? [...new Set(providers)] : ["google"];
+}
+
+function parseAllowedEmails(value: string | undefined): string[] {
+  if (!value) return [];
+  return [...new Set(value.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
+}
+
 export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
   const enabled = bool(env.AUTH_ENABLED, false);
   const appBaseUrl = trimSlash(env.APP_BASE_URL || env.PUBLIC_BASE_URL || "http://localhost:3009");
   const tenant = env.MICROSOFT_TENANT || "common";
+  const allowedProviders = parseAllowedProviders(env.AUTH_PROVIDERS);
+  const allowedProviderSet = new Set(allowedProviders);
 
   const providers: Partial<Record<Provider, ProviderConfig>> = {};
-  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
+  if (allowedProviderSet.has("google") && env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
     providers.google = {
       provider: "google",
       clientId: env.GOOGLE_CLIENT_ID,
@@ -52,7 +81,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
       scopes: ["openid", "email", "profile"]
     };
   }
-  if (env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET) {
+  if (allowedProviderSet.has("microsoft") && env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET) {
     providers.microsoft = {
       provider: "microsoft",
       clientId: env.MICROSOFT_CLIENT_ID,
@@ -76,7 +105,9 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
     secureCookies: bool(env.SESSION_COOKIE_SECURE, env.NODE_ENV === "production"),
     sameSite: env.SESSION_COOKIE_SAMESITE === "strict" ? "strict" : "lax",
     databaseUrl: env.DATABASE_URL || undefined,
-    providers
+    providers,
+    allowedProviders,
+    allowedAdminEmails: parseAllowedEmails(env.AUTH_ALLOWED_EMAILS)
   };
 }
 

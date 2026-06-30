@@ -64,6 +64,10 @@ function clearSessionCookie(res: express.Response, config: AuthConfig): void {
 }
 
 function renderLoginPage(config: AuthConfig, next: string, message?: string): string {
+  // Provider buttons reflect both the AUTH_PROVIDERS allow-list and whether
+  // credentials are configured (config.providers already accounts for both —
+  // see loadAuthConfig). Google-only is the default/intended provider list for
+  // this phase; Microsoft only appears once explicitly re-enabled.
   const providers: Array<{ id: Provider; label: string }> = [];
   if (config.providers.google) providers.push({ id: "google", label: "Continue with Google" });
   if (config.providers.microsoft) providers.push({ id: "microsoft", label: "Continue with Microsoft" });
@@ -76,7 +80,14 @@ function renderLoginPage(config: AuthConfig, next: string, message?: string): st
             `<a class="btn" href="/auth/${provider.id}/start${nextParam}">${escapeHtml(provider.label)}</a>`
         )
         .join("\n")
-    : `<p class="muted">No sign-in providers are configured yet. Set the Google/Microsoft client credentials and enable accounts to continue.</p>`;
+    : `<p class="muted">No sign-in providers are configured yet. Set the Google client credentials and enable accounts to continue.</p>`;
+
+  const providerNames = providers.map((provider) => (provider.id === "google" ? "Google" : "Microsoft"));
+  const subtitle =
+    providerNames.length === 1 && providerNames[0] === "Google"
+      ? "Admin access uses Google sign-in."
+      : "Sign in to manage your 3D models.";
+  const privacyProviderText = providerNames.length ? providerNames.join(" or ") : "Google";
 
   const banner = message ? `<div class="banner">${escapeHtml(message)}</div>` : "";
 
@@ -102,10 +113,10 @@ function renderLoginPage(config: AuthConfig, next: string, message?: string): st
 <body>
 <main>
   <h1>ModelBase</h1>
-  <p class="muted">Sign in to manage your 3D models.</p>
+  <p class="muted">${escapeHtml(subtitle)}</p>
   ${banner}
   ${buttons}
-  <p class="privacy">Models are private by default. We only use your Google or Microsoft profile to identify your account. Public share links are explicit and revocable.</p>
+  <p class="privacy">Models are private by default. We only use your ${escapeHtml(privacyProviderText)} profile to identify your account. Public share links are explicit and revocable.</p>
 </main>
 </body>
 </html>`;
@@ -131,6 +142,8 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
       message = "An account already exists for this email with a different sign-in method. Please sign in with your original provider.";
     } else if (req.query.error === "no_email") {
       message = "Your provider did not share a verified email address, which is required to sign in.";
+    } else if (req.query.error === "email_not_allowed") {
+      message = "This Google account is not approved for admin access. Contact an administrator if you believe this is a mistake.";
     } else if (req.query.error) {
       message = "Sign-in could not be completed. Please try again.";
     }

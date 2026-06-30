@@ -30,6 +30,7 @@ test("AUTH_ENABLED=true is tenant-safe across orgs, roles, artifacts, uploads", 
   process.env.AUTH_STORE = "memory";
   process.env.SESSION_SECRET = "test-session-secret";
   process.env.APP_BASE_URL = "http://127.0.0.1";
+  process.env.AUTH_ALLOWED_EMAILS = "a@example.com,b@example.com,v@example.com";
 
   const { app, authSubsystem } = await import("./../server.js");
   const { db } = await import("./../db.js");
@@ -48,6 +49,7 @@ test("AUTH_ENABLED=true is tenant-safe across orgs, roles, artifacts, uploads", 
     delete process.env.AUTH_ENABLED;
     delete process.env.AUTH_STORE;
     delete process.env.SESSION_SECRET;
+    delete process.env.AUTH_ALLOWED_EMAILS;
   });
 
   // --- Mint sessions: owner A, owner B, and a viewer inside org A ---

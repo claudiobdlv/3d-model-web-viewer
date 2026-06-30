@@ -13,6 +13,8 @@ function baseConfig(overrides: Partial<AuthConfig> = {}): AuthConfig {
     secureCookies: true,
     sameSite: "lax",
     providers: {},
+    allowedProviders: ["google"],
+    allowedAdminEmails: ["owner@example.test"],
     ...overrides
   };
 }
@@ -23,6 +25,13 @@ test("AUTH_ENABLED=false starts with no Postgres/session/OIDC config", () => {
   const subsystem = createAuthSubsystem(baseConfig({ enabled: false, sessionSecret: "", secureCookies: false }));
   assert.equal(subsystem.enabled, false);
   assert.equal(subsystem.service, undefined);
+});
+
+test("AUTH_ENABLED=true requires a non-empty admin email allow-list", () => {
+  assert.throws(
+    () => createAuthSubsystem(baseConfig({ allowedAdminEmails: [] })),
+    /AUTH_ENABLED=true requires AUTH_ALLOWED_EMAILS/i
+  );
 });
 
 test("auth-enabled production fails closed on insecure session cookies", () => {

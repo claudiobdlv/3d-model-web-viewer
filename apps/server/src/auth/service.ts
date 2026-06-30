@@ -13,14 +13,28 @@ export const DEFAULT_WORKSPACE_NAME = "Personal Workspace";
 
 export type LoginResult =
   | { ok: true; user: User; organization: Organization; membership: Membership; created: boolean }
-  | { ok: false; reason: "no_email" | "account_exists_different_provider" | "user_disabled"; existingProviders?: string[] };
+  | {
+      ok: false;
+      reason: "no_email" | "account_exists_different_provider" | "user_disabled" | "email_not_allowed";
+      existingProviders?: string[];
+    };
 
 export interface SessionConfig {
   sessionTtlMs: number;
+  // Admin email allow-list (lowercase-normalized). When non-empty, only a
+  // verified email in this list may create or log into the admin workspace.
+  // Enforced on every login (not just creation) so removing an email from the
+  // list revokes access immediately. Empty/undefined means no emails are
+  // permitted — index.ts requires this to be set whenever AUTH_ENABLED=true.
+  allowedEmails?: Iterable<string>;
 }
 
 export class AuthService {
-  constructor(private readonly store: AuthStore, private readonly config: SessionConfig) {}
+  private readonly allowedEmails: Set<string>;
+
+  constructor(private readonly store: AuthStore, private readonly config: SessionConfig) {
+    this.allowedEmails = new Set([...(config.allowedEmails ?? [])].map((email) => email.trim().toLowerCase()));
+  }
 
   // Implements the Phase 1 account-collision rule:
   //  - existing identity -> log that user in
@@ -28,6 +42,21 @@ export class AuthService {
   //  - new identity, but a user already owns that email -> DO NOT auto-merge; surface error
   async loginWithProvider(profile: ProviderProfile): Promise<LoginResult> {
     const email = profile.email ? profile.email.trim().toLowerCase() : "";
+
+    // Admin email allow-list gate. Checked before any identity/user lookup so
+    // an unapproved account never creates a user/workspace, and so revoking an
+    // email from the allow-list blocks even a previously-approved returning
+    // identity (defense in depth — identity is still keyed on
+    // provider+issuer+subject, never email alone, once an account exists).
+    if (this.allowedEmails.size > 0 && (!email || !this.allowedEmails.has(email))) {
+      await this.store.recordAuditEvent({
+        eventType: "login.rejected",
+        userId: null,
+        organizationId: null,
+        metadata: { provider: profile.provider, reason: "email_not_allowed" }
+      });
+      return { ok: false, reason: "email_not_allowed" };
+    }
 
     const existingIdentity = await this.store.getIdentity(profile.provider, profile.issuer, profile.subject);
     if (existingIdentity) {
