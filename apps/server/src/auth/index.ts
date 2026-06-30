@@ -86,6 +86,16 @@ export function createAuthSubsystem(config: AuthConfig = loadAuthConfig()): Auth
     throw new Error("AUTH_ENABLED=true requires SESSION_SECRET to be set.");
   }
 
+  // Fail closed: an admin email allow-list is mandatory whenever accounts are
+  // enabled. Without it, any verified Google account could create the first
+  // admin workspace. Set AUTH_ALLOWED_EMAILS to a comma-separated list of the
+  // Google admin emails permitted to sign in.
+  if (config.allowedAdminEmails.length === 0) {
+    throw new Error(
+      "AUTH_ENABLED=true requires AUTH_ALLOWED_EMAILS to be set (comma-separated allow-list of admin Google emails)."
+    );
+  }
+
   // Deployment safety: in production we must fail closed when session cookies
   // would be transmitted insecurely (finding 7). A documented local override
   // exists for non-HTTPS development only.
@@ -118,7 +128,10 @@ export function createAuthSubsystem(config: AuthConfig = loadAuthConfig()): Auth
     throw new Error("AUTH_ENABLED=true requires DATABASE_URL (or AUTH_STORE=memory for local dev).");
   }
 
-  const service = new AuthService(store, { sessionTtlMs: config.sessionTtlMs });
+  const service = new AuthService(store, {
+    sessionTtlMs: config.sessionTtlMs,
+    allowedEmails: config.allowedAdminEmails
+  });
   return {
     enabled: true,
     config,

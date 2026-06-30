@@ -5,9 +5,9 @@ import { AuthService, DEFAULT_WORKSPACE_NAME } from "./service.js";
 import { hashToken } from "./tokens.js";
 import type { ProviderProfile } from "./types.js";
 
-function makeService(ttlMs = 30 * 24 * 60 * 60 * 1000) {
+function makeService(ttlMs = 30 * 24 * 60 * 60 * 1000, allowedEmails?: string[]) {
   const store = new MemoryAuthStore();
-  return { store, service: new AuthService(store, { sessionTtlMs: ttlMs }) };
+  return { store, service: new AuthService(store, { sessionTtlMs: ttlMs, allowedEmails }) };
 }
 
 const googleProfile: ProviderProfile = {
@@ -122,6 +122,42 @@ test("expired sessions fail to resolve", async () => {
   assert.equal(await service.resolveSession(token), undefined);
   // Confirm the failure was due to expiry (the hashed record still exists).
   assert.ok(await store.getSessionByHash(hashToken(token)));
+});
+
+test("an approved email in the admin allow-list can create and log into the account", async () => {
+  const { service, store } = makeService(undefined, ["ada@example.com"]);
+  const result = await service.loginWithProvider(googleProfile);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.created, true);
+  assert.equal(result.user.primary_email, "ada@example.com");
+  // Returning login for the same approved email also succeeds.
+  const second = await service.loginWithProvider(googleProfile);
+  assert.equal(second.ok, true);
+  assert.ok(await store.getUserByEmail("ada@example.com"));
+});
+
+test("an email outside the admin allow-list is rejected and no user/workspace is created", async () => {
+  const { service, store } = makeService(undefined, ["owner@example.com"]);
+  const result = await service.loginWithProvider(googleProfile);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "email_not_allowed");
+  // No user, identity, or workspace was created for the rejected attempt.
+  assert.equal(await store.getUserByEmail("ada@example.com"), undefined);
+  assert.equal(await store.getIdentity(googleProfile.provider, googleProfile.issuer, googleProfile.subject), undefined);
+});
+
+test("admin allow-list is case-insensitive and trims whitespace", async () => {
+  const { service } = makeService(undefined, [" Ada@Example.com "]);
+  const result = await service.loginWithProvider(googleProfile);
+  assert.equal(result.ok, true);
+});
+
+test("an empty admin allow-list does not restrict logins (legacy/no-op behavior)", async () => {
+  const { service } = makeService(undefined, []);
+  const result = await service.loginWithProvider(googleProfile);
+  assert.equal(result.ok, true);
 });
 
 test("logout revokes the session so it no longer resolves", async () => {

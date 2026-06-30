@@ -1,12 +1,34 @@
 # Professional Accounts — Phase 1
 
-Phase 1 adds Google + Microsoft sign-in, PostgreSQL-backed accounts, secure
-database sessions, organizations/workspaces, and workspace-scoped admin access —
-all **feature-flagged off by default**. With `AUTH_ENABLED=false` (the default),
+Phase 1 adds OIDC sign-in (Google, with Microsoft code present but disabled by
+default — see below), PostgreSQL-backed accounts, secure database sessions,
+organizations/workspaces, and workspace-scoped admin access — all
+**feature-flagged off by default**. With `AUTH_ENABLED=false` (the default),
 nothing changes: the legacy `ADMIN_PASSWORD` Basic-auth admin flow and every
 existing SQLite model/job/share flow behave exactly as before.
 
 This document is the runbook for turning accounts on later.
+
+## This phase is Google-only
+
+The intended production mode for this phase is **Google sign-in only**, gated
+by an admin email allow-list:
+
+- `AUTH_PROVIDERS=google` (the default) excludes Microsoft from `/login` and
+  from the `/auth/microsoft/*` routes, even if Microsoft credentials happen to
+  be configured. See [Re-enabling Microsoft](#re-enabling-microsoft-later)
+  below.
+- `AUTH_ALLOWED_EMAILS` is a **required**, comma-separated allow-list of
+  verified Google emails. The server refuses to start with
+  `AUTH_ENABLED=true` if it is empty — there is no way to accidentally enable
+  accounts with open self-serve signup. See
+  [Restricting admin access](#restricting-admin-access-to-approved-google-emails).
+- Basic auth (`ADMIN_PASSWORD`) is **only** the legacy disabled-mode
+  (`AUTH_ENABLED=false`) fallback. Once `AUTH_ENABLED=true`, `/admin` and every
+  other admin route require a session cookie minted via Google OIDC — a valid
+  `Authorization: Basic ...` header is no longer consulted at all. Basic-auth
+  code is kept (not deleted) so flipping `AUTH_ENABLED` back to `false` is an
+  instant rollback while accounts are still being rolled out.
 
 ---
 
@@ -69,7 +91,30 @@ This document is the runbook for turning accounts on later.
 
 ## Enabling accounts later (runbook)
 
-### 1. Register the OAuth apps
+### Google-only setup checklist
+
+1. **Google OAuth app** — register it (steps below) and get a client ID/secret.
+2. **Callback URL** — registered redirect URI must exactly match
+   `${APP_BASE_URL}/auth/google/callback`.
+3. `GOOGLE_CLIENT_ID` — from the Google OAuth app.
+4. `GOOGLE_CLIENT_SECRET` — from the Google OAuth app.
+5. `AUTH_ALLOWED_EMAILS` — comma-separated allow-list of approved admin Google
+   emails. Required; the server fails to start with `AUTH_ENABLED=true` if
+   this is empty.
+6. `AUTH_ENABLED=true` — only after the above are configured and smoke-tested.
+7. `SESSION_COOKIE_SECURE=true` — required in production (HTTPS).
+8. `DATABASE_URL` — PostgreSQL connection string for the auth/account layer.
+9. `SESSION_SECRET` — long random value, signs the OAuth transaction cookie.
+
+`AUTH_PROVIDERS` defaults to `google` — leave it unset/`google` for this phase.
+Microsoft env vars (`MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`,
+`MICROSOFT_TENANT`) are **optional/future** — not required for this phase; see
+[Re-enabling Microsoft](#re-enabling-microsoft-later) if you need them later.
+
+**Secrets must be placed directly in the EliteDesk `.env` file, never
+committed to git and never pasted into chat.**
+
+### 1. Register the OAuth app
 
 **Google** — <https://console.cloud.google.com/apis/credentials>
 1. Create an *OAuth client ID* → *Web application*.
@@ -78,23 +123,17 @@ This document is the runbook for turning accounts on later.
    - Local: `http://localhost:3009/auth/google/callback`
 3. Copy the client ID/secret → `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 
-**Microsoft** — <https://entra.microsoft.com> → *App registrations* → *New registration*
-1. Supported account types: *Accounts in any org directory and personal accounts*
-   (this maps to `MICROSOFT_TENANT=common`).
-2. Redirect URI (type *Web*):
-   - Production: `https://modelbase.parametricstandards.com/auth/microsoft/callback`
-   - Local: `http://localhost:3009/auth/microsoft/callback`
-3. Create a *client secret* → `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`.
-
 > Redirect URIs are derived from `APP_BASE_URL` as `${APP_BASE_URL}/auth/<provider>/callback`.
 > Whatever you register MUST match `APP_BASE_URL`.
 
 ### 2. Configure secrets on EliteDesk
 
-Add to `/home/claudio/projects/3d-model-web-viewer/.env` (never commit it):
+Add to `/home/claudio/projects/3d-model-web-viewer/.env` (never commit it,
+never paste real values into chat):
 
 ```
 AUTH_ENABLED=true
+AUTH_PROVIDERS=google
 APP_BASE_URL=https://modelbase.parametricstandards.com
 DATABASE_URL=postgres://modelbase:<STRONG_PW>@postgres:5432/modelbase
 POSTGRES_DB=modelbase
@@ -102,11 +141,10 @@ POSTGRES_USER=modelbase
 POSTGRES_PASSWORD=<STRONG_PW>
 SESSION_COOKIE_NAME=modelbase_session
 SESSION_SECRET=<LONG_RANDOM>
+SESSION_COOKIE_SECURE=true
+AUTH_ALLOWED_EMAILS=claudio@example.com
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-MICROSOFT_CLIENT_ID=...
-MICROSOFT_CLIENT_SECRET=...
-MICROSOFT_TENANT=common
 ```
 
 ### 3. Bring up PostgreSQL (private to the Docker network)
@@ -143,17 +181,61 @@ The script is repeatable and fails loudly if any model remains unassigned.
 
 ---
 
+## Restricting admin access to approved Google emails
+
+`AUTH_ALLOWED_EMAILS` is a comma-separated allow-list of verified Google
+emails, e.g. `AUTH_ALLOWED_EMAILS=claudio@example.com,another@example.com`.
+Enforced in `apps/server/src/auth/service.ts` (`AuthService.loginWithProvider`):
+
+- Required whenever `AUTH_ENABLED=true` — `apps/server/src/auth/index.ts`
+  throws at startup if the list is empty (fail closed: no unapproved Google
+  account can self-provision the first admin workspace).
+- Checked on **every** login attempt, not just first-time signup, so removing
+  an email from the list revokes access immediately — including for a
+  previously-approved returning user.
+- Emails are normalized to lowercase and trimmed before comparison.
+- An unapproved email is rejected with a clear `/login?error=email_not_allowed`
+  message; **no user, identity, or workspace row is created** for the
+  rejected attempt.
+- Identity is still keyed on `(provider, issuer, subject)`, never on email
+  alone, once an account exists — the allow-list is an additional gate at
+  sign-in, not a replacement for identity matching.
+
+## Re-enabling Microsoft later
+
+Microsoft's OIDC code (`apps/server/src/auth/oidc.ts`, the
+`/auth/microsoft/start` and `/auth/microsoft/callback` routes, and the
+`auth_identities.provider` schema) is kept in the codebase for future reuse —
+it is simply excluded by the default provider allow-list. To turn it back on:
+
+1. Set `AUTH_PROVIDERS=google,microsoft` (or just `microsoft` to disable
+   Google instead).
+2. Register the Microsoft OAuth app (Entra) and configure
+   `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT` — see
+   the Microsoft registration steps that shipped with the original Phase 1
+   work (App registrations → redirect URI
+   `${APP_BASE_URL}/auth/microsoft/callback`, tenant `common` for both
+   personal and work/school accounts).
+3. The `/login` page will then show both "Continue with Google" and "Continue
+   with Microsoft" automatically (`apps/server/src/auth/routes.ts` derives the
+   buttons from `config.providers`, which is itself derived from
+   `AUTH_PROVIDERS` + whichever credentials are set).
+
+No code changes are required to re-enable Microsoft — only configuration.
+
+---
+
 ## Local development without real OAuth
 
 You can exercise the session/guard machinery without Postgres or a provider:
 
 ```
-AUTH_ENABLED=true AUTH_STORE=memory SESSION_SECRET=dev npm run dev
+AUTH_ENABLED=true AUTH_STORE=memory SESSION_SECRET=dev AUTH_ALLOWED_EMAILS=you@example.com npm run dev
 ```
 
-`/login` renders (no provider buttons unless client creds are set), `/admin` and
-`/api/*` require a session, and `/api/me` reports the current session. This is the
-mode the automated HTTP test uses.
+`/login` renders (Google button only, by default; no provider buttons unless
+client creds are set), `/admin` and `/api/*` require a session, and `/api/me`
+reports the current session. This is the mode the automated HTTP tests use.
 
 ---
 
@@ -194,7 +276,9 @@ deferred to a later phase.
 server fails to start unless `SESSION_COOKIE_SECURE=true` (a deliberate
 `ALLOW_INSECURE_SESSION=true` override exists for non-HTTPS local/staging only),
 and `AUTH_STORE=memory` is rejected outright. Secure-cookie config is now
-explicit and no longer relies solely on `NODE_ENV`.
+explicit and no longer relies solely on `NODE_ENV`. The server also fails to
+start whenever `AUTH_ENABLED=true` with an empty `AUTH_ALLOWED_EMAILS` — see
+[Restricting admin access](#restricting-admin-access-to-approved-google-emails).
 
 **OIDC.** Google logins now require a positively-verified email
 (`requireVerifiedEmail`); Microsoft stays lenient because some account types omit

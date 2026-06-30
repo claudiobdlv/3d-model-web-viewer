@@ -29,6 +29,7 @@ test("accounts-enabled admin protection, scoping, and logout", async (t) => {
   process.env.AUTH_STORE = "memory";
   process.env.SESSION_SECRET = "test-session-secret";
   process.env.APP_BASE_URL = "http://127.0.0.1";
+  process.env.AUTH_ALLOWED_EMAILS = "owner@example.com,other@example.com";
   // No ADMIN_PASSWORD needed: the session guard governs when accounts are on.
 
   const { app, authSubsystem } = await import("./../server.js");
@@ -49,6 +50,7 @@ test("accounts-enabled admin protection, scoping, and logout", async (t) => {
     delete process.env.AUTH_ENABLED;
     delete process.env.AUTH_STORE;
     delete process.env.SESSION_SECRET;
+    delete process.env.AUTH_ALLOWED_EMAILS;
   });
 
   // --- Unauthenticated access is blocked ---
