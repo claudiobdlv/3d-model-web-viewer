@@ -344,6 +344,31 @@ export class PgAuthStore implements AuthStore {
     };
   }
 
+  async listAuditEventsForOrganization(organizationId: string, limit: number): Promise<AuditEvent[]> {
+    const { rows } = await this.db.query(
+      `SELECT * FROM audit_events WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [organizationId, limit]
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      event_type: row.event_type,
+      user_id: row.user_id,
+      organization_id: row.organization_id,
+      metadata: row.metadata,
+      created_at: toIso(row.created_at)
+    }));
+  }
+
+  async listActiveSessionsForUser(userId: string): Promise<Session[]> {
+    const { rows } = await this.db.query(
+      `SELECT * FROM sessions
+       WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()
+       ORDER BY COALESCE(last_used_at, created_at) DESC`,
+      [userId]
+    );
+    return rows.map(mapSession);
+  }
+
   // Used by tests / transactional callers if needed.
   async withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();

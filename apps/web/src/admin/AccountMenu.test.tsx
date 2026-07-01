@@ -7,7 +7,8 @@ const authed: MeResponse = {
   authenticated: true,
   user: { id: "u1", email: "ada@example.com", displayName: "Ada Lovelace", avatarUrl: null },
   organization: { id: "o1", name: "Personal Workspace", slug: "ada" },
-  role: "owner"
+  role: "owner",
+  provider: "google"
 };
 
 afterEach(() => {
@@ -56,5 +57,16 @@ describe("AccountMenuSlot", () => {
     render(<AccountMenuSlot me={authed} />);
     expect(setItem).not.toHaveBeenCalled();
     expect(getItem).not.toHaveBeenCalled();
+  });
+
+  it("opens the account settings modal from the account menu", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ sessions: [] }) }) as any);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AccountMenuSlot me={authed} />);
+    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /account settings/i }));
+
+    expect(await screen.findByRole("dialog", { name: /account settings/i })).toBeInTheDocument();
   });
 });

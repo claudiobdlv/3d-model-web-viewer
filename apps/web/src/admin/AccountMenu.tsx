@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { LogOut } from "lucide-react";
+import { LogOut, Settings } from "lucide-react";
 import { postLogout } from "../api";
 import type { MeResponse } from "../api";
+import { AccountSettingsModal } from "./AccountSettingsModal";
 
 // Renders the account menu only when there is an authenticated session. The
 // session is identified purely by the server-side httpOnly cookie via
@@ -15,6 +16,7 @@ export function AccountMenuSlot({ me }: { me: MeResponse | null }) {
 
 export function AccountMenu({ me }: { me: Extract<MeResponse, { authenticated: true }> }) {
   const [open, setOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ top: 0, left: 0 });
@@ -70,6 +72,7 @@ export function AccountMenu({ me }: { me: Extract<MeResponse, { authenticated: t
         {me.user.displayName && <span>{me.user.email}</span>}
         {me.organization && <span className="account-popover-org">{me.organization.name}</span>}
       </div>
+      <button onClick={() => { setOpen(false); setSettingsOpen(true); }}><Settings size={15}/>Account settings</button>
       <button onClick={handleSignOut} disabled={busy}><LogOut size={15}/>{busy ? "Signing out…" : "Sign out"}</button>
     </div>,
     document.body
@@ -79,6 +82,7 @@ export function AccountMenu({ me }: { me: Extract<MeResponse, { authenticated: t
     <div className="account-menu">
       <button ref={buttonRef} className="account-avatar" onClick={() => setOpen(!open)} aria-expanded={open} aria-label="Account menu" title={label}>{initials}</button>
       {menu}
+      {settingsOpen && <AccountSettingsModal me={me} onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

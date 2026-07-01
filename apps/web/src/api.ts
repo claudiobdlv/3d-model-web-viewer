@@ -443,6 +443,7 @@ export type MeResponse =
       user: { id: string; email: string; displayName: string | null; avatarUrl: string | null };
       organization: { id: string; name: string; slug: string } | null;
       role: string | null;
+      provider: string | null;
     };
 
 export async function getMe(): Promise<MeResponse> {
@@ -462,4 +463,37 @@ export async function getMe(): Promise<MeResponse> {
 export async function postLogout(): Promise<void> {
   await fetch("/auth/logout", { method: "POST", redirect: "manual" });
   window.location.href = "/login";
+}
+
+export interface SessionSummary {
+  id: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  current: boolean;
+  userAgent: string | null;
+}
+
+// Returns the caller's own signed-in sessions. Never includes a token hash or
+// IP address — see apps/server/src/auth/routes.ts GET /api/sessions.
+export async function getSessions(): Promise<SessionSummary[]> {
+  const res = await request<{ sessions: SessionSummary[] }>("/api/sessions", { cache: "no-store" });
+  return res.sessions;
+}
+
+export async function revokeSession(sessionId: string): Promise<void> {
+  await request<{ ok: true }>(`/api/sessions/${encodeURIComponent(sessionId)}/revoke`, { method: "POST" });
+}
+
+export interface AuditEventSummary {
+  id: string;
+  type: string;
+  createdAt: string;
+  metadata: Record<string, unknown> | null;
+}
+
+// Admin-only, workspace-scoped security/audit log. Callers should treat a 403
+// (insufficient role) as "hide this section" rather than an error.
+export async function getAuditEvents(): Promise<AuditEventSummary[]> {
+  const res = await request<{ events: AuditEventSummary[] }>("/api/audit-events", { cache: "no-store" });
+  return res.events;
 }

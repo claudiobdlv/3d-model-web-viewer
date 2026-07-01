@@ -221,6 +221,20 @@ export class MemoryAuthStore implements AuthStore {
     return event;
   }
 
+  async listAuditEventsForOrganization(organizationId: string, limit: number): Promise<AuditEvent[]> {
+    return this.audit
+      .filter((event) => event.organization_id === organizationId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, limit);
+  }
+
+  async listActiveSessionsForUser(userId: string): Promise<Session[]> {
+    const now = Date.now();
+    return [...this.sessions.values()]
+      .filter((session) => session.user_id === userId && !session.revoked_at && new Date(session.expires_at).getTime() > now)
+      .sort((a, b) => (b.last_used_at ?? b.created_at).localeCompare(a.last_used_at ?? a.created_at));
+  }
+
   // Serializes transactions so only one snapshot/restore window is open at a
   // time. A real database serializes via row locks; without this, two
   // concurrent transactions' whole-map snapshots could clobber each other's
