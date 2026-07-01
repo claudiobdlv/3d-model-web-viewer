@@ -40,7 +40,9 @@ import {
   getRevisionUploadDir,
   getRevisionVersionModelDir,
   getRevisionVersionUploadDir,
-  toStorageRelativePath
+  toStorageRelativePath,
+  resolveDisplayGlbPath,
+  getRevisionLogDir
 } from "../storage.js";
 import { parseConversionQuality, type ConversionQuality } from "../quality.js";
 import { parseMeshiqAdaptiveSmoothing, type MeshiqAdaptiveSmoothing } from "../meshiq.js";
@@ -97,7 +99,14 @@ modelsRouter.get("/", (req, res) => {
     if (req.auth?.organization) options.organizationId = req.auth.organization.id;
     const list = listModels(options);
     const listWithSummary = list.map((model) => {
-      const summary = getLargeStepChunkingSummary(model.slug, false);
+      const currentRevision = model.current_revision_id
+        ? getRevisionForModel(model.id, model.current_revision_id)
+        : undefined;
+      const summary = getLargeStepChunkingSummary(model.slug, {
+        artifactDir: currentRevision
+          ? path.dirname(resolveDisplayGlbPath(model, currentRevision))
+          : getModelDir(model.slug)
+      });
       return summary ? { ...model, largeStepChunkingSummary: summary } : model;
     });
     res.json(listWithSummary);
@@ -222,7 +231,13 @@ modelsRouter.get("/:slug", (req, res) => {
     invalidRevisionRequested
   };
 
-  const summary = getLargeStepChunkingSummary(slug, true);
+  const summary = getLargeStepChunkingSummary(slug, {
+    readLog: true,
+    artifactDir: activeRevision
+      ? path.dirname(resolveDisplayGlbPath(model, activeRevision))
+      : getModelDir(slug),
+    logDir: activeRevision ? getRevisionLogDir(slug, activeRevision.id) : getLogDir(slug)
+  });
   res.json(summary ? { ...modelWithRevisions, largeStepChunkingSummary: summary } : modelWithRevisions);
 });
 

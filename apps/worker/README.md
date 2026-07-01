@@ -15,6 +15,7 @@ This worker polls the server-side processing contract and converts uploaded STEP
 - `CONVERTER_CLI`: JavaScript `occt-import-js` converter path for `occt-js`.
 - `XCAF_CONVERTER_BIN`: native OpenCascade/XCAF converter binary for `xcaf-baseline`.
 - `CONVERTER_QUALITY`: `fast`, `balanced`, `high`, or `detailed`. `xcaf-baseline` maps `fast` to native `preview` and `detailed` to native `high`.
+- `GLB_OPTIMIZATION_MODE`: `meshopt` (default) or `disabled`. Meshopt output is published only when it is smaller, glTF-valid, declares `EXT_meshopt_compression` as required, and preserves names, selection IDs, hierarchy, transforms, materials, extras, triangle counts, and bounds. Any optimization or validation failure publishes the raw GLB and records the fallback reason in `stats.json`, `manifest.json`, and `conversion.log`.
 
 When `CONVERTER_BACKEND=xcaf-baseline`, material rules are not applied. The worker calls the native converter with `--colour-mode xcaf-baseline --colour-space raw`, uploads `display.glb`, `stats.json`, `material-debug.json`, `conversion.log`, and `xcaf-report.json`, and logs `Converter backend: xcaf-baseline` for verification.
 

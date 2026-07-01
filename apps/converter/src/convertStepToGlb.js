@@ -645,6 +645,8 @@ async function convertStepToGlb(inputPath, outputPath, quality, statsRecorder, l
   let triangleCount = 0;
   let totalNodeCount = 0;
   const materialStats = {
+    colourMode: `step-colours-with-material-rules-${materialRules.mode}`,
+    materialRulesMode: materialRules.mode,
     totalMeshes: result.meshes.length,
     referencedMeshes: referencedMeshIndices.size,
     meshesWithExplicitColor: 0,

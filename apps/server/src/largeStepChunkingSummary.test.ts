@@ -105,6 +105,59 @@ test("largeStepChunkingSummary helper normalization and log parsing", async (t) 
     assert.equal(summary.chunks[1].triangles, 2000);
   });
 
+  await t.test("exposes trustworthy Meshopt details from a revision artifact directory", () => {
+    const revisionDir = path.join(modelDir, "revisions", "7");
+    fs.mkdirSync(revisionDir, { recursive: true });
+    fs.writeFileSync(path.join(revisionDir, "manifest.json"), JSON.stringify({
+      converterBackend: "xcaf-baseline",
+      quality: "medium",
+      optimization: {
+        optimizationRequested: true,
+        optimizationEnabled: true,
+        requestedMode: "meshopt",
+        status: "applied",
+        optimizer: "@gltf-transform direct APIs + meshoptimizer",
+        rawSizeBytes: 1000,
+        candidateSizeBytes: 400,
+        displaySizeBytes: 400,
+        bytesSaved: 600,
+        reductionPercent: 60,
+        compressionRatio: 2.5,
+        validation: { passed: true, message: "passed semantic gates" },
+        fallbackUsed: false,
+        fallbackReason: null,
+        finalUsesMeshoptCompression: true,
+        compression: { compressedBufferViews: 3 }
+      }
+    }));
+    fs.writeFileSync(path.join(revisionDir, "stats.json"), JSON.stringify({
+      sourceFileSizeBytes: 2500,
+      converterBackend: "xcaf-baseline",
+      qualityPreset: "medium",
+      colourMode: "xcaf-baseline",
+      triangleCount: 1234,
+      meshReuse: { reusedInstances: 9 }
+    }));
+
+    const summary = getLargeStepChunkingSummary(slug, { artifactDir: revisionDir });
+    assert.ok(summary);
+    assert.equal(summary.optimizationLabel, "Meshopt applied");
+    assert.equal(summary.optimizationDetailLabel, "60% smaller");
+    assert.equal(summary.sourceBytes, 2500);
+    assert.equal(summary.rawGlbBytes, 1000);
+    assert.equal(summary.finalGlbBytes, 400);
+    assert.equal(summary.bytesSaved, 600);
+    assert.equal(summary.compressionRatio, 2.5);
+    assert.equal(summary.validationPassed, true);
+    assert.equal(summary.finalUsesMeshoptCompression, true);
+    assert.equal(summary.compressedBufferViews, 3);
+    assert.equal(summary.backend, "xcaf-baseline");
+    assert.equal(summary.qualityPreset, "medium");
+    assert.equal(summary.colourMode, "xcaf-baseline");
+    assert.equal(summary.triangleCount, 1234);
+    assert.deepEqual(summary.meshReuse, { reusedInstances: 9 });
+  });
+
   await t.test("extracts and normalizes failed chunking/fallback metadata", () => {
     const stats = {
       largeStepChunking: {

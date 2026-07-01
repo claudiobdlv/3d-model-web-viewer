@@ -9,6 +9,7 @@
     "test": "tsx --test src/*.test.ts",
     "dev": "tsx src/worker.ts",
     "start": "tsx src/worker.ts",
+    "step:meshopt": "tsx scripts/convert-step-fixture.ts",
     "dxf:convert": "tsx scripts/convert-dxf-fixture.ts",
     "dxf:compat": "tsx scripts/check-dxf-private-samples.ts",
     "dxf:benchmark": "tsx scripts/benchmark-dxf.ts"

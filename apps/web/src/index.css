@@ -265,6 +265,8 @@ a {
 
 .details-val {
   font-weight: 500;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .details-full-width {

@@ -316,6 +316,7 @@ export type ConvertDxfInput = {
   outputDir: string;
   slug: string;
   glbOptimizationMode?: "disabled" | "meshopt";
+  quality?: "low" | "medium" | "high";
   signal?: AbortSignal;
   onProgress?: (percent: number, label: string) => void | Promise<void>;
 };

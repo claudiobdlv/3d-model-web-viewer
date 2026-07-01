@@ -33,6 +33,56 @@ function adaptiveMeshArgsForJob(value: MeshiqAdaptiveSmoothing | undefined | nul
   };
 }
 
+function buildOptimizationReport(
+  result: any,
+  stats: Record<string, any>,
+  input: Pick<ConverterProcessorInput, "converterBackend" | "quality" | "xcafColourMode">
+): Record<string, unknown> {
+  const rawSizeBytes = Number(result.rawSizeBytes ?? 0);
+  const displaySizeBytes = Number(result.displaySizeBytes ?? rawSizeBytes);
+  const bytesSaved = Number(result.bytesSaved ?? Math.max(0, rawSizeBytes - displaySizeBytes));
+  const reductionPercent = Number(result.reductionPercent ?? (
+    rawSizeBytes > 0 ? ((bytesSaved / rawSizeBytes) * 100).toFixed(2) : 0
+  ));
+  const requested = result.requestedMode === "meshopt";
+  const fallbackReason = result.fallbackReason ?? (result.fallbackUsed ? result.message : null);
+  return {
+    optimizationRequested: requested,
+    optimizationEnabled: requested,
+    requestedMode: result.requestedMode,
+    status: result.status,
+    optimizer: result.tool,
+    optimizerVersion: result.toolVersion,
+    rawSizeBytes,
+    candidateSizeBytes: result.candidateSizeBytes ?? null,
+    displaySizeBytes,
+    bytesSaved,
+    reductionPercent,
+    compressionRatio: Number(result.compressionRatio ?? (displaySizeBytes > 0 ? (rawSizeBytes / displaySizeBytes).toFixed(3) : 0)),
+    validation: result.validation,
+    fallbackUsed: Boolean(result.fallbackUsed),
+    fallbackReason,
+    finalUsesMeshoptCompression: result.compression?.used === true,
+    compression: result.compression ?? {
+      extension: "EXT_meshopt_compression",
+      used: false,
+      required: false,
+      compressedBufferViews: 0,
+      extensionsUsed: [],
+      extensionsRequired: []
+    },
+    requiresMeshoptDecoder: Boolean(result.requiresMeshoptDecoder),
+    hashes: result.hashes ?? null,
+    quantization: result.quantization,
+    backend: stats.converterBackend ?? input.converterBackend,
+    qualityPreset: stats.qualityPreset ?? stats.semanticQuality ?? input.quality,
+    colourMode: stats.colourMode ?? stats.materialStats?.colourMode ?? (input.converterBackend === "xcaf-baseline" ? input.xcafColourMode : null),
+    triangleCount: Number.isFinite(Number(stats.triangleCount)) ? Number(stats.triangleCount) : null,
+    meshReuse: stats.meshReuse ?? null,
+    message: result.message
+  };
+}
+
 export type ConverterProcessorInput = {
   slug: string;
   sourcePath: string;
@@ -103,6 +153,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
       outputDir: input.outputDir,
       slug: input.slug,
       glbOptimizationMode: input.glbOptimizationMode,
+      quality: input.quality,
       signal: input.signal,
       onProgress: input.onProgress,
     });
@@ -874,28 +925,13 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
           };
         }
 
-        const reductionPercent = optimizationResult.rawSizeBytes > 0
-          ? Number(((1 - optimizationResult.displaySizeBytes / optimizationResult.rawSizeBytes) * 100).toFixed(2))
-          : 0;
         throwIfAborted(input.signal);
         await input.onProgress?.(95, "Validating final artifact");
 
         const statsContent = await fs.promises.readFile(statsPath, "utf8");
         const statsObj = JSON.parse(statsContent);
         statsObj.outputGlbSizeBytes = optimizationResult.displaySizeBytes;
-        statsObj.optimization = {
-          requestedMode: optimizationResult.requestedMode,
-          status: optimizationResult.status,
-          rawSizeBytes: optimizationResult.rawSizeBytes,
-          displaySizeBytes: optimizationResult.displaySizeBytes,
-          reductionPercent,
-          tool: optimizationResult.tool,
-          toolVersion: optimizationResult.toolVersion,
-          quantization: optimizationResult.quantization,
-          validation: optimizationResult.validation,
-          fallbackUsed: optimizationResult.fallbackUsed,
-          message: optimizationResult.message
-        };
+        statsObj.optimization = buildOptimizationReport(optimizationResult, statsObj, input);
         chunkingStats.totalWallClockSeconds = Number(((Date.now() - jobStartTime) / 1000).toFixed(2));
         statsObj.largeStepChunking = chunkingStats;
         statsObj.meshiqAdaptiveSmoothing = effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing);
@@ -1084,9 +1120,6 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
     };
   }
 
-  const reductionPercent = optimizationResult.rawSizeBytes > 0
-    ? Number(((1 - optimizationResult.displaySizeBytes / optimizationResult.rawSizeBytes) * 100).toFixed(2))
-    : 0;
   throwIfAborted(input.signal);
   await input.onProgress?.(95, "Validating final artifact");
 
@@ -1094,19 +1127,7 @@ export async function convertStepJob(input: ConverterProcessorInput): Promise<Co
   const statsContent = await fs.promises.readFile(statsPath, "utf8");
   const statsObj = JSON.parse(statsContent);
   statsObj.outputGlbSizeBytes = optimizationResult.displaySizeBytes;
-  statsObj.optimization = {
-    requestedMode: optimizationResult.requestedMode,
-    status: optimizationResult.status,
-    rawSizeBytes: optimizationResult.rawSizeBytes,
-    displaySizeBytes: optimizationResult.displaySizeBytes,
-    reductionPercent,
-    tool: optimizationResult.tool,
-    toolVersion: optimizationResult.toolVersion,
-    quantization: optimizationResult.quantization,
-    validation: optimizationResult.validation,
-    fallbackUsed: optimizationResult.fallbackUsed,
-    message: optimizationResult.message
-  };
+  statsObj.optimization = buildOptimizationReport(optimizationResult, statsObj, input);
   chunkingStats.totalWallClockSeconds = Number(((Date.now() - jobStartTime) / 1000).toFixed(2));
   statsObj.largeStepChunking = chunkingStats;
   statsObj.meshiqAdaptiveSmoothing = effectiveMeshiqAdaptiveSmoothing(input.meshiqAdaptiveSmoothing);

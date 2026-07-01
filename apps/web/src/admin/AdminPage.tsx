@@ -14,7 +14,7 @@ import {
 } from "../api";
 import type { MeResponse } from "../api";
 import { downloadPublicShareQr } from "../qr";
-import type { BatchAction, ConversionQuality, MeshiqAdaptiveSmoothing, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, PublicShareLinkMode, StorageQuota, UploadTask } from "../types";
+import type { BatchAction, ConversionQuality, LargeStepChunkingSummary, MeshiqAdaptiveSmoothing, ModelListParams, ModelRecord, ModelRevisionRecord, ProjectRecord, PublicShareLinkMode, StorageQuota, UploadTask } from "../types";
 import { activeStatuses, formatDate, formatFileSize, statusKind, statusLabel } from "../utils";
 import { ResizableHeaderCell } from "./ResizableHeaderCell";
 import { AccountMenuSlot } from "./AccountMenu";
@@ -302,7 +302,13 @@ function formatReduction(reductionPercent?: number): string {
   return `${reductionPercent}%`;
 }
 
-function ModelDetailsPanel({ summary }: { summary?: any }) {
+function formatOptimizer(optimizer: string): string {
+  return optimizer === "@gltf-transform direct APIs + meshoptimizer"
+    ? "glTF-Transform + Meshoptimizer"
+    : optimizer;
+}
+
+function ModelDetailsPanel({ summary }: { summary?: LargeStepChunkingSummary }) {
   if (!summary) {
     return <div className="model-details-empty">No conversion details available.</div>;
   }
@@ -317,20 +323,40 @@ function ModelDetailsPanel({ summary }: { summary?: any }) {
     maxActiveChunks,
     plannerDurationSeconds,
     totalWallClockSeconds,
+    sourceBytes,
     rawGlbBytes,
+    candidateGlbBytes,
     finalGlbBytes,
+    bytesSaved,
     meshoptReductionPercent,
+    compressionRatio,
+    meshoptStatus,
+    optimizer,
+    validationPassed,
+    validationMessage,
+    finalUsesMeshoptCompression,
+    compressedBufferViews,
+    backend,
+    qualityPreset,
+    colourMode,
+    triangleCount,
+    meshReuse,
     peakMemoryFraction,
     swapGrowthBytes,
     chunks,
     fallbackReason,
     processingProgress
   } = summary;
+  const hasChunkingData = mode !== undefined || status !== undefined || skipReason !== undefined || targetChunks !== undefined || actualChunks !== undefined;
+  const hasExecutionData = totalWallClockSeconds !== undefined || plannerDurationSeconds !== undefined || targetChunks !== undefined || actualChunks !== undefined || maxActiveChunks !== undefined;
+  const hasResourceData = peakMemoryFraction !== undefined || swapGrowthBytes !== undefined;
+  const reuseCount = typeof meshReuse?.reusedInstances === "number" ? meshReuse.reusedInstances : undefined;
+  const uniqueStoredTriangles = typeof meshReuse?.uniqueStoredTriangles === "number" ? meshReuse.uniqueStoredTriangles : undefined;
 
   return (
     <div className="model-details-panel" onClick={(e) => e.stopPropagation()}>
       <div className="details-grid">
-        <div className="details-section">
+        {hasChunkingData && <div className="details-section">
           <h4>Chunking Configuration</h4>
           <div className="details-row-item">
             <span className="details-label">Mode:</span>
@@ -346,21 +372,15 @@ function ModelDetailsPanel({ summary }: { summary?: any }) {
               <span className="details-val">{skipReason}</span>
             </div>
           )}
-          {fallbackReason && (
-            <div className="details-row-item">
-              <span className="details-label">Failure/Fallback:</span>
-              <span className="details-val danger-text">{fallbackReason}</span>
-            </div>
-          )}
           {processingProgress && (
             <div className="details-row-item">
               <span className="details-label">Progress:</span>
               <span className="details-val highlight-text">{processingProgress}</span>
             </div>
           )}
-        </div>
+        </div>}
 
-        <div className="details-section">
+        {hasExecutionData && <div className="details-section">
           <h4>Execution & Timing</h4>
           <div className="details-row-item">
             <span className="details-label">Total Time:</span>
@@ -390,10 +410,23 @@ function ModelDetailsPanel({ summary }: { summary?: any }) {
               <span className="details-val">{maxActiveChunks}</span>
             </div>
           )}
+        </div>}
+
+        <div className="details-section">
+          <h4>Conversion</h4>
+          {sourceBytes !== undefined && <div className="details-row-item"><span className="details-label">Source Size:</span><span className="details-val">{formatMB(sourceBytes)}</span></div>}
+          {backend && <div className="details-row-item"><span className="details-label">Backend:</span><span className="details-val">{backend}</span></div>}
+          {qualityPreset && <div className="details-row-item"><span className="details-label">Quality:</span><span className="details-val">{qualityPreset}</span></div>}
+          {colourMode && <div className="details-row-item"><span className="details-label">Colour Mode:</span><span className="details-val">{colourMode}</span></div>}
+          {triangleCount !== undefined && <div className="details-row-item"><span className="details-label">Triangles:</span><span className="details-val">{triangleCount.toLocaleString()}</span></div>}
+          {reuseCount !== undefined && <div className="details-row-item"><span className="details-label">Reused Instances:</span><span className="details-val">{reuseCount.toLocaleString()}</span></div>}
+          {uniqueStoredTriangles !== undefined && <div className="details-row-item"><span className="details-label">Unique Stored Triangles:</span><span className="details-val">{uniqueStoredTriangles.toLocaleString()}</span></div>}
         </div>
 
         <div className="details-section">
           <h4>Optimization & Size</h4>
+          {meshoptStatus && <div className="details-row-item"><span className="details-label">Meshopt Status:</span><span className="details-val">{meshoptStatus}</span></div>}
+          {optimizer && <div className="details-row-item"><span className="details-label">Optimizer:</span><span className="details-val" title={optimizer}>{formatOptimizer(optimizer)}</span></div>}
           {rawGlbBytes !== undefined && (
             <div className="details-row-item">
               <span className="details-label">Raw GLB Size:</span>
@@ -406,15 +439,36 @@ function ModelDetailsPanel({ summary }: { summary?: any }) {
               <span className="details-val">{formatMB(finalGlbBytes)}</span>
             </div>
           )}
+          {candidateGlbBytes !== undefined && candidateGlbBytes !== null && candidateGlbBytes !== finalGlbBytes && (
+            <div className="details-row-item"><span className="details-label">Candidate Size:</span><span className="details-val">{formatMB(candidateGlbBytes)}</span></div>
+          )}
+          {bytesSaved !== undefined && (
+            <div className="details-row-item"><span className="details-label">Bytes Saved:</span><span className="details-val">{formatFileSize(bytesSaved)}</span></div>
+          )}
           {meshoptReductionPercent !== undefined && meshoptReductionPercent !== null && (
             <div className="details-row-item">
               <span className="details-label">Meshopt Reduction:</span>
               <span className="details-val">{formatReduction(meshoptReductionPercent)}</span>
             </div>
           )}
+          {compressionRatio !== undefined && (
+            <div className="details-row-item"><span className="details-label">Compression Ratio:</span><span className="details-val">{compressionRatio.toFixed(2)}:1</span></div>
+          )}
+          {finalUsesMeshoptCompression !== undefined && (
+            <div className="details-row-item"><span className="details-label">EXT_meshopt_compression:</span><span className="details-val">{finalUsesMeshoptCompression ? "Present" : "Not present (raw GLB)"}</span></div>
+          )}
+          {compressedBufferViews !== undefined && compressedBufferViews > 0 && (
+            <div className="details-row-item"><span className="details-label">Compressed Buffer Views:</span><span className="details-val">{compressedBufferViews}</span></div>
+          )}
+          {validationPassed !== undefined && (
+            <div className="details-row-item"><span className="details-label">Validation:</span><span className="details-val" title={validationMessage}>{validationPassed ? "Passed" : "Failed / not run"}</span></div>
+          )}
+          {fallbackReason && (
+            <div className="details-row-item"><span className="details-label">Meshopt Fallback:</span><span className="details-val danger-text">{fallbackReason}</span></div>
+          )}
         </div>
 
-        <div className="details-section">
+        {hasResourceData && <div className="details-section">
           <h4>Resources & Memory</h4>
           {peakMemoryFraction !== undefined && (
             <div className="details-row-item">
@@ -428,7 +482,7 @@ function ModelDetailsPanel({ summary }: { summary?: any }) {
               <span className="details-val">{formatSwap(swapGrowthBytes)}</span>
             </div>
           )}
-        </div>
+        </div>}
       </div>
 
       {decisionReasons && decisionReasons.length > 0 && (
@@ -492,6 +546,8 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
       const isUpload=model.status.startsWith("upload:");
       const hasSummary = !!model.largeStepChunkingSummary;
       const isExpanded = expandedSlugs.has(model.slug);
+      const summaryLabel = model.largeStepChunkingSummary?.optimizationLabel ?? model.largeStepChunkingSummary?.label;
+      const summaryDetail = model.largeStepChunkingSummary?.optimizationDetailLabel ?? model.largeStepChunkingSummary?.detailLabel;
       const open=()=>{if(!isUpload)window.location.href=viewerPath(model.slug,returnTo)};
       return <React.Fragment key={model.slug}>
         <tr className={`${selected.has(model.slug)?"selected ":""}${trash||isUpload?"":"clickable-row"}`} tabIndex={trash||isUpload?undefined:0} role={trash||isUpload?undefined:"link"} onClick={event=>{if(!trash&&!isUpload&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}} onKeyDown={event=>{if(!trash&&!isUpload&&event.key==="Enter"&&!(event.target as Element).closest("a,button,input,select,textarea"))open()}}>
@@ -515,10 +571,10 @@ function AssetTable({models,uploadTasks,loading,trash,selected,sortBy,sortDir,re
           <td>
             <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
               <Status status={model.status}/>
-              {model.largeStepChunkingSummary?.label && (
+              {summaryLabel && (
                 <span className="chunking-badge-text">
-                  {model.largeStepChunkingSummary.label}
-                  {model.largeStepChunkingSummary.detailLabel ? ` — ${model.largeStepChunkingSummary.detailLabel}` : ""}
+                  {summaryLabel}
+                  {summaryDetail ? ` — ${summaryDetail}` : ""}
                 </span>
               )}
             </div>

@@ -7,15 +7,36 @@ export interface LargeStepChunkingSummary {
   status?: string;
   label?: string;
   detailLabel?: string;
+  optimizationLabel?: string;
+  optimizationDetailLabel?: string;
   skipReason?: string;
   targetChunks?: number;
   actualChunks?: number;
   maxActiveChunks?: number;
   plannerDurationSeconds?: number;
   totalWallClockSeconds?: number;
+  sourceBytes?: number;
   rawGlbBytes?: number;
+  candidateGlbBytes?: number | null;
   finalGlbBytes?: number;
+  bytesSaved?: number;
   meshoptReductionPercent?: number;
+  compressionRatio?: number;
+  optimizationRequested?: boolean;
+  optimizationEnabled?: boolean;
+  meshoptStatus?: string;
+  optimizer?: string;
+  validationPassed?: boolean;
+  validationMessage?: string;
+  fallbackReason?: string;
+  finalUsesMeshoptCompression?: boolean;
+  compressedBufferViews?: number;
+  backend?: string;
+  qualityPreset?: string;
+  colourMode?: string;
+  triangleCount?: number;
+  meshReuse?: Record<string, unknown>;
+  processingProgress?: string;
   peakMemoryFraction?: number;
   swapGrowthBytes?: number;
   decisionReasons?: string[];
@@ -26,6 +47,12 @@ export interface LargeStepChunkingSummary {
     glbBytes?: number;
   }>;
 }
+
+type SummaryReadOptions = {
+  readLog?: boolean;
+  artifactDir?: string;
+  logDir?: string;
+};
 
 function readLogTail(filePath: string, maxBytes = 8192): string {
   try {
@@ -47,8 +74,13 @@ function readLogTail(filePath: string, maxBytes = 8192): string {
   }
 }
 
-export function getLargeStepChunkingSummary(slug: string, readLog = false): LargeStepChunkingSummary | undefined {
-  const modelDir = getModelDir(slug);
+export function getLargeStepChunkingSummary(
+  slug: string,
+  readOptions: boolean | SummaryReadOptions = false
+): LargeStepChunkingSummary | undefined {
+  const options = typeof readOptions === "boolean" ? { readLog: readOptions } : readOptions;
+  const readLog = options.readLog ?? false;
+  const modelDir = options.artifactDir ?? getModelDir(slug);
   const manifestPath = path.join(modelDir, "manifest.json");
   const statsPath = path.join(modelDir, "stats.json");
 
@@ -103,14 +135,35 @@ export function getLargeStepChunkingSummary(slug: string, readLog = false): Larg
   // Extract optimization sizes
   if (optimization) {
     summary.rawGlbBytes = optimization.rawSizeBytes;
+    summary.candidateGlbBytes = optimization.candidateSizeBytes;
     summary.finalGlbBytes = optimization.displaySizeBytes;
+    summary.bytesSaved = optimization.bytesSaved ?? Math.max(0, Number(optimization.rawSizeBytes ?? 0) - Number(optimization.displaySizeBytes ?? 0));
     summary.meshoptReductionPercent = optimization.reductionPercent;
+    summary.compressionRatio = optimization.compressionRatio;
+    summary.optimizationRequested = optimization.optimizationRequested ?? optimization.requestedMode === "meshopt";
+    summary.optimizationEnabled = optimization.optimizationEnabled ?? optimization.requestedMode === "meshopt";
+    summary.meshoptStatus = optimization.status;
+    summary.optimizer = optimization.optimizer ?? optimization.tool;
+    summary.validationPassed = optimization.validation?.passed;
+    summary.validationMessage = optimization.validation?.message;
+    summary.fallbackReason = optimization.fallbackReason ?? (optimization.fallbackUsed ? optimization.message : undefined);
+    summary.finalUsesMeshoptCompression = optimization.finalUsesMeshoptCompression ?? optimization.compression?.used ?? false;
+    summary.compressedBufferViews = optimization.compression?.compressedBufferViews;
   } else if (stats?.outputGlbSizeBytes !== undefined) {
     summary.finalGlbBytes = stats.outputGlbSizeBytes;
-    if (stats?.sourceFileSizeBytes !== undefined) {
-      summary.rawGlbBytes = stats.sourceFileSizeBytes;
-    }
   }
+  const sourceBytes = stats?.sourceFileSizeBytes;
+  const backend = optimization?.backend ?? manifest?.converterBackend ?? stats?.converterBackend;
+  const qualityPreset = optimization?.qualityPreset ?? manifest?.quality ?? stats?.qualityPreset ?? stats?.semanticQuality;
+  const colourMode = optimization?.colourMode ?? stats?.colourMode;
+  const triangleCount = optimization?.triangleCount ?? stats?.triangleCount;
+  const meshReuse = optimization?.meshReuse ?? stats?.meshReuse;
+  if (sourceBytes !== undefined) summary.sourceBytes = sourceBytes;
+  if (backend !== undefined) summary.backend = backend;
+  if (qualityPreset !== undefined) summary.qualityPreset = qualityPreset;
+  if (colourMode !== undefined && colourMode !== null) summary.colourMode = colourMode;
+  if (triangleCount !== undefined && triangleCount !== null) summary.triangleCount = triangleCount;
+  if (meshReuse !== undefined && meshReuse !== null) summary.meshReuse = meshReuse;
 
   // Fallback total duration to baseline processing seconds if not present
   if (summary.totalWallClockSeconds === undefined && typeof stats?.processingSeconds === "number") {
@@ -123,9 +176,10 @@ export function getLargeStepChunkingSummary(slug: string, readLog = false): Larg
 
   if (readLog) {
     const logFilePath = [
+      options.logDir ? path.join(options.logDir, "conversion.log") : "",
       path.join(getLogDir(slug), "conversion.log"),
       path.join(getWorkerOutputDir(slug), "conversion.log")
-    ].find((candidate) => fs.existsSync(candidate));
+    ].find((candidate) => candidate && fs.existsSync(candidate));
 
     if (logFilePath) {
       const logContent = readLogTail(logFilePath);
@@ -188,6 +242,7 @@ export function getLargeStepChunkingSummary(slug: string, readLog = false): Larg
   const decisionReasons = summary.decisionReasons;
 
   if (processingProgress) {
+    summary.processingProgress = processingProgress;
     summary.label = processingProgress;
   } else if (mode === "auto" && status === "skipped") {
     summary.label = "Auto skipped";
@@ -230,6 +285,22 @@ export function getLargeStepChunkingSummary(slug: string, readLog = false): Larg
         summary.detailLabel = logFallbackReason;
       }
     }
+  }
+
+  if (summary.meshoptStatus === "applied") {
+    summary.optimizationLabel = "Meshopt applied";
+    summary.optimizationDetailLabel = summary.meshoptReductionPercent !== undefined
+      ? `${summary.meshoptReductionPercent}% smaller`
+      : undefined;
+  } else if (summary.meshoptStatus === "disabled") {
+    summary.optimizationLabel = "Raw GLB";
+    summary.optimizationDetailLabel = "Meshopt disabled";
+  } else if (summary.meshoptStatus === "skipped-not-smaller") {
+    summary.optimizationLabel = "Raw GLB fallback";
+    summary.optimizationDetailLabel = "candidate not smaller";
+  } else if (summary.meshoptStatus === "failed") {
+    summary.optimizationLabel = "Raw GLB fallback";
+    summary.optimizationDetailLabel = "Meshopt failed";
   }
 
   // If we have no fields extracted at all, return undefined

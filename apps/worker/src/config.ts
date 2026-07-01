@@ -76,7 +76,7 @@ export function loadConfig(argv = process.argv): WorkerConfig {
     throw new Error("MESHIQ_ADAPTIVE_MESH_PROFILE must be conservative, standard, or strong.");
   }
 
-  const glbOptimizationMode = process.env.GLB_OPTIMIZATION_MODE || "disabled";
+  const glbOptimizationMode = process.env.GLB_OPTIMIZATION_MODE || "meshopt";
   if (!["disabled", "meshopt"].includes(glbOptimizationMode)) {
     throw new Error("GLB_OPTIMIZATION_MODE must be disabled or meshopt.");
   }

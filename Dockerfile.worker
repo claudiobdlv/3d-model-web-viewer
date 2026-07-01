@@ -48,6 +48,6 @@ ENV XCAF_COLOUR_MODE=xcaf-baseline
 ENV CONVERTER_QUALITY=balanced
 ENV MATERIAL_RULES_MODE=fallback
 ENV MATERIAL_RULES_PATH=/app/config/material-rules.json
-ENV GLB_OPTIMIZATION_MODE=disabled
+ENV GLB_OPTIMIZATION_MODE=meshopt
 
 CMD ["npm", "start"]

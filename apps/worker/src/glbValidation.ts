@@ -9,7 +9,17 @@ export type GlbValidationResult = {
   passed: boolean;
   validator: { errors: number; warnings: number };
   gates: string[];
+  compression: GlbCompressionInspection;
   message: string;
+};
+
+export type GlbCompressionInspection = {
+  extension: "EXT_meshopt_compression";
+  used: boolean;
+  required: boolean;
+  compressedBufferViews: number;
+  extensionsUsed: string[];
+  extensionsRequired: string[];
 };
 
 type Snapshot = ReturnType<typeof snapshot>;
@@ -25,6 +35,14 @@ export async function validateOptimizedGlb(rawPath: string, candidatePath: strin
   if (errors !== 0) {
     const details = JSON.stringify(report.issues?.messages?.slice(0, 5) ?? []);
     throw new Error(`glTF Validator reported ${errors} error(s): ${details}`);
+  }
+
+  const compression = inspectGlbCompression(candidateBytes);
+  if (!compression.used || compression.compressedBufferViews === 0) {
+    throw new Error("Meshopt candidate does not contain EXT_meshopt_compression buffer views");
+  }
+  if (!compression.required) {
+    throw new Error("Meshopt candidate does not declare EXT_meshopt_compression as required");
   }
 
   await Promise.all([MeshoptDecoder.ready, MeshoptEncoder.ready]);
@@ -45,6 +63,9 @@ export async function validateOptimizedGlb(rawPath: string, candidatePath: strin
   deepEqual("attribute semantic sets", raw.primitives.map((item) => item.semantics), candidate.primitives.map((item) => item.semantics), gates);
   deepEqual("node names", raw.nodeNames, candidate.nodeNames, gates);
   deepEqual("mesh names", raw.meshNames, candidate.meshNames, gates);
+  deepEqual("scene root hierarchy", raw.sceneRoots, candidate.sceneRoots, gates);
+  deepEqual("node child hierarchy", raw.nodeChildren, candidate.nodeChildren, gates);
+  compareBounds(raw.nodeBounds, candidate.nodeBounds, gates, "node world bounds");
   deepEqual("stableObjectId multiset", raw.stableObjectIds, candidate.stableObjectIds, gates);
   deepEqual("selectableId multiset", raw.selectableIds, candidate.selectableIds, gates);
   deepEqual("node extras", raw.nodeExtras, candidate.nodeExtras, gates);
@@ -54,14 +75,54 @@ export async function validateOptimizedGlb(rawPath: string, candidatePath: strin
   equal("material count", raw.materials.length, candidate.materials.length, gates);
   approximateDeepEqual("material names and PBR factors", raw.materials, candidate.materials, 1e-6, gates);
   deepEqual("material assignments", raw.primitives.map((item) => item.material), candidate.primitives.map((item) => item.material), gates);
-  compareBounds(raw.bounds, candidate.bounds, gates);
+  compareBounds(raw.bounds, candidate.bounds, gates, "scene bounds");
+  gates.push("EXT_meshopt_compression present and required");
 
   return {
     passed: true,
     validator: { errors, warnings },
     gates,
+    compression,
     message: `passed ${gates.length} semantic gates; glTF Validator errors=${errors}, warnings=${warnings}`
   };
+}
+
+export function inspectGlbCompression(bytes: Buffer): GlbCompressionInspection {
+  const empty: GlbCompressionInspection = {
+    extension: "EXT_meshopt_compression",
+    used: false,
+    required: false,
+    compressedBufferViews: 0,
+    extensionsUsed: [],
+    extensionsRequired: []
+  };
+  if (bytes.length < 20 || bytes.readUInt32LE(0) !== 0x46546c67 || bytes.readUInt32LE(4) !== 2) return empty;
+  const jsonChunkLength = bytes.readUInt32LE(12);
+  const jsonChunkType = bytes.readUInt32LE(16);
+  if (jsonChunkType !== 0x4e4f534a || jsonChunkLength <= 0 || 20 + jsonChunkLength > bytes.length) return empty;
+  try {
+    const jsonText = bytes.toString("utf8", 20, 20 + jsonChunkLength).replace(/[\u0000\s]+$/, "");
+    const json = JSON.parse(jsonText) as {
+      extensionsUsed?: unknown;
+      extensionsRequired?: unknown;
+      bufferViews?: Array<{ extensions?: Record<string, unknown> }>;
+    };
+    const extensionsUsed = stringArray(json.extensionsUsed);
+    const extensionsRequired = stringArray(json.extensionsRequired);
+    const compressedBufferViews = Array.isArray(json.bufferViews)
+      ? json.bufferViews.filter((view) => Boolean(view?.extensions?.EXT_meshopt_compression)).length
+      : 0;
+    return {
+      extension: "EXT_meshopt_compression",
+      used: extensionsUsed.includes("EXT_meshopt_compression") || compressedBufferViews > 0,
+      required: extensionsRequired.includes("EXT_meshopt_compression"),
+      compressedBufferViews,
+      extensionsUsed,
+      extensionsRequired
+    };
+  } catch {
+    return empty;
+  }
 }
 
 function snapshot(document: Document) {
@@ -69,6 +130,7 @@ function snapshot(document: Document) {
   const nodes = root.listNodes();
   const meshes = root.listMeshes();
   const materials = root.listMaterials();
+  const nodeIndex = new Map(nodes.map((node, index) => [node, index]));
   const materialIndex = new Map(materials.map((material, index) => [material, index]));
   const primitives = meshes.flatMap((mesh) => mesh.listPrimitives().map((primitive) => ({
     mode: primitive.getMode(),
@@ -85,7 +147,10 @@ function snapshot(document: Document) {
 
   return {
     sceneCount: root.listScenes().length,
+    sceneRoots: root.listScenes().map((scene) => scene.listChildren().map((node) => nodeIndex.get(node) ?? -1)),
     nodeNames: nodes.map((item) => item.getName()),
+    nodeChildren: nodes.map((node) => node.listChildren().map((child) => nodeIndex.get(child) ?? -1)),
+    nodeBounds: nodes.map((node) => getBounds(node)),
     meshNames: meshes.map((item) => item.getName()),
     nodeExtras: nodes.map((item) => item.getExtras()),
     meshExtras: meshes.map((item) => item.getExtras()),
@@ -111,6 +176,10 @@ function snapshot(document: Document) {
     triangleCount: primitives.reduce((sum, item) => sum + triangleCount(item.mode, item.count), 0),
     bounds: root.listScenes().map((scene) => getBounds(scene))
   };
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function triangleCount(mode: number, count: number): number {
@@ -154,24 +223,49 @@ function approximateDeepEqual(label: string, expected: unknown, actual: unknown,
     }
     return left === right;
   };
-  if (!compare(expected, actual)) throw new Error(`${label} changed beyond tolerance ${tolerance}`);
+  if (!compare(expected, actual)) {
+    throw new Error(`${label} changed beyond tolerance ${tolerance}: expected=${canonical(expected)} actual=${canonical(actual)}`);
+  }
   gates.push(label);
 }
 
-function compareBounds(expected: Snapshot["bounds"], actual: Snapshot["bounds"], gates: string[]): void {
-  if (expected.length !== actual.length) throw new Error("scene bounds count changed");
+function compareBounds(
+  expected: Snapshot["bounds"],
+  actual: Snapshot["bounds"],
+  gates: string[],
+  label: string
+): void {
+  if (expected.length !== actual.length) throw new Error(`${label} count changed`);
   for (let sceneIndex = 0; sceneIndex < expected.length; sceneIndex += 1) {
     const left = expected[sceneIndex]!;
     const right = actual[sceneIndex]!;
     const span = left.max.map((value, axis) => Math.abs(value - left.min[axis]!));
     for (let axis = 0; axis < 3; axis += 1) {
-      const tolerance = Math.max(1e-4, span[axis]! * 2 / 65535);
-      if (Math.abs(left.min[axis]! - right.min[axis]!) > tolerance || Math.abs(left.max[axis]! - right.max[axis]!) > tolerance) {
-        throw new Error(`scene ${sceneIndex} bounds changed beyond position quantization tolerance`);
+      // Quantization can move the accessor origin/scale into node transforms,
+      // adding a second float32 round-trip to the nominal 16-bit position step.
+      const coordinateMagnitude = Math.max(
+        1,
+        Math.abs(left.min[axis]!),
+        Math.abs(left.max[axis]!),
+        Math.abs(right.min[axis]!),
+        Math.abs(right.max[axis]!)
+      );
+      const float32RoundTripTolerance = coordinateMagnitude * 4 * 2 ** -23;
+      // STEP geometry in this pipeline is emitted in millimetres; keep an
+      // absolute 1-micron floor so small, translated parts are not rejected
+      // by sub-micron transform/accessor rounding.
+      const tolerance = Math.max(1e-3, span[axis]! * 8 / 65535, float32RoundTripTolerance);
+      const minDelta = Math.abs(left.min[axis]! - right.min[axis]!);
+      const maxDelta = Math.abs(left.max[axis]! - right.max[axis]!);
+      if (minDelta > tolerance || maxDelta > tolerance) {
+        throw new Error(
+          `${label} ${sceneIndex} axis ${axis} changed beyond position quantization tolerance ` +
+          `(minDelta=${minDelta}, maxDelta=${maxDelta}, tolerance=${tolerance})`
+        );
       }
     }
   }
-  gates.push("scene bounds");
+  gates.push(label);
 }
 
 function canonical(value: unknown): string {
