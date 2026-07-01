@@ -17,8 +17,19 @@
 //
 // USAGE (run from apps/server so `pg` resolves):
 //   cd apps/server
+//   # Always review a dry run first — makes no writes, no matter what:
 //   DATABASE_URL=postgres://... DATA_DIR=/app/data \
-//     node scripts/assign-models-to-default-org.mjs --owner-email you@example.com [--dry-run]
+//     node scripts/assign-models-to-default-org.mjs --owner-email you@example.com --dry-run
+//
+//   # Real run requires an explicit backup acknowledgement (see below):
+//   DATABASE_URL=postgres://... DATA_DIR=/app/data \
+//     node scripts/assign-models-to-default-org.mjs --owner-email you@example.com \
+//     --require-backup-confirmation
+//
+// SAFETY GUARD: a real (non---dry-run) invocation refuses to write anything
+// unless --require-backup-confirmation is also passed. This is a deliberate
+// speed bump, not a technical backup check — it does not itself take or verify
+// a backup. Take the backups first (see docs/accounts-enable-runbook.md).
 //
 // ROLLBACK: restore the SQLite backup, or run:
 //   UPDATE models SET organization_id = NULL, created_by_user_id = NULL
@@ -28,6 +39,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
+import { getAssignmentCounts, findSuspiciousModels } from "./lib/modelAssignmentReport.mjs";
 
 function arg(name, fallback) {
   const idx = process.argv.indexOf(`--${name}`);
@@ -43,8 +55,17 @@ async function main() {
   const dryRun = hasFlag("dry-run");
   const createOwner = hasFlag("create-owner");
   const orgName = arg("org-name", "Personal Workspace");
+  const backupConfirmed = hasFlag("require-backup-confirmation");
 
   if (!ownerEmail) throw new Error("--owner-email is required.");
+  if (!dryRun && !backupConfirmed) {
+    throw new Error(
+      "Refusing to write: a real run requires --require-backup-confirmation.\n" +
+        "  This is a speed bump, not a backup check — confirm you have BOTH a SQLite\n" +
+        "  and a PostgreSQL backup before passing it. Re-run with --dry-run first if\n" +
+        "  you have not already reviewed one."
+    );
+  }
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");
   const dataDir = process.env.DATA_DIR;
@@ -53,7 +74,7 @@ async function main() {
   const sqlitePath = path.join(path.resolve(dataDir), "db", "app.sqlite");
   console.log(`SQLite: ${sqlitePath}`);
   console.log(`Owner:  ${ownerEmail}`);
-  console.log(dryRun ? "Mode:   DRY RUN (no writes)\n" : "Mode:   APPLY\n");
+  console.log(dryRun ? "Mode:   DRY RUN (no writes)\n" : "Mode:   APPLY (backup confirmed)\n");
 
   const pool = new Pool({ connectionString: databaseUrl });
   const db = new DatabaseSync(sqlitePath);
@@ -71,18 +92,22 @@ async function main() {
       userId = crypto.randomUUID();
       if (!dryRun) {
         await pool.query("INSERT INTO users (id, primary_email, status) VALUES ($1, $2, 'active')", [userId, ownerEmail]);
+        console.log(`Created placeholder owner user ${userId}`);
+      } else {
+        console.log(`Would create placeholder owner user for ${ownerEmail} (dry run)`);
       }
-      console.log(`Created placeholder owner user ${userId}`);
     }
 
-    // 2. Resolve (or create) the owner's default workspace.
+    // 2. Resolve (or plan) the owner's default workspace.
     let orgRes = await pool.query(
-      "SELECT id FROM organizations WHERE owner_user_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1",
+      "SELECT id, name FROM organizations WHERE owner_user_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1",
       [userId]
     );
     let orgId = orgRes.rows[0]?.id;
+    let resolvedOrgName = orgRes.rows[0]?.name;
     if (!orgId) {
       orgId = crypto.randomUUID();
+      resolvedOrgName = orgName;
       const slug = `${ownerEmail.split("@")[0].replace(/[^a-z0-9]+/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
       if (!dryRun) {
         await pool.query("INSERT INTO organizations (id, name, slug, owner_user_id) VALUES ($1, $2, $3, $4)", [orgId, orgName, slug, userId]);
@@ -90,23 +115,38 @@ async function main() {
           "INSERT INTO organization_memberships (id, organization_id, user_id, role, status) VALUES ($1, $2, $3, 'owner', 'active') ON CONFLICT (organization_id, user_id) DO NOTHING",
           [crypto.randomUUID(), orgId, userId]
         );
+        console.log(`Created default workspace ${orgId} ("${orgName}")`);
+      } else {
+        console.log(`Would create default workspace "${orgName}" (id assigned at apply time; dry run)`);
       }
-      console.log(`Created default workspace ${orgId} ("${orgName}")`);
     } else {
-      console.log(`Using existing workspace ${orgId}`);
+      console.log(`Using existing workspace ${orgId} ("${resolvedOrgName}")`);
     }
 
-    // 3. Stamp unassigned models.
-    const before = db.prepare("SELECT COUNT(*) AS n FROM models WHERE organization_id IS NULL").get().n;
-    console.log(`\nModels without a workspace: ${before}`);
-    if (!dryRun && before > 0) {
+    // 3. Report current assignment state (before any write).
+    const { totalModels, unassigned, alreadyAssigned } = getAssignmentCounts(db);
+    console.log(`\nTarget workspace:            ${orgId} ("${resolvedOrgName ?? orgName}")`);
+    console.log(`Total models:                ${totalModels}`);
+    console.log(`Already assigned:            ${alreadyAssigned}`);
+    console.log(`Would be assigned this run:  ${unassigned}`);
+
+    const suspicious = findSuspiciousModels(db);
+    if (suspicious.length) {
+      console.log(`\nSuspicious models (${suspicious.length}) — review before applying:`);
+      for (const line of suspicious) console.log(`  - ${line}`);
+    } else {
+      console.log("\nNo suspicious models found.");
+    }
+
+    // 4. Stamp unassigned models (real run only).
+    if (!dryRun && unassigned > 0) {
       const result = db
         .prepare("UPDATE models SET organization_id = ?, created_by_user_id = COALESCE(created_by_user_id, ?) WHERE organization_id IS NULL")
         .run(orgId, userId);
-      console.log(`Updated ${result.changes} model rows.`);
+      console.log(`\nUpdated ${result.changes} model rows.`);
     }
 
-    // 4. Verify completeness — fail loudly if partially complete.
+    // 5. Verify completeness — fail loudly if partially complete.
     if (!dryRun) {
       const remaining = db.prepare("SELECT COUNT(*) AS n FROM models WHERE organization_id IS NULL").get().n;
       if (remaining > 0) {
@@ -114,7 +154,8 @@ async function main() {
       }
       console.log("\nAll models are assigned. organization_id =", orgId);
     } else {
-      console.log("\nDry run complete. Re-run without --dry-run to apply.");
+      console.log("\nDry run complete. No database was modified.");
+      console.log("Re-run with --require-backup-confirmation (after taking backups) to apply.");
     }
   } finally {
     db.close();

@@ -7,7 +7,9 @@ organizations/workspaces, and workspace-scoped admin access — all
 nothing changes: the legacy `ADMIN_PASSWORD` Basic-auth admin flow and every
 existing SQLite model/job/share flow behave exactly as before.
 
-This document is the runbook for turning accounts on later.
+This document describes what the accounts layer *is*. For the step-by-step
+operational checklist to turn it on (and roll it back) later, see
+[docs/accounts-enable-runbook.md](accounts-enable-runbook.md).
 
 ## This phase is Google-only
 
@@ -159,8 +161,17 @@ docker compose \
   up -d --build
 ```
 
-Then update the service-name guard in `scripts/deploy-elitedesk.sh` to allow
-`postgres` (currently it asserts exactly `server`+`worker`).
+Or, via the deploy script's built-in opt-in overlay (see
+[docs/accounts-enable-runbook.md](accounts-enable-runbook.md)):
+
+```
+INCLUDE_POSTGRES=true ./scripts/deploy-elitedesk.sh
+# or: ./scripts/deploy-elitedesk.sh --with-postgres
+```
+
+The script's service-name guard now accepts exactly `postgres`+`server`+`worker`
+when the overlay is requested, and still asserts exactly `server`+`worker`
+otherwise — the default deploy path is unchanged.
 
 Migrations run automatically on server startup when `AUTH_ENABLED=true`
 (`schema_migrations` tracks applied files; re-runs are no-ops).
@@ -174,10 +185,18 @@ Migrations run automatically on server startup when `AUTH_ENABLED=true`
 ```
 DATABASE_URL=postgres://... DATA_DIR=/app/data \
   node scripts/assign-models-to-default-org.mjs --owner-email you@example.com --dry-run
-# review, then drop --dry-run
+# review target workspace, counts, and any "suspicious models" flagged, then:
+DATABASE_URL=postgres://... DATA_DIR=/app/data \
+  node scripts/assign-models-to-default-org.mjs --owner-email you@example.com \
+  --require-backup-confirmation
 ```
 
-The script is repeatable and fails loudly if any model remains unassigned.
+The script is repeatable and fails loudly if any model remains unassigned. A
+real (non-dry-run) invocation refuses to write anything unless
+`--require-backup-confirmation` is also passed — this is a deliberate speed
+bump, not an automated backup check, so take the SQLite + Postgres backups
+first. See
+[docs/accounts-enable-runbook.md](accounts-enable-runbook.md#backup-sqlite-before-assignment).
 
 ---
 
@@ -404,12 +423,21 @@ node scripts/accounts-preflight.mjs --json        # machine-readable
 
 It reports: `AUTH_ENABLED`, `AUTH_PROVIDERS`, `SESSION_COOKIE_SECURE`, presence
 (not values) of `AUTH_ALLOWED_EMAILS` (with entry count), `APP_BASE_URL`,
-`SESSION_SECRET`, `DATABASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; the
-count of SQLite models missing `organization_id` plus a dry-run assignment
-status; the active public-share count; and, with `--check-db`, whether the
-Postgres `schema_migrations` table exists (without applying anything). Exit code
-is `0` for a completed check (including "NOT READY") and non-zero only when
-`--check-db` connectivity fails.
+`SESSION_SECRET`, `DATABASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; a
+per-provider summary (allow-listed / credentials present / usable, for both
+`google` and `microsoft`); a secure-cookie readiness summary keyed off
+`NODE_ENV` + `SESSION_COOKIE_SECURE` (`PASS`/`WARN`/`FAIL`); the count of SQLite
+models missing `organization_id` (plus how many are already assigned) and a
+dry-run assignment status; the active public-share **count only** (never
+tokens); and, with `--check-db`, whether the Postgres `schema_migrations` table
+exists (without applying anything).
+
+Output includes an overall `status` of `PASS` / `WARN` / `FAIL`:
+`FAIL` means a hard blocker (missing required env), `WARN` means something
+worth checking before enabling (e.g. `--check-db` not passed, `NODE_ENV` isn't
+`production` yet, Microsoft allow-listed unexpectedly), `PASS` means no
+blockers or warnings. Exit code is `0` for a completed check (including `FAIL`)
+and non-zero only when `--check-db` connectivity fails.
 
 ### Remaining steps before enabling Google login
 
@@ -424,7 +452,8 @@ on later (see the [runbook](#enabling-accounts-later-runbook) for full detail):
 3. Bring up the Postgres compose overlay; let migrations run on startup.
 4. Run `node scripts/accounts-preflight.mjs --check-db` and confirm **READY**.
 5. Sign in once as the owner, back up SQLite + Postgres, then run
-   `assign-models-to-default-org.mjs` (dry-run first) to stamp existing models.
+   `assign-models-to-default-org.mjs --dry-run` to review, then re-run with
+   `--require-backup-confirmation` to apply.
 6. Set `AUTH_ENABLED=true` and redeploy.
 
 ### Rollback notes
