@@ -1,9 +1,11 @@
 import type { AuthStore } from "./store.js";
 import { generateSessionToken, hashToken, isValidSessionToken } from "./tokens.js";
 import type {
+  AuditEvent,
   AuthContext,
   Membership,
   Organization,
+  Provider,
   ProviderProfile,
   Session,
   User
@@ -294,6 +296,42 @@ export class AuthService {
       organizationId: null,
       metadata: { provider, phase }
     });
+  }
+
+  // The provider the user most recently used to sign in. Phase 1 is
+  // single-identity-per-user (account linking is Phase 2), so this is
+  // effectively "the" provider for the account today.
+  async getPrimaryProvider(userId: string): Promise<Provider | null> {
+    const identities = await this.store.listIdentitiesForUser(userId);
+    return identities[0]?.provider ?? null;
+  }
+
+  // Most-recent-first, capped, org-scoped audit trail for the admin-visible
+  // security log. Never accepts an "all organizations" mode.
+  async listRecentAuditEvents(organizationId: string, limit = 50): Promise<AuditEvent[]> {
+    return this.store.listAuditEventsForOrganization(organizationId, limit);
+  }
+
+  // Active (non-revoked, non-expired) sessions for the self-service device list.
+  async listActiveSessions(userId: string): Promise<Session[]> {
+    return this.store.listActiveSessionsForUser(userId);
+  }
+
+  // Revokes a session owned by `userId`. Returns false if there is no matching
+  // active session — whether because it's already gone or belongs to someone
+  // else is intentionally indistinguishable to the caller.
+  async revokeOwnSession(userId: string, sessionId: string): Promise<boolean> {
+    const sessions = await this.store.listActiveSessionsForUser(userId);
+    const target = sessions.find((session) => session.id === sessionId);
+    if (!target) return false;
+    await this.store.revokeSession(target.id);
+    await this.store.recordAuditEvent({
+      eventType: "session.revoked",
+      userId,
+      organizationId: target.active_organization_id,
+      metadata: { sessionId: target.id, reason: "user_revoked_other" }
+    });
+    return true;
   }
 
   async logout(rawToken: string | undefined): Promise<void> {

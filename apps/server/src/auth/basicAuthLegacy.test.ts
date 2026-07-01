@@ -49,4 +49,17 @@ test("AUTH_ENABLED=false preserves the legacy Basic-auth admin flow", async (t) 
     headers: { authorization: `Basic ${Buffer.from("admin:test-password").toString("base64")}` }
   });
   assert.equal(rightAuth.status, 200);
+
+  // The accounts router (and everything it mounts) is entirely absent while
+  // AUTH_ENABLED=false: /login and the new account-visibility endpoints 404
+  // rather than rendering or leaking any account-shaped response.
+  assert.equal((await fetch(`${origin}/login`)).status, 404);
+  assert.equal((await fetch(`${origin}/api/me`)).status, 404);
+  assert.equal((await fetch(`${origin}/api/sessions`)).status, 404);
+  assert.equal((await fetch(`${origin}/api/audit-events`)).status, 404);
+
+  // The static /privacy and /security pages are independent of the accounts
+  // flag and stay available.
+  assert.equal((await fetch(`${origin}/privacy`)).status, 200);
+  assert.equal((await fetch(`${origin}/security`)).status, 200);
 });

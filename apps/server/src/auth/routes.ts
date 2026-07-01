@@ -10,9 +10,9 @@ import {
   validateDiscoveryIssuer,
   verifyAndProfile
 } from "./oidc.js";
-import { parseCookies } from "./middleware.js";
+import { parseCookies, requireRole, requireSession } from "./middleware.js";
 import { RateLimiter, clientIp, loadAuthRateLimitConfig } from "./rateLimit.js";
-import type { Provider } from "./types.js";
+import type { AuditEvent, Provider } from "./types.js";
 
 const OAUTH_TXN_COOKIE = "modelbase_oauth_txn";
 const TXN_TTL_MS = 10 * 60 * 1000;
@@ -64,7 +64,42 @@ function clearSessionCookie(res: express.Response, config: AuthConfig): void {
   });
 }
 
-function renderLoginPage(config: AuthConfig, next: string, message?: string): string {
+// Copy for each recognized /login?error= code. email_not_allowed gets a
+// visually distinct "access denied" treatment (see renderStatusBlock) instead
+// of the generic red banner, and its copy deliberately never names the
+// allow-listed email(s) — only that this account is not one of them.
+const LOGIN_ERROR_COPY: Record<string, { heading?: string; body: string }> = {
+  email_not_allowed: {
+    heading: "This Google account isn't approved for this workspace",
+    body:
+      "No account was created. Ask your ModelBase workspace owner or admin to approve this email address, then try signing in again."
+  },
+  collision: {
+    body:
+      "An account already exists for this email with a different sign-in method. Please sign in with your original provider."
+  },
+  no_email: {
+    body: "Your Google account did not share a verified email address, which is required to sign in."
+  },
+  provider: {
+    body: "Sign-in was cancelled or the provider returned an error. Please try again."
+  }
+};
+const LOGIN_ERROR_DEFAULT = { body: "Sign-in could not be completed. Please try again." };
+
+function renderStatusBlock(errorCode: string | undefined): string {
+  if (!errorCode) return "";
+  const copy = LOGIN_ERROR_COPY[errorCode] ?? LOGIN_ERROR_DEFAULT;
+  if (errorCode === "email_not_allowed") {
+    return `<div class="access-denied" role="alert">
+  <strong>${escapeHtml(copy.heading!)}</strong>
+  <p>${escapeHtml(copy.body)}</p>
+</div>`;
+  }
+  return `<div class="banner" role="alert">${escapeHtml(copy.body)}</div>`;
+}
+
+function renderLoginPage(config: AuthConfig, next: string, errorCode?: string): string {
   // Provider buttons reflect both the AUTH_PROVIDERS allow-list and whether
   // credentials are configured (config.providers already accounts for both —
   // see loadAuthConfig). Google-only is the default/intended provider list for
@@ -90,7 +125,7 @@ function renderLoginPage(config: AuthConfig, next: string, message?: string): st
       : "Sign in to manage your 3D models.";
   const privacyProviderText = providerNames.length ? providerNames.join(" or ") : "Google";
 
-  const banner = message ? `<div class="banner">${escapeHtml(message)}</div>` : "";
+  const statusBlock = renderStatusBlock(errorCode);
 
   return `<!doctype html>
 <html lang="en">
@@ -102,22 +137,31 @@ function renderLoginPage(config: AuthConfig, next: string, message?: string): st
 <style>
   :root { color-scheme: dark; }
   body { font: 16px/1.5 system-ui, sans-serif; background: #0b0d10; color: #f8fafc; margin: 0; display: grid; min-height: 100vh; place-items: center; }
-  main { width: min(92vw, 380px); padding: 2rem; background: #12161c; border: 1px solid #1f2630; border-radius: 16px; }
-  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-  .muted { color: #94a3b8; font-size: .9rem; }
-  .btn { display: block; text-align: center; padding: .8rem 1rem; margin: .6rem 0; background: #1d4ed8; color: #fff; border-radius: 10px; text-decoration: none; font-weight: 600; }
+  main { width: min(92vw, 400px); padding: 2.25rem 2rem; background: #12161c; border: 1px solid #1f2630; border-radius: 16px; }
+  .brand-mark { width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, #2563eb, #1d4ed8); display: grid; place-items: center; font-weight: 800; font-size: 1.05rem; margin-bottom: 1rem; }
+  h1 { font-size: 1.5rem; margin: 0 0 .35rem; letter-spacing: -.01em; }
+  .tagline { margin: 0 0 1.1rem; color: #cbd5e1; font-size: .95rem; }
+  .muted { color: #94a3b8; font-size: .85rem; margin: 0 0 1.1rem; }
+  .btn { display: flex; align-items: center; justify-content: center; gap: .5rem; text-align: center; padding: .85rem 1rem; margin: .5rem 0; background: #1d4ed8; color: #fff; border-radius: 10px; text-decoration: none; font-weight: 600; transition: background .12s ease; }
   .btn:hover { background: #2563eb; }
-  .banner { background: #7f1d1d; color: #fee2e2; padding: .7rem .9rem; border-radius: 10px; margin-bottom: 1rem; font-size: .9rem; }
-  .privacy { margin-top: 1.25rem; font-size: .8rem; color: #94a3b8; }
+  .banner { background: #7f1d1d; color: #fee2e2; padding: .75rem .9rem; border-radius: 10px; margin-bottom: 1rem; font-size: .88rem; line-height: 1.5; }
+  .access-denied { background: #3f2d0c; border: 1px solid #8a6416; color: #fde9b8; padding: .9rem 1rem; border-radius: 10px; margin-bottom: 1.1rem; }
+  .access-denied strong { display: block; font-size: .95rem; margin-bottom: .3rem; }
+  .access-denied p { margin: 0; font-size: .85rem; line-height: 1.5; color: #f3dca4; }
+  .security-note { margin-top: 1.4rem; padding-top: 1.1rem; border-top: 1px solid #1f2630; font-size: .78rem; line-height: 1.6; color: #8a97a8; }
+  .security-note a { color: #7fa8f5; text-decoration: none; }
+  .security-note a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 <main>
+  <div class="brand-mark">M</div>
   <h1>ModelBase</h1>
+  <p class="tagline">Private 3D model sharing for engineering teams.</p>
   <p class="muted">${escapeHtml(subtitle)}</p>
-  ${banner}
+  ${statusBlock}
   ${buttons}
-  <p class="privacy">Models are private by default. We only use your ${escapeHtml(privacyProviderText)} profile to identify your account. Public share links are explicit and revocable.</p>
+  <p class="security-note">Models are private by default. We only use your ${escapeHtml(privacyProviderText)} profile to identify your account — public share links are explicit and revocable. See <a href="/privacy">Privacy</a> and <a href="/security">Security</a>.</p>
 </main>
 </body>
 </html>`;
@@ -166,18 +210,9 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
       res.redirect(302, safeNext(req.query.next));
       return;
     }
-    let message: string | undefined;
-    if (req.query.error === "collision") {
-      message = "An account already exists for this email with a different sign-in method. Please sign in with your original provider.";
-    } else if (req.query.error === "no_email") {
-      message = "Your provider did not share a verified email address, which is required to sign in.";
-    } else if (req.query.error === "email_not_allowed") {
-      message = "This Google account is not approved for admin access. Contact an administrator if you believe this is a mistake.";
-    } else if (req.query.error) {
-      message = "Sign-in could not be completed. Please try again.";
-    }
+    const errorCode = typeof req.query.error === "string" ? req.query.error : undefined;
     res.setHeader("Cache-Control", "no-store");
-    res.type("html").send(renderLoginPage(config, safeNext(req.query.next), message));
+    res.type("html").send(renderLoginPage(config, safeNext(req.query.next), errorCode));
   });
 
   router.get("/auth/:provider/start", limit(oauthLimiter), async (req, res) => {
@@ -329,13 +364,14 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
       );
   });
 
-  // Current session info for the admin account menu.
-  router.get("/api/me", (req, res) => {
+  // Current session info for the admin account menu / account settings panel.
+  router.get("/api/me", async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     if (!req.auth) {
       res.status(401).json({ authenticated: false });
       return;
     }
+    const provider = await service.getPrimaryProvider(req.auth.user.id);
     res.json({
       authenticated: true,
       user: {
@@ -347,9 +383,92 @@ export function createAuthRouter(service: AuthService, config: AuthConfig): expr
       organization: req.auth.organization
         ? { id: req.auth.organization.id, name: req.auth.organization.name, slug: req.auth.organization.slug }
         : null,
-      role: req.auth.membership?.role ?? null
+      role: req.auth.membership?.role ?? null,
+      provider
     });
   });
 
+  // Self-service signed-in-devices list for the account settings panel. Only
+  // ever returns the caller's own sessions; token hashes and raw IP addresses
+  // are never included in the response.
+  router.get("/api/sessions", requireSession, async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const sessions = await service.listActiveSessions(req.auth!.user.id);
+    res.json({
+      sessions: sessions.map((session) => ({
+        id: session.id,
+        createdAt: session.created_at,
+        lastUsedAt: session.last_used_at,
+        current: session.id === req.auth!.session.id,
+        userAgent: summarizeUserAgent(session.user_agent)
+      }))
+    });
+  });
+
+  // Revokes one of the caller's OTHER sessions. The current session cannot be
+  // revoked here — use POST /auth/logout, which also clears the cookie.
+  router.post("/api/sessions/:id/revoke", requireSession, async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const sessionId = String(req.params.id);
+    if (sessionId === req.auth!.session.id) {
+      res.status(400).json({ error: "Use sign out to end your current session." });
+      return;
+    }
+    const revoked = await service.revokeOwnSession(req.auth!.user.id, sessionId);
+    if (!revoked) {
+      res.status(404).json({ error: "Session not found." });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  // Admin-visible security/audit log, scoped strictly to the caller's active
+  // organization. Never exposes tokens, cookies, secrets, OAuth payloads, or
+  // raw IP addresses — see sanitizeAuditMetadata below.
+  router.get("/api/audit-events", requireRole("admin"), async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const organizationId = req.auth!.organization?.id;
+    if (!organizationId) {
+      res.status(403).json({ error: "Active workspace membership required." });
+      return;
+    }
+    const events = await service.listRecentAuditEvents(organizationId);
+    res.json({ events: events.map(toSafeAuditEvent) });
+  });
+
   return router;
+}
+
+// Truncates and strips PII-adjacent fields from a User-Agent string. Kept
+// short and generic ("device/browser hint"), never used for fingerprinting.
+function summarizeUserAgent(userAgent: string | null): string | null {
+  if (!userAgent) return null;
+  return userAgent.length > 140 ? `${userAgent.slice(0, 140)}…` : userAgent;
+}
+
+// Keys that must never leave the server in an audit API response, even if a
+// future event type accidentally attaches one of them to `metadata`.
+const AUDIT_METADATA_DENYLIST = /token|secret|password|cookie|\bip\b|address|bearer|authorization/i;
+
+function sanitizeAuditMetadata(metadata: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!metadata) return null;
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (AUDIT_METADATA_DENYLIST.test(key)) continue;
+    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      safe[key] = typeof value === "string" && value.length > 200 ? `${value.slice(0, 200)}…` : value;
+    } else if (Array.isArray(value)) {
+      safe[key] = value.filter((entry) => typeof entry === "string" || typeof entry === "number").slice(0, 20);
+    }
+  }
+  return safe;
+}
+
+function toSafeAuditEvent(event: AuditEvent): { id: string; type: string; createdAt: string; metadata: Record<string, unknown> | null } {
+  return {
+    id: event.id,
+    type: event.event_type,
+    createdAt: event.created_at,
+    metadata: sanitizeAuditMetadata(event.metadata)
+  };
 }

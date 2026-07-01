@@ -51,6 +51,7 @@ import {
   resolveSourcePath
 } from "./storage.js";
 import { isDxfUploadEnabled } from "./featureFlags.js";
+import { renderPrivacyPage, renderSecurityPage } from "./publicPages.js";
 import {
   createAuthSubsystem,
   authorizeModelAccess,
@@ -160,6 +161,21 @@ app.get("/admin", requireAdmin, (_req, res) => {
 
 app.get("/", (_req, res) => {
   res.redirect(302, "/admin");
+});
+
+// Static informational pages, always available regardless of AUTH_ENABLED —
+// they carry no account data and are linked from the (feature-flagged)
+// /login page once accounts are turned on.
+app.get("/privacy", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  res.type("html").send(renderPrivacyPage());
+});
+
+app.get("/security", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  res.type("html").send(renderSecurityPage());
 });
 
 // Resolve the model targeted by a /api/models/:id/share route and enforce that

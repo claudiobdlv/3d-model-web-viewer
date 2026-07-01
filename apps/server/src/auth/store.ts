@@ -83,6 +83,15 @@ export interface AuthStore {
 
   // Audit
   recordAuditEvent(input: CreateAuditEventInput): Promise<AuditEvent>;
+  // Most-recent-first, scoped to a single organization, capped at `limit`. Used
+  // by the admin-visible audit/security log — never call without an
+  // organizationId (there is no "all orgs" variant to avoid accidental leaks).
+  listAuditEventsForOrganization(organizationId: string, limit: number): Promise<AuditEvent[]>;
+
+  // Sessions (listing)
+  // Non-revoked, non-expired sessions for a user, most-recently-used first.
+  // Used for the self-service "signed-in devices" list.
+  listActiveSessionsForUser(userId: string): Promise<Session[]>;
 
   // Runs `fn` so that every store write it performs commits or rolls back
   // together. The store passed to `fn` MUST be used for the writes that should
