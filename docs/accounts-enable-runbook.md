@@ -112,23 +112,78 @@ not necessarily blocking.
 
 ---
 
+## How to run the auth DB migrations explicitly (rehearsal)
+
+The server only runs the Postgres auth migrations at startup when
+`AUTH_ENABLED=true`. To rehearse (or pre-stage) the migrations **without**
+enabling accounts and **without** starting the web app, use the explicit
+runner:
+
+```bash
+cd apps/server
+# List the migrations that would run, open no connection (safe anywhere):
+DATABASE_URL=postgres://... node scripts/accounts-migrate-auth-db.mjs --dry-run
+
+# Apply them (requires Postgres reachable on DATABASE_URL):
+DATABASE_URL=postgres://... node scripts/accounts-migrate-auth-db.mjs
+```
+
+It reads the same `src/auth/migrations/*.sql` files the server applies, wraps
+each in its own transaction, and records them in `schema_migrations` so it is
+**idempotent** (re-running applies nothing). It does not read or set
+`AUTH_ENABLED`, does not start the HTTP server, does not touch the SQLite
+models database, and prints only migration file names and counts — never
+`DATABASE_URL` or any secret. Behaviour is covered by
+`scripts/accounts-migrate-auth-db.test.mjs` and
+`scripts/lib/authMigrations.test.mjs` (the latter exercises the apply/rollback
+logic against a fake pool, so no real Postgres is needed for tests).
+
+This is the recommended way to satisfy the model-assignment prerequisite
+"auth migrations have been applied" without flipping `AUTH_ENABLED`.
+
+---
+
 ## How to back up SQLite before assignment
 
 Before running the model-assignment script for real, back up **both**
-SQLite and Postgres:
+SQLite and Postgres.
+
+The app database runs in **WAL mode** (`PRAGMA journal_mode = WAL`), so a plain
+`cp app.sqlite` while the server is live can capture a torn/partial state (the
+most recent pages may still be in `app.sqlite-wal`). Use `VACUUM INTO`, which
+takes a read-consistent snapshot even with the server writing — this is the
+**recommended one-command backup**:
 
 ```bash
-# SQLite (from EliteDesk, with the stack running or stopped):
-cp /home/claudio/projects/3d-model-web-viewer/data/db/app.sqlite \
-   /home/claudio/projects/3d-model-web-viewer/data/db/app.sqlite.bak-$(date +%Y%m%d-%H%M%S)
+# WAL-safe SQLite snapshot, taken from INSIDE the running server container so it
+# uses the same node:sqlite the app uses (EliteDesk host has no sqlite3 CLI).
+cd /home/claudio/projects/3d-model-web-viewer
+TS=$(date +%Y%m%d-%H%M%S)
+docker compose -f deploy/docker-compose.elitedesk.yml exec -T server \
+  node -e "const {DatabaseSync}=require('node:sqlite'); \
+    const db=new DatabaseSync('/app/data/db/app.sqlite'); \
+    db.exec(\"VACUUM INTO '/app/data/db/app.sqlite.bak-${TS}'\"); \
+    db.close(); \
+    console.log('WAL-safe backup written: data/db/app.sqlite.bak-'+'${TS}');"
+# The snapshot lands in the bind-mounted data/db/ on the host.
+```
 
-# Postgres (logical dump, requires the postgres container running):
-docker exec <postgres-container-name> \
-  pg_dump -U modelbase modelbase > postgres-modelbase-$(date +%Y%m%d-%H%M%S).sql
+If the stack is stopped, a plain copy of all three files is also safe:
+
+```bash
+cp data/db/app.sqlite{,-wal,-shm} /some/backup/dir/   # only when server is stopped
+```
+
+Postgres backup (logical dump, requires the postgres overlay running):
+
+```bash
+docker compose -f deploy/docker-compose.elitedesk.yml -f deploy/docker-compose.postgres.yml \
+  exec -T postgres pg_dump -U modelbase modelbase \
+  > postgres-modelbase-$(date +%Y%m%d-%H%M%S).sql
 ```
 
 Keep these backups outside the repo (never commit them — `data/` and any
-`.sql`/`.sqlite` dump are excluded by `.gitignore` for this reason).
+`.sql`/`.sqlite`/`.bak-*` dump are excluded by `.gitignore` for this reason).
 
 ---
 
@@ -216,10 +271,129 @@ Instant, no data migration required:
 The accounts router, session resolution, rate limiters, and audit logging
 all stop running the moment the flag flips. The additive SQLite ownership
 columns and the (separate) Postgres auth tables are inert while disabled —
-nothing needs to be reverted in the database. If Postgres was only started
-for this rollout and you want to stop it too, that is a separate, explicit
-action (`docker compose -f deploy/docker-compose.postgres.yml down`) — not
-required for the rollback itself.
+nothing needs to be reverted in the database.
+
+Full rollback decision list (do only the steps that apply):
+
+1. **Always:** set `AUTH_ENABLED=false` (or remove the line) in `.env` and
+   redeploy the default stack (`./scripts/deploy-elitedesk.sh`).
+2. **Only if the real model-assignment script was actually run** (not a
+   dry-run) and you want to undo it: either restore the WAL-safe SQLite
+   snapshot taken before assignment, or run the targeted SQL from
+   [How to run real model assignment later](#how-to-run-real-model-assignment-later).
+   If assignment was never applied, do **not** restore SQLite — there is
+   nothing to undo and a restore would only risk losing legitimate newer
+   uploads.
+3. **Only if Postgres was started solely for this rollout** and you want to
+   stop it: `docker compose -f deploy/docker-compose.elitedesk.yml -f deploy/docker-compose.postgres.yml stop postgres`
+   (or `down` the postgres file). This is optional — a running, unused
+   Postgres with no host port is harmless. Never run a destructive
+   `docker volume rm` / delete of `data/postgres` as part of a rollback.
+
+---
+
+## Rehearsal results — Postgres/accounts enablement dry-run (2026-07-02)
+
+A production-style rehearsal was run against EliteDesk with accounts kept
+**disabled** (`AUTH_ENABLED` absent) throughout. No secrets were added, no
+OAuth credentials were configured, Postgres was **not** started, and the real
+model-assignment script was **not** run.
+
+**Production baseline (read-only, before any change):**
+
+- Git `da0b245` on `main`; `AUTH_ENABLED` absent in `.env`.
+- **No accounts env vars are set in production** — no `DATABASE_URL`, no
+  `POSTGRES_PASSWORD`/`POSTGRES_USER`/`POSTGRES_DB`, no `GOOGLE_*`, no
+  `SESSION_*`, no `AUTH_ALLOWED_EMAILS`.
+- `/health` → 200, `/admin` → 401 (legacy Basic auth), `/login` → 404.
+- Public/QR flow (token masked): `/public/:token` → 200,
+  `/public/:token/model.json` → 200, `/public/:token/model.glb` → 200
+  (~23 MB downloadable).
+- All other host services (Immich, Plex, Homepage, Portainer, Dozzle, Uptime
+  Kuma, the separate `meshiq-phase2c` stack) were running and left untouched.
+
+**1. Postgres overlay validation — PASS (validated, not started).**
+
+- `docker compose -f deploy/docker-compose.elitedesk.yml config --quiet` and the
+  same command with `-f deploy/docker-compose.postgres.yml` both validate
+  cleanly (the overlay validation passed a throwaway `POSTGRES_PASSWORD` on the
+  command line only — nothing was written to `.env`).
+- The `postgres` service declares **no published host port** (confirmed against
+  the rendered config) — it is reachable only on the project's Docker network.
+- It reads `POSTGRES_DB`/`POSTGRES_USER`/`POSTGRES_PASSWORD` from `.env` via
+  `env_file`/`${VAR}`; no credentials are hardcoded or committed.
+- Data path is `data/postgres` (inside the git-ignored `data/`); it has a
+  `pg_isready` healthcheck and `restart: unless-stopped`.
+- **Not started.** Bringing it up requires a real `POSTGRES_PASSWORD` in the
+  production `.env` (the compose file fails closed without it). Adding a
+  database-password secret is out of scope for this rehearsal and is deferred
+  to actual enablement.
+
+**2. Auth migration rehearsal — dry-run PASS; real apply deferred.**
+
+- New explicit runner `apps/server/scripts/accounts-migrate-auth-db.mjs`
+  applies `src/auth/migrations/*.sql` via `DATABASE_URL` without enabling auth,
+  starting the app, or touching SQLite.
+- `--dry-run` discovers the two migrations (`0001_auth_init.sql`,
+  `0002_audit_org_index.sql`) and opens no connection.
+- Apply/rollback/idempotency logic is unit-tested against a fake pool
+  (`scripts/lib/authMigrations.test.mjs`) — 8 tests pass, no real Postgres
+  needed.
+- A real apply is **deferred**: it needs a reachable Postgres, which is not
+  started (see item 1).
+
+**3. Accounts preflight — run read-only; reports as designed.**
+
+Preflight (inside the running server container, read-only) reported overall
+`FAIL` (expected while accounts env is absent) with:
+
+- `AUTH_ENABLED` unset → false; all required auth env `MISSING`; secure-cookie
+  status `WARN` (`NODE_ENV` unset).
+- SQLite: `totalModels = 37`, `modelsMissingOrganizationId = 37`,
+  `modelsAlreadyAssigned = 0`, `activePublicShares = 5`,
+  `assignmentDryRun = "37 model(s) would be stamped"`.
+- Postgres: not checked (`--check-db` would report "skipped — DATABASE_URL not
+  set" in the current environment).
+
+**4. Model assignment dry-run — SQLite side only (DB side deferred).**
+
+- The SQLite-side numbers that the assignment dry-run reports are already
+  produced read-only by preflight above: **37 would be assigned, 0 already
+  assigned, 5 active public shares, no suspicious models flagged.**
+- The full `assign-models-to-default-org.mjs --dry-run` additionally resolves
+  the owner/target-workspace from Postgres, so it cannot complete until
+  Postgres is up and an owner exists. That owner/workspace **cannot exist
+  without a Google sign-in** (or `--create-owner`), so it is a documented
+  blocker deferred to enablement — not forced here. The script was **not** run
+  against production.
+
+**5. Backup/rollback docs — updated in this pack.**
+
+- Added a **WAL-safe one-command SQLite backup** using `VACUUM INTO` (the app
+  runs `PRAGMA journal_mode = WAL`, so a plain `cp app.sqlite` of a live DB can
+  be torn) — see [How to back up SQLite before assignment](#how-to-back-up-sqlite-before-assignment).
+- Expanded the rollback section into an explicit decision list (flip
+  `AUTH_ENABLED=false` + redeploy default stack; restore SQLite **only** if the
+  real assignment was actually run; stop the Postgres overlay **only** if it was
+  started for the rollout) — see
+  [How to rollback](#how-to-rollback-to-auth_enabled-false).
+- Added `.gitignore` rules for `*.sqlite`, `*.sqlite.bak-*`, and
+  `postgres-*.sql` dumps so backups can't be committed by accident.
+
+### Remaining blockers before enabling Google login
+
+1. **Register the Google OAuth app** and obtain `GOOGLE_CLIENT_ID` /
+   `GOOGLE_CLIENT_SECRET` (deliberately out of scope until enablement).
+2. **Provision production accounts secrets in `.env`**: `DATABASE_URL`,
+   `POSTGRES_PASSWORD` (+ `POSTGRES_DB`/`POSTGRES_USER`), `SESSION_SECRET`,
+   `APP_BASE_URL`, `SESSION_COOKIE_SECURE=true`, `AUTH_ALLOWED_EMAILS`.
+3. **Start the Postgres overlay** (`--with-postgres`) and run
+   `accounts-migrate-auth-db.mjs` to apply the auth schema.
+4. **Sign in once** with an allow-listed Google email so the owner user +
+   Personal Workspace exist, then run the model-assignment **dry-run** for real
+   (still no writes) to review the 37-model plan.
+5. Only then take backups, run the real assignment, and flip
+   `AUTH_ENABLED=true` per the steps above.
 
 ---
 
