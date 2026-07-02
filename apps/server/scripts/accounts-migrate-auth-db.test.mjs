@@ -24,17 +24,19 @@ test("--help exits 0 and does not require DATABASE_URL", () => {
   assert.match(result.stdout, /Applies auth-layer Postgres migrations/);
 });
 
-test("missing DATABASE_URL fails clearly without touching Postgres", () => {
+test("a real (non-dry-run) apply fails clearly without DATABASE_URL, touching no Postgres", () => {
   const result = run([]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /DATABASE_URL is required/);
 });
 
-test("--dry-run lists migrations, opens no connection, and enables nothing", () => {
-  const result = run(["--dry-run"], { DATABASE_URL: "postgres://never-connected:5432/x" });
+test("--dry-run lists migrations without needing DATABASE_URL (safe anywhere)", () => {
+  // No DATABASE_URL in env: dry-run must still succeed and open no connection.
+  const result = run(["--dry-run"]);
   assert.equal(result.status, 0);
   assert.match(result.stdout, /DRY RUN: no database connection opened/);
   assert.match(result.stdout, /0001_auth_init\.sql/);
+  assert.doesNotMatch(result.stdout, /DATABASE_URL is required/);
   // The script itself must never set AUTH_ENABLED in its own environment.
   assert.equal(process.env.AUTH_ENABLED, undefined);
 });

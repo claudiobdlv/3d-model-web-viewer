@@ -36,9 +36,8 @@ if (hasFlag("help") || hasFlag("h")) {
 const dryRun = hasFlag("dry-run");
 
 async function main() {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) throw new Error("DATABASE_URL is required.");
-
+  // Listing the discovered migrations needs no connection, so --dry-run is safe
+  // anywhere (including hosts where DATABASE_URL is intentionally unset).
   const files = readMigrationFiles(defaultMigrationsDir);
   console.log(`Auth migrations directory: ${defaultMigrationsDir}`);
   console.log(`Discovered ${files.length} migration file(s):`);
@@ -49,6 +48,11 @@ async function main() {
     console.log("Re-run without --dry-run (with Postgres reachable) to apply.");
     return;
   }
+
+  // A real apply targets a database, so DATABASE_URL is required here (but not
+  // for --help / --dry-run above).
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) throw new Error("DATABASE_URL is required.");
 
   // Import pg lazily so --help / --dry-run / missing-DATABASE_URL paths never
   // require the driver to be installed or a connection to be attempted.
